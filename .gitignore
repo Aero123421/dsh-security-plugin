@@ -1,0 +1,8 @@
+node_modules/
+lib/
+coverage/
+bench/results/
+*.tgz
+.DS_Store
+*.log
+.dsh-security/

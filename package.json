@@ -1,0 +1,116 @@
+{
+  "name": "dsh-security-plugin",
+  "version": "0.1.0",
+  "description": "Evidence-driven AI security review for DeepSeek Harness: a Security sidebar, deterministic analyzers, read-only multi-agent review with host-verified evidence, and Markdown/JSON/SARIF reports.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "security",
+    "sast",
+    "code-review",
+    "ai-security",
+    "sarif"
+  ],
+  "license": "MIT",
+  "author": "DSH Security contributors",
+  "homepage": "https://github.com/dsh-security/dsh-security-plugin#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dsh-security/dsh-security-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dsh-security/dsh-security-plugin/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.js.map",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml",
+    "toolkit.lock.json",
+    "README.md",
+    "README.ja.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "bench": "node --experimental-strip-types --no-warnings bench/run.ts",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build && node scripts/verify-package.mjs",
+    "toolkit:pin": "node scripts/pin-toolkit.mjs",
+    "prepack": "npm run build && node scripts/verify-package.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.1-alpha.2 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "@ast-grep/napi": "0.50.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@deepseek-ai/cordis": "4.0.5-alpha.1",
+    "@deepseek-ai/dsh-client-connection": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-workspace": "0.2.1-alpha.2",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "22.20.5",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitest/coverage-v8": "4.1.11",
+    "esbuild": "0.28.2",
+    "happy-dom": "21.0.1",
+    "ignore": "7.0.12",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "packageManager": "pnpm@10.28.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
