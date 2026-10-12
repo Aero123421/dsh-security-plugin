@@ -1,0 +1,13 @@
+# Production requirements
+-r base.txt
+-e git+https://github.com/org/pkg.git#egg=pkg
+Django==4.2.7
+requests[security,socks]==2.31.0 ; python_version >= "3.8"
+Flask>=2.0,<3
+zope.interface==6.1  # trailing comment
+PyYAML
+--index-url https://pypi.org/simple
+numpy==1.26.* 
+cryptography==41.0.5 \
+    --hash=sha256:abc
+https://example.com/pkg.whl

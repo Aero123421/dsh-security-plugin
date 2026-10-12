@@ -1,0 +1,9 @@
+{
+  "name": "yarn-classic",
+  "dependencies": {
+    "minimist": "^1.2.0"
+  },
+  "devDependencies": {
+    "@babel/code-frame": "^7.0.0"
+  }
+}

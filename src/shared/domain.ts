@@ -6,15 +6,7 @@
 export const SCAN_MODES = ['quick', 'deep', 'research'] as const
 export type ScanMode = (typeof SCAN_MODES)[number]
 
-export const SCAN_STATUSES = [
-  'queued',
-  'running',
-  'paused',
-  'completed',
-  'failed',
-  'cancelled',
-  'interrupted',
-] as const
+export const SCAN_STATUSES = ['queued', 'running', 'paused', 'completed', 'failed', 'cancelled', 'interrupted'] as const
 export type ScanStatus = (typeof SCAN_STATUSES)[number]
 
 /** Scans that still own work and may be paused, resumed, or cancelled. */
@@ -156,7 +148,5 @@ export interface CodeRef {
 }
 
 export function formatCodeRef(ref: CodeRef): string {
-  return ref.startLine === ref.endLine
-    ? `${ref.path}:${ref.startLine}`
-    : `${ref.path}:${ref.startLine}-${ref.endLine}`
+  return ref.startLine === ref.endLine ? `${ref.path}:${ref.startLine}` : `${ref.path}:${ref.startLine}-${ref.endLine}`
 }

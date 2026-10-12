@@ -1,0 +1,12 @@
+{
+  "name": "no-lock",
+  "dependencies": {
+    "left-pad": "1.3.0",
+    "chalk": "^5.0.0",
+    "local": "file:../local",
+    "forked": "github:user/repo"
+  },
+  "devDependencies": {
+    "eslint": "~8.50.0"
+  }
+}

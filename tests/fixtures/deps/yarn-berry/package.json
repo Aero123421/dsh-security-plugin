@@ -1,0 +1,6 @@
+{
+  "name": "yarn-berry",
+  "dependencies": {
+    "lodash": "^4.17.21"
+  }
+}

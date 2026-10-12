@@ -153,7 +153,12 @@ export interface ScanUsage {
 }
 
 export interface Coverage {
-  readonly files: { readonly total: number; readonly analyzed: number; readonly readByAi: number; readonly excluded: number }
+  readonly files: {
+    readonly total: number
+    readonly analyzed: number
+    readonly readByAi: number
+    readonly excluded: number
+  }
   readonly endpoints: { readonly total: number; readonly reviewed: number }
   readonly tasks: {
     readonly planned: number
@@ -308,7 +313,11 @@ export interface FindingDetail extends FindingSummary {
   readonly evidence: readonly EvidenceView[]
   readonly counterevidence: readonly EvidenceView[]
   /** What the independent review concluded and why. */
-  readonly review?: { readonly verdict: 'confirmed' | 'refuted' | 'inconclusive'; readonly reasoning: string; readonly model: string }
+  readonly review?: {
+    readonly verdict: 'confirmed' | 'refuted' | 'inconclusive'
+    readonly reasoning: string
+    readonly model: string
+  }
   /** What could not be established (e.g. deployment configuration unknown). */
   readonly limitations: readonly string[]
   readonly references: readonly string[]
@@ -357,6 +366,8 @@ export interface ToolkitEntry {
     readonly sizeBytes?: number
     readonly sha256: string
   }
+  /** Present when a managed copy is installed in the plugin's toolkit directory. */
+  readonly installed?: { readonly version: string; readonly sha256: string }
   /** Manual installation guidance when no managed download exists. */
   readonly installHint: string
 }
@@ -393,7 +404,12 @@ export interface RpcMethods {
   }
   getFinding: { request: { readonly scanId: string; readonly findingId: string }; response: FindingDetail }
   setTriage: {
-    request: { readonly scanId: string; readonly findingId: string; readonly triage: TriageState; readonly note?: string }
+    request: {
+      readonly scanId: string
+      readonly findingId: string
+      readonly triage: TriageState
+      readonly note?: string
+    }
     response: FindingSummary
   }
   getFixPrompt: {
