@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      dev-tooling:
+        dependency-type: development
+        exclude-patterns:
+          - '@deepseek-ai/*'
+    ignore:
+      # DSH packages follow the supported DSH range; bump them deliberately (docs/releasing.md).
+      - dependency-name: '@deepseek-ai/*'
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

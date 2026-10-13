@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest a rule, framework, language, or product improvement.
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New or improved SAST rule
+        - Route framework support
+        - Secret detection
+        - Dependency ecosystem
+        - AI review / prompts
+        - UI / translation
+        - Reports
+        - Configuration / operations
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: |
+        For a rule: a minimal vulnerable example and a minimal safe look-alike (every rule needs both).
+        For a framework: how routes, prefixes and auth middleware are declared.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      description: DSH Security stays read-only and code-only by design (no exploitation, no running code, no network scanning).
+      options:
+        - label: This request fits within that scope.
+          required: true

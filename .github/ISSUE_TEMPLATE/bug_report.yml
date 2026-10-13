@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in DSH Security does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Security vulnerabilities in the plugin itself must not be reported here**; see SECURITY.md.
+        For a finding that is wrong (false positive), use the *False positive* template instead.
+        Do not paste real secrets or private source code.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Security, choose project …
+        2. New scan → Deep …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Errors and logs
+      description: |
+        Error codes shown in the UI (for example `security/no-model`), notices from the scan, and lines from the DSH Host log
+        that start with `dsh-security`. Remove tokens and paths you do not want to share.
+      render: text
+  - type: input
+    id: plugin-version
+    attributes:
+      label: DSH Security version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH version (`dsh --version`) and profile
+      placeholder: 0.2.1-alpha.2, web
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version and OS
+      placeholder: Node 22.19.0, macOS 15 (arm64)
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Scan mode
+      options: [Not scan-related, Quick, Deep, Research, Built-in analyzers only]
+  - type: input
+    id: model
+    attributes:
+      label: Model provider / model (if AI review is involved)
+      placeholder: deepseek-official / deepseek-v4-pro
+  - type: dropdown
+    id: access
+    attributes:
+      label: How is the page opened?
+      options: [On the Host machine (localhost), From another machine or through a proxy, DSH Desktop]

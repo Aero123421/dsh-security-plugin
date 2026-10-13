@@ -1,0 +1,18 @@
+# Normalize text to LF in the repository and in working trees on every OS.
+* text=auto eol=lf
+
+# Fixtures are evaluation data with exact line numbers, quotes and bytes:
+# check them out exactly as committed, without any conversion.
+tests/fixtures/** -text
+
+# Keep the intentionally vulnerable fixture apps out of language statistics.
+tests/fixtures/** linguist-vendored
+pnpm-lock.yaml linguist-generated
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.tgz binary
+*.zip binary

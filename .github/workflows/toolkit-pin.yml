@@ -1,0 +1,67 @@
+name: Toolkit pin
+
+# Downloads every asset in toolkit.lock.json, records its SHA-256 and size
+# (cross-checked against the upstream checksums file) and opens a pull request.
+# Review the diff like code: these hashes decide which binaries users run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: 'Only pin this tool id (gitleaks or osv-scanner); empty pins all'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Pin toolkit assets
+        shell: bash
+        env:
+          TOOL: ${{ inputs.tool }}
+        run: |
+          if [ -n "$TOOL" ]; then
+            node scripts/pin-toolkit.mjs --tool "$TOOL"
+          else
+            node scripts/pin-toolkit.mjs
+          fi
+
+      - name: Verify the new pins
+        shell: bash
+        env:
+          TOOL: ${{ inputs.tool }}
+        run: |
+          if [ -n "$TOOL" ]; then
+            node scripts/pin-toolkit.mjs --check --tool "$TOOL"
+          else
+            node scripts/pin-toolkit.mjs --check
+          fi
+
+      # Needs Settings → Actions → "Allow GitHub Actions to create and approve pull requests".
+      # Pull requests opened with GITHUB_TOKEN do not trigger CI; close and reopen the PR to run it.
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/toolkit-pin
+          delete-branch: true
+          commit-message: 'chore(toolkit): pin analyzer downloads'
+          title: 'chore(toolkit): pin analyzer downloads'
+          add-paths: toolkit.lock.json
+          body: |
+            Updates SHA-256 and size for the managed analyzer downloads in `toolkit.lock.json`, produced by
+            `node scripts/pin-toolkit.mjs` and re-checked with `--check`. Each hash was compared with the
+            upstream checksums file listed in `checksumsUrl`.
+
+            Before merging:
+            - [ ] Versions and URLs are the intended upstream releases.
+            - [ ] Every asset that should be installable has a non-null `sha256`.
+            - [ ] Spot-check at least one hash against the upstream release page.

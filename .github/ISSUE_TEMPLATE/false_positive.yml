@@ -1,0 +1,58 @@
+name: False positive
+description: A finding that reports safe code as a problem.
+title: '[false positive] <rule id or finding title>'
+labels: [false-positive]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        False-positive reports help us keep the rules precise. Please reduce the code to a small, self-contained example.
+        **Do not paste real secrets or private code.** If the finding is a secret, describe the format instead of the value.
+  - type: input
+    id: rule
+    attributes:
+      label: Rule id or source
+      description: Shown as *Rule* in the finding detail (for example `js.sql-injection`, `generic-secret`). For AI findings, write "AI review" and the category.
+      placeholder: js.sql-injection
+    validations:
+      required: true
+  - type: dropdown
+    id: verification
+    attributes:
+      label: Verification shown on the finding
+      options: [Possible, Undecided, Confirmed in code, Ruled out]
+    validations:
+      required: true
+  - type: textarea
+    id: snippet
+    attributes:
+      label: Minimal code that triggers it
+      description: Include the imports and the route or function around the flagged line, so the data flow is visible.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why-safe
+    attributes:
+      label: Why it is safe
+      description: Which defense applies (parameterization, allow-list, auth middleware where the router is mounted, constant value, …) and where it is.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: No finding at all, a lower severity, or a `sink` hint instead of a vulnerability?
+  - type: input
+    id: versions
+    attributes:
+      label: DSH Security version and whether the ast-grep engine was available
+      description: Coverage → "Checks that didn't run" lists ast-grep when it was not available.
+      placeholder: 0.1.0, ast-grep available
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The example contains no real credentials or private code.
+          required: true

@@ -1,0 +1,69 @@
+name: Release
+
+# Publishes to npm with provenance when a version tag (v1.2.3, v1.2.3-rc.1) is pushed.
+# See docs/releasing.md.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version comes from "packageManager" in package.json (pnpm@10.28.0).
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: node scripts/verify-package.mjs
+
+      - name: Check that the tag matches package.json
+        id: version
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+          if [[ "${version}" == *-* ]]; then tag=next; else tag=latest; fi
+          echo "dist-tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Warn about unpinned toolkit assets
+        shell: bash
+        run: |
+          node -e '
+            const lock = require("./toolkit.lock.json")
+            const missing = Object.entries(lock.tools).flatMap(([id, tool]) =>
+              Object.entries(tool.assets).filter(([, a]) => a.sha256 === null).map(([p]) => `${id}/${p}`))
+            if (missing.length > 0) {
+              console.log(`::warning title=Unpinned toolkit assets::${missing.length} asset(s) have no SHA-256 (${missing.join(", ")}). Managed installs of these will be refused. Run pnpm toolkit:pin before the next release.`)
+            } else {
+              console.log("All toolkit assets are pinned.")
+            }
+          '
+
+      # prepack (build + verify-package) runs again inside npm publish.
+      - run: npm publish --provenance --access public --tag ${{ steps.version.outputs.dist-tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
