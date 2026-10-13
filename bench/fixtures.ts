@@ -7,8 +7,8 @@
  * these entries with {@link matchesExpected}.
  */
 
-import { readdir, readFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { cp, mkdir, readdir, readFile } from 'node:fs/promises'
+import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINDING_CATEGORIES, type FindingCategory, SEVERITIES, type Severity } from '../src/shared/domain.ts'
 
@@ -204,6 +204,30 @@ export function matchesExpected(
     reported.cwe !== undefined &&
     normalizeCwe(expected.cwe) === normalizeCwe(reported.cwe)
   )
+}
+
+/**
+ * Files in an app directory that describe the planted issues. They are left
+ * out of every scanned copy so neither a model nor an analyzer can read the
+ * answers.
+ */
+export const ANSWER_KEY_FILES: readonly string[] = [MANIFEST_FILE, 'README.md']
+
+/**
+ * Copy one fixture app to `<destRoot>/<app>` without its answer keys and
+ * return the new directory. The copy is what gets registered as a workspace.
+ */
+export async function copyFixtureApp(
+  manifest: Pick<FixtureManifest, 'app' | 'dir'>,
+  destRoot: string,
+): Promise<string> {
+  const dest = join(resolve(destRoot), manifest.app)
+  await mkdir(dest, { recursive: true })
+  await cp(manifest.dir, dest, {
+    recursive: true,
+    filter: source => !ANSWER_KEY_FILES.includes(normalizePath(relative(manifest.dir, source))),
+  })
+  return dest
 }
 
 // ---------------------------------------------------------------------------
