@@ -1,0 +1,9 @@
+{# INTENTIONALLY VULNERABLE TEST FIXTURE — do not deploy #}
+{% extends "base.html" %}
+{% block title %}{{ document.title }} · shared with you{% endblock %}
+{% block content %}
+<h1>{{ document.title }}</h1>
+<p>{{ document.filename }}, shared until {{ expires_at.strftime("%Y-%m-%d") }}.</p>
+<div class="notes">{{ document.notes }}</div>
+<a class="button" href="{{ url_for('sharing.shared', token=token) }}">Download</a>
+{% endblock %}

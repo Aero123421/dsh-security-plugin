@@ -1,0 +1,183 @@
+{
+  "app": "express-shop",
+  "language": "typescript",
+  "frameworks": ["express"],
+  "findings": [
+    {
+      "id": "ES-01",
+      "title": "IDOR: any signed-in customer can read any order",
+      "category": "authz",
+      "cwe": "CWE-639",
+      "severity": "high",
+      "path": "src/routes/orders.ts",
+      "line": 26,
+      "anchor": "db.one<OrderRow>('SELECT * FROM orders WHERE id = ?', [req.params.id])",
+      "detectableBy": ["ai"],
+      "notes": "GET /api/orders/:id is behind requireAuth but loads the order by id alone, so any customer can enumerate ids and read other customers' orders, totals and shipping addresses. The list and cancel endpoints in the same file scope by user_id, which shows the intended rule. Fix: add `AND user_id = ?` with req.user.id (or check order.user_id) and answer 404 otherwise."
+    },
+    {
+      "id": "ES-02",
+      "title": "SQL injection in product search",
+      "category": "injection",
+      "cwe": "CWE-89",
+      "severity": "high",
+      "path": "src/routes/products.ts",
+      "line": 27,
+      "anchor": "name LIKE '%\" + term + \"%'",
+      "detectableBy": ["sast", "ai"],
+      "notes": "req.query.q is concatenated into the SQL text passed to db.query; a quote in the term breaks out of the LIKE literal (e.g. `' UNION SELECT email, password_hash, ... FROM users --`). The route is public. The ORDER BY part comes from a fixed Map and is not injectable. Fix: `name LIKE ?` with ['%' + term + '%'] as a bound parameter (and escape % and _ if literal matching is wanted)."
+    },
+    {
+      "id": "ES-03",
+      "title": "Missing authentication on GET /api/admin/users",
+      "category": "authn",
+      "cwe": "CWE-306",
+      "severity": "high",
+      "path": "src/routes/admin.ts",
+      "line": 12,
+      "anchor": "router.get('/users', (_req, res) => {",
+      "detectableBy": ["routes", "ai"],
+      "notes": "src/app.ts mounts the admin router without requireAuth (`app.use('/api/admin', adminRouter)`), unlike every customer router, and this route has no route-level guard while its siblings use `requireAuth, requireAdmin`. Anyone on the internet can list every user's email, name, address and role. The route extractor reports the endpoint with empty auth hints next to guarded siblings. Fix: mount with `requireAuth, requireAdmin` in app.ts (or add both to the route)."
+    },
+    {
+      "id": "ES-04",
+      "title": "SSRF in webhook test delivery",
+      "category": "ssrf",
+      "cwe": "CWE-918",
+      "severity": "high",
+      "path": "src/routes/webhooks.ts",
+      "line": 12,
+      "anchor": "await fetch(target, {",
+      "detectableBy": ["sast", "ai"],
+      "notes": "POST /api/webhooks/test fetches req.body.url from the server and returns the first 2000 bytes of the response, so any customer can read internal services and cloud metadata (http://169.254.169.254/...) - a full-read SSRF. Unlike the registration flow there is not even an https check. Fix: only test URLs already registered for the caller, allow https only, resolve the host and reject private/loopback/link-local ranges, disable redirects, and do not echo the body."
+    },
+    {
+      "id": "ES-05",
+      "title": "Path traversal in invoice download",
+      "category": "path-traversal",
+      "cwe": "CWE-22",
+      "severity": "high",
+      "path": "src/routes/invoices.ts",
+      "line": 18,
+      "anchor": "res.sendFile(path.join(dir, req.query.file))",
+      "detectableBy": ["sast", "ai"],
+      "notes": "path.join normalizes `../`, so ?file=../42/INV-1.pdf reads another customer's invoice and ?file=../../../.env (or src/config.ts) reads application files. Fix: `path.basename()` the name (as the receipts route does) or `res.sendFile(name, { root: dir })`, and look invoices up by id in the database."
+    },
+    {
+      "id": "ES-06",
+      "title": "Hard-coded JWT signing secret",
+      "category": "secrets",
+      "cwe": "CWE-798",
+      "severity": "high",
+      "path": "src/config.ts",
+      "line": 12,
+      "anchor": "jwtSecret: 'Sh0pJwt9",
+      "detectableBy": ["secrets", "ai"],
+      "notes": "The HS256 key that signs and verifies every access token is a literal in source. Anyone with repository access can mint a token with `role: 'admin'` for any user id. The built-in secrets scanner reports it with its generic hard-coded-secret rule. Fix: load from the environment or a secret manager, use a long random value, and rotate it."
+    },
+    {
+      "id": "ES-07",
+      "title": "Mass assignment: customers can set their own role",
+      "category": "authz",
+      "cwe": "CWE-915",
+      "severity": "high",
+      "path": "src/routes/profile.ts",
+      "line": 24,
+      "anchor": "User.update(req.user!.id, req.body)",
+      "detectableBy": ["sast", "ai"],
+      "notes": "PATCH /api/profile passes the whole request body to User.update, whose WRITABLE_COLUMNS allow-list (src/models/user.ts) includes `role` because the admin console shares it. `{\"role\": \"admin\"}` escalates any customer to administrator. Fix: pick `name`, `email`, `address` explicitly in the route (or validate with a strict schema) and give admin role changes their own code path."
+    },
+    {
+      "id": "ES-08",
+      "title": "GitHub token committed in catalog sync script",
+      "category": "secrets",
+      "cwe": "CWE-798",
+      "severity": "high",
+      "path": "scripts/sync-catalog.ts",
+      "line": 8,
+      "anchor": "const GITHUB_TOKEN = 'ghp_",
+      "detectableBy": ["secrets"],
+      "notes": "A GitHub personal access token (fake value, pattern-valid) is hard-coded and grants access to the private catalog repository. Fix: revoke it, read it from the environment (e.g. GITHUB_TOKEN in CI secrets), and scan history."
+    },
+    {
+      "id": "ES-09",
+      "title": "Vulnerable dependency: lodash 4.17.15",
+      "category": "dependency",
+      "severity": "high",
+      "path": "package-lock.json",
+      "line": 80,
+      "anchor": "\"node_modules/lodash\": {",
+      "detectableBy": ["dependency"],
+      "notes": "lodash 4.17.15 is affected by known advisories fixed in 4.17.21, including command injection via `template` (CVE-2021-23337) and prototype pollution via `zipObjectDeep` (CVE-2020-8203). Fix: upgrade to 4.17.21 or later."
+    },
+    {
+      "id": "ES-10",
+      "title": "Vulnerable dependency: jsonwebtoken 8.5.0",
+      "category": "dependency",
+      "severity": "medium",
+      "path": "package-lock.json",
+      "line": 60,
+      "anchor": "\"node_modules/jsonwebtoken\": {",
+      "detectableBy": ["dependency"],
+      "notes": "jsonwebtoken before 9.0.0 has known advisories (CVE-2022-23539, CVE-2022-23540, CVE-2022-23541: insecure default algorithms and key-type confusion). This app passes `algorithms: ['HS256']`, which limits the impact, but the version is still flagged. Fix: upgrade to 9.0.0 or later."
+    }
+  ],
+  "negatives": [
+    {
+      "id": "ES-N1",
+      "path": "src/routes/orders.ts",
+      "line": 19,
+      "anchor": "'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC', [req.user!.id]",
+      "description": "GET /api/orders filters by the caller's own user id; not an IDOR.",
+      "category": "authz"
+    },
+    {
+      "id": "ES-N2",
+      "path": "src/routes/orders.ts",
+      "line": 40,
+      "anchor": "WHERE id = ? AND user_id = ? AND status = 'pending'",
+      "description": "Order cancellation is scoped to the caller with a parameterized query; neither IDOR nor SQL injection.",
+      "category": "authz"
+    },
+    {
+      "id": "ES-N3",
+      "path": "src/routes/products.ts",
+      "line": 34,
+      "anchor": "WHERE slug = ? AND active = 1",
+      "description": "Product lookup by slug binds req.params.slug through a `?` placeholder; not SQL injection.",
+      "category": "injection"
+    },
+    {
+      "id": "ES-N4",
+      "path": "src/services/changelog.ts",
+      "line": 18,
+      "anchor": "execFileAsync('git', ['log',",
+      "description": "execFile with an argument array and no shell; `--` stops the file name being read as a git option. Not command injection.",
+      "category": "command-execution"
+    },
+    {
+      "id": "ES-N5",
+      "path": "src/routes/admin.ts",
+      "line": 27,
+      "anchor": "router.patch('/users/:id/role', requireAuth, requireAdmin",
+      "description": "The role-change route is guarded by requireAuth and requireAdmin, so it is not missing authentication despite the unguarded mount. Its UPDATE also uses placeholders.",
+      "category": "authn"
+    },
+    {
+      "id": "ES-N6",
+      "path": "src/routes/admin.ts",
+      "line": 17,
+      "anchor": "router.get('/changelog', requireAuth, requireAdmin",
+      "description": "Admin changelog is guarded by requireAuth and requireAdmin.",
+      "category": "authn"
+    },
+    {
+      "id": "ES-N7",
+      "path": "src/routes/invoices.ts",
+      "line": 24,
+      "anchor": "path.basename(req.params.name)",
+      "description": "Receipt download strips directory components with path.basename before sendFile; not path traversal.",
+      "category": "path-traversal"
+    }
+  ]
+}

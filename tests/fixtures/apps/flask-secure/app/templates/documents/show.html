@@ -1,0 +1,26 @@
+{# INTENTIONALLY VULNERABLE TEST FIXTURE — do not deploy #}
+{% extends "base.html" %}
+{% block content %}
+<article class="document">
+  <h1>{{ document.title }}</h1>
+  <p class="meta">{{ document.filename }} · uploaded {{ document.uploaded_at.strftime("%Y-%m-%d") }}</p>
+  <div class="notes">{{ document.notes }}</div>
+
+  <a class="button" href="{{ url_for('documents.download', document_id=document.id) }}">Download</a>
+
+  <form method="post" action="{{ url_for('sharing.create_link', document_id=document.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Share for <input type="number" name="days" value="7" min="1" max="30"> days</label>
+    <button type="submit">Create share link</button>
+  </form>
+
+  {% for link in document.share_links %}
+  <p class="share">{{ url_for('sharing.shared', token=link.token, _external=True) }} (expires {{ link.expires_at.strftime("%Y-%m-%d") }})</p>
+  {% endfor %}
+
+  <form method="post" action="{{ url_for('documents.delete', document_id=document.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="danger">Delete</button>
+  </form>
+</article>
+{% endblock %}

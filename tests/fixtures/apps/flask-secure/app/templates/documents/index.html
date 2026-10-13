@@ -1,0 +1,21 @@
+{# INTENTIONALLY VULNERABLE TEST FIXTURE — do not deploy #}
+{% extends "base.html" %}
+{% block content %}
+<h1>Your documents</h1>
+<ul class="documents">
+  {% for document in documents %}
+  <li><a href="{{ url_for('documents.show', document_id=document.id) }}">{{ document.title }}</a> <small>{{ document.filename }}</small></li>
+  {% else %}
+  <li class="empty">No documents yet.</li>
+  {% endfor %}
+</ul>
+
+<h2>Upload</h2>
+<form method="post" action="{{ url_for('documents.upload') }}" enctype="multipart/form-data">
+  {{ form.hidden_tag() }}
+  <label>{{ form.title.label }} {{ form.title() }}</label>
+  <label>{{ form.notes.label }} {{ form.notes(rows=4) }}</label>
+  <label>{{ form.file.label }} {{ form.file() }}</label>
+  <button type="submit">Upload</button>
+</form>
+{% endblock %}

@@ -1,0 +1,11 @@
+# INTENTIONALLY VULNERABLE TEST FIXTURE — do not deploy
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3.0
+httpx>=0.27,<1.0
+itsdangerous>=2.2,<3.0
+python-multipart>=0.0.18
+slowapi>=0.1.9,<1.0
+# Pinned: the legacy export worker breaks on newer releases.
+PyYAML==5.3
+requests==2.19.0

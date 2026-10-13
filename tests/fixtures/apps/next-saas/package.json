@@ -1,0 +1,28 @@
+{
+  "name": "next-saas",
+  "version": "0.9.0",
+  "private": true,
+  "description": "INTENTIONALLY VULNERABLE TEST FIXTURE: do not deploy",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:migrate": "prisma migrate deploy"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "marked": "^15.0.4",
+    "next": "^14.2.35",
+    "next-auth": "^4.24.11",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "stripe": "^16.12.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "@types/react": "^18.3.18",
+    "prisma": "^5.22.0",
+    "typescript": "^5.7.2"
+  }
+}

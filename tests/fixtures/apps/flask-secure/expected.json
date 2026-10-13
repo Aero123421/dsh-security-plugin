@@ -1,0 +1,101 @@
+{
+  "app": "flask-secure",
+  "language": "python",
+  "frameworks": ["flask", "sqlalchemy"],
+  "findings": [
+    {
+      "id": "FS-01",
+      "title": "Session cookie not marked Secure in production",
+      "category": "misconfiguration",
+      "cwe": "CWE-614",
+      "severity": "low",
+      "path": "app/config.py",
+      "line": 29,
+      "anchor": "SESSION_COOKIE_SECURE = False",
+      "detectableBy": ["ai"],
+      "notes": "ProductionConfig sets SESSION_COOKIE_SECURE = False, so the browser also sends the Flask session cookie over plain HTTP where it can be intercepted (session hijacking on a downgraded or mixed-content request). Impact is limited by HTTPS deployment and SameSite=Lax. No built-in SAST rule covers Flask config attributes. Fix: set it to True in production."
+    }
+  ],
+  "negatives": [
+    {
+      "id": "FS-N1",
+      "path": "app/documents.py",
+      "line": 19,
+      "anchor": "db.select(Document).filter_by(id=document_id, owner_id=current_user.id)",
+      "description": "Every per-document route loads through owned_document_or_404, which filters by owner and answers 404; not an IDOR.",
+      "category": "authz"
+    },
+    {
+      "id": "FS-N2",
+      "path": "app/documents.py",
+      "line": 69,
+      "anchor": "current_app.config[\"UPLOAD_DIR\"], document.stored_name, as_attachment=True",
+      "description": "send_from_directory with the fixed upload directory and a server-generated stored name; not path traversal.",
+      "category": "path-traversal"
+    },
+    {
+      "id": "FS-N3",
+      "path": "app/auth.py",
+      "line": 40,
+      "anchor": "db.select(User).filter_by(email=form.email.data.lower())",
+      "description": "SQLAlchemy ORM query with bound parameters; not SQL injection.",
+      "category": "injection"
+    },
+    {
+      "id": "FS-N4",
+      "path": "app/auth.py",
+      "line": 45,
+      "anchor": "return redirect(_safe_next(request.args.get(\"next\")))",
+      "description": "?next= passes through _safe_next, which only allows same-site relative paths; not an open redirect.",
+      "category": "business-logic"
+    },
+    {
+      "id": "FS-N5",
+      "path": "app/sharing.py",
+      "line": 25,
+      "anchor": "token=secrets.token_urlsafe(32)",
+      "description": "Share tokens come from the secrets module (256 bits) and expire; not predictable tokens.",
+      "category": "crypto"
+    },
+    {
+      "id": "FS-N6",
+      "path": "app/sharing.py",
+      "line": 33,
+      "anchor": "@bp.route(\"/s/<token>\")",
+      "description": "Intentionally public download, authorized by an unguessable, expiring share token rather than a login; not missing authentication.",
+      "category": "authn"
+    },
+    {
+      "id": "FS-N7",
+      "path": "app/config.py",
+      "line": 10,
+      "anchor": "SECRET_KEY = os.environ[\"FLASK_SECRET_KEY\"]",
+      "description": "SECRET_KEY is read from the environment with no fallback; not a hard-coded secret.",
+      "category": "secrets"
+    },
+    {
+      "id": "FS-N8",
+      "path": "app/config.py",
+      "line": 36,
+      "anchor": "WTF_CSRF_ENABLED = False",
+      "description": "CSRF is disabled only in TestingConfig (APP_ENV=testing); production uses CSRFProtect.",
+      "category": "misconfiguration"
+    },
+    {
+      "id": "FS-N9",
+      "path": "app/templates/documents/show.html",
+      "line": 7,
+      "anchor": "<div class=\"notes\">{{ document.notes }}</div>",
+      "description": "User-supplied notes rendered through Jinja2 autoescaping (no |safe); not XSS.",
+      "category": "xss"
+    },
+    {
+      "id": "FS-N10",
+      "path": "app/documents.py",
+      "line": 43,
+      "anchor": "stored_name = secrets.token_urlsafe(24)",
+      "description": "Uploads are stored under a random server-side name, so the client filename never reaches the filesystem path.",
+      "category": "path-traversal"
+    }
+  ]
+}

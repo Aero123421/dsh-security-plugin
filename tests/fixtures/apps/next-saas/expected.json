@@ -1,0 +1,117 @@
+{
+  "app": "next-saas",
+  "language": "typescript",
+  "frameworks": ["next", "next-auth", "prisma"],
+  "findings": [
+    {
+      "id": "NS-01",
+      "title": "Broken access control: any project readable by id, even signed out",
+      "category": "authz",
+      "cwe": "CWE-639",
+      "severity": "high",
+      "path": "app/api/projects/[id]/route.ts",
+      "line": 12,
+      "anchor": "prisma.project.findUnique({ where: { id: params.id }, include: { members: true } })",
+      "detectableBy": ["ai"],
+      "notes": "The GET handler loads a project (with its member list) by id and returns it without calling getSession() or checking membership in the project's org. Its comment relies on middleware.ts, but the middleware matcher only covers /dashboard/:path*, so /api/projects/:id is reachable without signing in and across tenants. The DELETE handler in the same file does the right check. Fix: require a session and `getMembership(user.id, project.orgId)`, answer 404 otherwise; optionally extend the matcher to /api."
+    },
+    {
+      "id": "NS-02",
+      "title": "Open redirect in the auth callback",
+      "category": "business-logic",
+      "cwe": "CWE-601",
+      "severity": "medium",
+      "path": "app/api/auth/callback/route.ts",
+      "line": 15,
+      "anchor": "redirect(searchParams.get('next') ?? '/dashboard')",
+      "detectableBy": ["sast", "ai"],
+      "notes": "`next` is taken from the query string and passed to redirect() unchecked, so /api/auth/callback?next=https://evil.example sends a freshly signed-in user to a phishing page from a trusted URL. Fix: accept only same-origin relative paths (starts with a single `/`, no `//` or backslash) or map to known destinations."
+    },
+    {
+      "id": "NS-03",
+      "title": "Stored XSS via project description rendered with dangerouslySetInnerHTML",
+      "category": "xss",
+      "cwe": "CWE-79",
+      "severity": "high",
+      "path": "components/ProjectDescription.tsx",
+      "line": 12,
+      "anchor": "dangerouslySetInnerHTML={{ __html: html }}",
+      "detectableBy": ["sast", "ai"],
+      "notes": "Descriptions are written by any non-viewer member (updateProject server action) and rendered as Markdown with marked, which passes raw HTML through, then injected with dangerouslySetInnerHTML. `<img src=x onerror=...>` runs in every org member's browser. SAST sees the HTML sink (as a low-confidence sink); the stored source is only visible across files. Fix: sanitize the rendered HTML (DOMPurify / sanitize-html) or render Markdown without raw HTML."
+    },
+    {
+      "id": "NS-04",
+      "title": "Race condition in invite redemption lets organizations exceed their seat limit",
+      "category": "race-condition",
+      "cwe": "CWE-362",
+      "severity": "medium",
+      "path": "app/api/invites/[token]/redeem/route.ts",
+      "line": 25,
+      "anchor": "prisma.membership.create({ data: { userId: user.id, orgId: invite.orgId, role: invite.role } })",
+      "detectableBy": ["ai"],
+      "notes": "Seats are counted (`seatsUsed >= invite.org.seatLimit`) and the membership is created in separate queries with no transaction, lock or constraint, so concurrent redemptions of one invite (or several) all pass the check and the org gets more paid seats than its plan allows. Fix: do the count and insert in a serializable transaction (or SELECT ... FOR UPDATE on the org row / an atomic conditional update of a seats_used counter)."
+    },
+    {
+      "id": "NS-05",
+      "title": "Stripe live secret key committed in .env.local",
+      "category": "secrets",
+      "cwe": "CWE-798",
+      "severity": "critical",
+      "path": ".env.local",
+      "line": 7,
+      "anchor": "STRIPE_SECRET_KEY=sk_live_",
+      "detectableBy": ["secrets"],
+      "notes": "A live-mode Stripe secret key (fake, pattern-valid) sits in a committed .env.local, granting full API access to the billing account. Fix: revoke/roll the key in the Stripe dashboard, remove the file from the repository and history, add .env*.local to .gitignore."
+    }
+  ],
+  "negatives": [
+    {
+      "id": "NS-N1",
+      "path": "app/dashboard/projects/[id]/actions.ts",
+      "line": 29,
+      "anchor": "if (!membership || membership.role === 'viewer') throw new Error('forbidden')",
+      "description": "The updateProject server action validates input with zod and checks org membership and role before writing.",
+      "category": "authz"
+    },
+    {
+      "id": "NS-N2",
+      "path": "app/api/onboarding/complete/route.ts",
+      "line": 12,
+      "anchor": "NextResponse.redirect(new URL('/dashboard', req.url))",
+      "description": "Redirect to a fixed same-origin path; not an open redirect.",
+      "category": "business-logic"
+    },
+    {
+      "id": "NS-N3",
+      "path": "app/api/projects/[id]/route.ts",
+      "line": 25,
+      "anchor": "if (membership?.role !== 'owner')",
+      "description": "DELETE /api/projects/:id requires a session and org-owner membership.",
+      "category": "authz"
+    },
+    {
+      "id": "NS-N4",
+      "path": ".env.example",
+      "line": 10,
+      "anchor": "STRIPE_SECRET_KEY=sk_live_xxxx",
+      "description": "Template with placeholder values only; not a leaked secret.",
+      "category": "secrets"
+    },
+    {
+      "id": "NS-N5",
+      "path": "app/api/projects/route.ts",
+      "line": 18,
+      "anchor": "where: { org: { memberships: { some: { userId: user.id } } } }",
+      "description": "Project list is scoped to organizations the caller belongs to.",
+      "category": "authz"
+    },
+    {
+      "id": "NS-N6",
+      "path": "app/dashboard/projects/[id]/page.tsx",
+      "line": 20,
+      "anchor": "{project.name}</h1>",
+      "description": "Plain JSX interpolation is escaped by React; not XSS.",
+      "category": "xss"
+    }
+  ]
+}

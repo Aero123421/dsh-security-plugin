@@ -1,0 +1,163 @@
+{
+  "app": "fastapi-notes",
+  "language": "python",
+  "frameworks": ["fastapi"],
+  "findings": [
+    {
+      "id": "FN-01",
+      "title": "IDOR: any user can read any note",
+      "category": "authz",
+      "cwe": "CWE-639",
+      "severity": "high",
+      "path": "app/routers/notes.py",
+      "line": 41,
+      "anchor": "db.execute(\"SELECT id, owner_id, title, body, updated_at FROM notes WHERE id = ?\", (note_id,))",
+      "detectableBy": ["ai"],
+      "notes": "GET /notes/{note_id} depends on get_current_user but never compares note.owner_id with user.id, so any signed-in user (in any organization) can read every note by iterating ids. PUT and DELETE in the same file do the check. Fix: add `AND owner_id = ?` (or compare after loading) and return 404."
+    },
+    {
+      "id": "FN-02",
+      "title": "SQL injection in note search (f-string query)",
+      "category": "injection",
+      "cwe": "CWE-89",
+      "severity": "high",
+      "path": "app/routers/notes.py",
+      "line": 31,
+      "anchor": "rows = db.execute(sql).fetchall()",
+      "detectableBy": ["sast", "ai"],
+      "notes": "The query string `q` is interpolated into the SQL on the previous line (`LIKE '%{q}%'`) and executed here. `q=%') OR 1=1 --` drops the owner_id filter and returns every user's notes; UNION payloads read other tables. Fix: `title LIKE ? OR body LIKE ?` with bound parameters."
+    },
+    {
+      "id": "FN-03",
+      "title": "Insecure deserialization of the preferences cookie (pickle)",
+      "category": "deserialization",
+      "cwe": "CWE-502",
+      "severity": "critical",
+      "path": "app/routers/preferences.py",
+      "line": 24,
+      "anchor": "pickle.loads(base64.b64decode(notes_prefs))",
+      "detectableBy": ["sast", "ai"],
+      "notes": "The notes_prefs cookie is client-controlled and unsigned; pickle.loads on it runs arbitrary code (a `__reduce__` payload) on the server for any signed-in user. Fix: store preferences as JSON validated with the Preferences model (or server-side), and sign the cookie if it must carry state."
+    },
+    {
+      "id": "FN-04",
+      "title": "OS command injection in host ping diagnostic",
+      "category": "command-execution",
+      "cwe": "CWE-78",
+      "severity": "critical",
+      "path": "app/routers/diagnostics.py",
+      "line": 33,
+      "anchor": "subprocess.run(f\"ping -c 1 -W 2 {host}\", shell=True",
+      "detectableBy": ["sast", "ai"],
+      "notes": "The request body's `host` is formatted into a shell command; `example.com; cat /etc/passwd` or `$(curl ...)` runs arbitrary commands. Any signed-in user can call it. Fix: validate the host as an IP address or hostname and run `subprocess.run([\"ping\", \"-c\", \"1\", \"-W\", \"2\", \"--\", host])` without a shell."
+    },
+    {
+      "id": "FN-05",
+      "title": "SSRF in link preview",
+      "category": "ssrf",
+      "cwe": "CWE-918",
+      "severity": "high",
+      "path": "app/routers/links.py",
+      "line": 25,
+      "anchor": "httpx.get(url, timeout=LINK_PREVIEW_TIMEOUT, follow_redirects=True)",
+      "detectableBy": ["sast", "ai"],
+      "notes": "Any http(s) URL from the request is fetched server-side, following redirects; the scheme check does not stop internal hosts (http://127.0.0.1:8000/..., http://169.254.169.254/...). Title and description of the response are returned. Fix: resolve and block private/loopback/link-local addresses, disable redirects or re-check each hop, and restrict ports."
+    },
+    {
+      "id": "FN-06",
+      "title": "Tenant isolation: organization id taken from the request body",
+      "category": "authz",
+      "cwe": "CWE-639",
+      "severity": "high",
+      "path": "app/routers/reports.py",
+      "line": 31,
+      "anchor": "(since.isoformat(), payload.org_id)",
+      "detectableBy": ["ai"],
+      "notes": "POST /reports/activity checks that the caller is an admin, but of their own organization; the report is then built for `payload.org_id` from the body instead of `user.org_id`. An admin of any org can list member emails and activity of every other org. Fix: use user.org_id and drop org_id from the request (or verify it equals user.org_id)."
+    },
+    {
+      "id": "FN-07",
+      "title": "Hard-coded SECRET_KEY",
+      "category": "secrets",
+      "cwe": "CWE-798",
+      "severity": "high",
+      "path": "app/config.py",
+      "line": 10,
+      "anchor": "SECRET_KEY = \"n0t3s9",
+      "detectableBy": ["sast", "secrets", "ai"],
+      "notes": "SECRET_KEY signs the itsdangerous bearer tokens (app/auth.py); anyone who has the source can mint a token for any user id. Fix: read it from the environment or a secret manager and rotate it."
+    },
+    {
+      "id": "FN-08",
+      "title": "Vulnerable dependency: PyYAML 5.3",
+      "category": "dependency",
+      "severity": "critical",
+      "path": "requirements.txt",
+      "line": 10,
+      "anchor": "PyYAML==5.3",
+      "detectableBy": ["dependency"],
+      "notes": "PyYAML before 5.4 allows arbitrary code execution through full_load/FullLoader (CVE-2020-1747, CVE-2020-14343). The app itself uses safe_load, but the pinned version is still vulnerable. Fix: upgrade to 5.4 or later (6.x)."
+    },
+    {
+      "id": "FN-09",
+      "title": "Vulnerable dependency: requests 2.19.0",
+      "category": "dependency",
+      "severity": "medium",
+      "path": "requirements.txt",
+      "line": 11,
+      "anchor": "requests==2.19.0",
+      "detectableBy": ["dependency"],
+      "notes": "requests 2.19.0 has known advisories: Authorization header leaked on https-to-http redirects (CVE-2018-18074, fixed in 2.20.0), Proxy-Authorization leak (CVE-2023-32681) and verify=False persisting across a session (CVE-2024-35195). Fix: upgrade to a current 2.32.x release."
+    }
+  ],
+  "negatives": [
+    {
+      "id": "FN-N1",
+      "path": "app/auth.py",
+      "line": 58,
+      "anchor": "\"SELECT id, email, org_id, role FROM users WHERE id = ?\", (data[\"uid\"],)",
+      "description": "Parameterized cursor.execute with a `?` placeholder; not SQL injection.",
+      "category": "injection"
+    },
+    {
+      "id": "FN-N2",
+      "path": "app/routers/notes.py",
+      "line": 20,
+      "anchor": "WHERE owner_id = ? ORDER BY updated_at DESC\", (user.id,)",
+      "description": "The f-string only inserts the constant NOTE_COLUMNS; the user id is bound as a parameter. Not SQL injection, and the list is scoped to the caller.",
+      "category": "injection"
+    },
+    {
+      "id": "FN-N3",
+      "path": "app/integrations/importer.py",
+      "line": 27,
+      "anchor": "yaml.safe_load(raw)",
+      "description": "yaml.safe_load cannot construct arbitrary Python objects; not insecure deserialization (the vulnerable PyYAML pin is reported separately as FN-08).",
+      "category": "deserialization"
+    },
+    {
+      "id": "FN-N4",
+      "path": "app/routers/notes.py",
+      "line": 55,
+      "anchor": "if note is None or note[\"owner_id\"] != user.id:",
+      "description": "PUT /notes/{note_id} checks ownership and answers 404; not an IDOR.",
+      "category": "authz"
+    },
+    {
+      "id": "FN-N5",
+      "path": "app/routers/notes.py",
+      "line": 71,
+      "anchor": "\"DELETE FROM notes WHERE id = ? AND owner_id = ?\", (note_id, user.id)",
+      "description": "DELETE is scoped to the caller's notes with bound parameters.",
+      "category": "authz"
+    },
+    {
+      "id": "FN-N6",
+      "path": "app/routers/diagnostics.py",
+      "line": 21,
+      "anchor": "subprocess.run([\"git\", \"status\", \"--porcelain\"]",
+      "description": "subprocess.run with a fixed argument list and no shell, behind require_admin; not command injection.",
+      "category": "command-execution"
+    }
+  ]
+}
