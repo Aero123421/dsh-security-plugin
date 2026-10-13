@@ -14,20 +14,32 @@ import type { CodeRef, QuoteCheck } from '../../shared/domain.ts'
 import type { Redactor } from '../analysis/secrets.ts'
 import { isSensitivePath } from '../analysis/secrets.ts'
 import type { Snapshot } from '../analysis/types.ts'
+import { commentMask, isCommentOnlyRange } from './comments.ts'
 import { type NormalizedText, normalizeForMatch, normalizePath, normalizeWithOffsets } from './normalize.ts'
 import { clipText, countLines, lineOfOffset, lineStarts, numberLines, stripCr } from './text.ts'
 
 /** Outcome of {@link verifyQuote}. */
 export interface QuoteVerification {
   readonly check: QuoteCheck
-  /** Corrected location for `relocated`; the cited location for `match`; absent otherwise. */
+  /**
+   * For `match` and `relocated`: the lines the quote actually occupies (never
+   * the wider cited range). Absent otherwise.
+   */
   readonly location?: CodeRef
   /** Redacted source lines at `location`: at most 12 lines and 1500 characters. */
   readonly snippet?: string
   /**
-   * English reason for `mismatch`: `file not in snapshot` (also for paths that
-   * are not plain relative paths), `withheld file`, `lines out of range`,
-   * `quote not found`, `quote ambiguous`, or `quote too short`.
+   * `true` when the matched text lies entirely in comments, docstrings, or
+   * documentation prose. Such a quote is real but shows no code; callers must
+   * not treat it as proof of a defense. Absent otherwise.
+   */
+  readonly commentOnly?: true
+  /**
+   * English reason for `mismatch`, written for the model that cited it:
+   * `file not in snapshot` (also for paths that are not plain relative paths),
+   * `withheld file`, `lines out of range`, `quote not found`, `quote ambiguous`
+   * (several places in the file, or in a loose cited range), `cited range too
+   * wide: …`, or `quote too short`.
    */
   readonly reason?: string
 }
@@ -56,34 +68,50 @@ export interface VerifyQuoteOptions {
   readonly slackLines?: number
   /** Minimum normalized quote length, unless the whole cited range is shorter. Default 8. */
   readonly minQuoteChars?: number
+  /**
+   * Cited lines allowed beyond the quote's own line count before the citation
+   * is rejected as `cited range too wide`. Default {@link MAX_EXTRA_CITED_LINES}.
+   */
+  readonly maxExtraLines?: number
 }
 
 /** Maximum lines in {@link QuoteVerification.snippet}. */
 export const SNIPPET_MAX_LINES = 12
 /** Maximum characters in {@link QuoteVerification.snippet}. */
 export const SNIPPET_MAX_CHARS = 1500
+/** Default for {@link VerifyQuoteOptions.maxExtraLines}: a citation may span at most the quote's lines + 40. */
+export const MAX_EXTRA_CITED_LINES = 40
 
 const DEFAULT_SLACK_LINES = 3
 const DEFAULT_MIN_QUOTE_CHARS = 8
 const DEFAULT_EXCERPT_LINES = 12
 const PREPARED_CACHE_SIZE = 8
 const NUMBERED_LINE = /^[ \t]*\d+\|/
+/** Occurrences collected inside one cited window; more only matter as "ambiguous". */
+const MAX_WINDOW_HITS = 64
 
 /**
  * Check a cited quote against the snapshot.
  *
- * - `match`: the quote occurs within lines `[start - slack, end + slack]`.
- * - `relocated`: it does not, but occurs exactly once elsewhere in the file
- *   (also when the cited lines are out of range); `location` holds the true
- *   1-based line range of that occurrence.
+ * - A cited range wider than the quote's own lines + `maxExtraLines` is a
+ *   `mismatch` (`cited range too wide`), so "lines 1 to the end" can never
+ *   turn any quote anywhere in the file into a match.
+ * - `match`: the quote occurs exactly once within lines
+ *   `[start - slack, end + slack]`. Several occurrences there are accepted
+ *   only when the cited range is tight (at most the quote's lines +
+ *   `2 × slack`), taking the one nearest the cited lines; otherwise the
+ *   result is `quote ambiguous`.
+ * - `relocated`: no occurrence within that window, but exactly one elsewhere
+ *   in the file (also when the cited lines are out of range).
  * - `mismatch` otherwise, with a `reason`; several occurrences elsewhere are
  *   `quote ambiguous`.
  *
- * Quotes shorter than `minQuoteChars` after normalization are rejected unless
- * the cited range itself is that short and contains them; they are never
- * relocated. A quote copied with `N| ` line-number prefixes (the format of
- * `read_file` output) is retried without them. Never throws for malformed
- * citations.
+ * For `match` and `relocated`, `location` and `snippet` are those of the
+ * occurrence itself, never the cited range. Quotes shorter than
+ * `minQuoteChars` after normalization are rejected unless the cited range
+ * itself is that short and contains them; they are never relocated. A quote
+ * copied with `N| ` line-number prefixes (the format of `read_file` output) is
+ * retried without them. Never throws for malformed citations.
  */
 export function verifyQuote(
   source: QuoteSource,
@@ -96,14 +124,17 @@ export function verifyQuote(
   const file = source.file(path)
   if (!file) return mismatch('file not in snapshot')
 
-  const slack = nonNegativeInt(options.slackLines, DEFAULT_SLACK_LINES)
-  const minChars = nonNegativeInt(options.minQuoteChars, DEFAULT_MIN_QUOTE_CHARS)
+  const limits: Limits = {
+    slack: nonNegativeInt(options.slackLines, DEFAULT_SLACK_LINES),
+    minChars: nonNegativeInt(options.minQuoteChars, DEFAULT_MIN_QUOTE_CHARS),
+    maxExtraLines: nonNegativeInt(options.maxExtraLines, MAX_EXTRA_CITED_LINES),
+  }
   const prepared = prepare(source, path, file)
   const quote = typeof cited.quote === 'string' ? cited.quote : ''
-  const first = verifyPrepared(prepared, path, cited, quote, slack, minChars)
+  const first = verifyPrepared(prepared, path, cited, quote, limits)
   if (first.check !== 'mismatch') return first
   const stripped = stripLineNumbers(quote)
-  return stripped === undefined ? first : verifyPrepared(prepared, path, cited, stripped, slack, minChars)
+  return stripped === undefined ? first : verifyPrepared(prepared, path, cited, stripped, limits)
 }
 
 /**
@@ -197,13 +228,18 @@ function prepare(
   return prepared
 }
 
+interface Limits {
+  readonly slack: number
+  readonly minChars: number
+  readonly maxExtraLines: number
+}
+
 function verifyPrepared(
   prepared: PreparedFile,
   path: string,
   cited: CitedQuote,
   quote: string,
-  slack: number,
-  minChars: number,
+  { slack, minChars, maxExtraLines }: Limits,
 ): QuoteVerification {
   const needle = normalizeForMatch(quote)
   const { startLine: start, endLine: end } = cited
@@ -212,28 +248,82 @@ function verifyPrepared(
   const haystack = prepared.norm.text
 
   if (needle.length === 0) return mismatch('quote too short')
+  const quoteLines = quote.trim().split('\n').length
+  const span = inRange ? end - start + 1 : 0
+  if (span > quoteLines + maxExtraLines) {
+    return mismatch(
+      `cited range too wide: lines ${start}-${end} (${span} lines) for a ${quoteLines}-line quote; cite only the lines the quote is on`,
+    )
+  }
   if (needle.length < minChars) {
     if (!valid) return mismatch('quote too short')
     const [from, to] = normalizedRange(prepared, start, end)
     if (haystack.slice(from, to).trim().length >= minChars) return mismatch('quote too short')
-    if (!occursWithin(haystack, needle, from, to)) return mismatch('quote not found')
-    return found(prepared, 'match', { path, startLine: start, endLine: end })
+    const [hit] = occurrencesWithin(haystack, needle, from, to)
+    if (hit === undefined) return mismatch('quote not found')
+    return found(prepared, path, 'match', hit, needle.length)
   }
 
   if (valid) {
-    const [from, to] = normalizedRange(prepared, Math.max(1, start - slack), Math.min(prepared.lineCount, end + slack))
-    if (occursWithin(haystack, needle, from, to))
-      return found(prepared, 'match', { path, startLine: start, endLine: end })
+    const low = Math.max(1, start - slack)
+    const high = Math.min(prepared.lineCount, end + slack)
+    const [from, to] = normalizedRange(prepared, low, high)
+    const hits = occurrencesWithin(haystack, needle, from, to)
+    const [only] = hits
+    if (hits.length === 1 && only !== undefined) return found(prepared, path, 'match', only, needle.length)
+    if (hits.length > 1) {
+      const spans = hits.map(index => linesOfOccurrence(prepared, index, needle.length))
+      const occupied = Math.max(quoteLines, Math.min(...spans.map(s => s.endLine - s.startLine + 1)))
+      if (span > occupied + 2 * slack) {
+        return mismatch(
+          `quote ambiguous: it occurs ${hits.length === MAX_WINDOW_HITS ? 'many' : hits.length} times in lines ${low}-${high}; cite the exact lines of one occurrence`,
+        )
+      }
+      // A tight citation names one occurrence: take the one nearest the cited lines (first on a tie).
+      let best = 0
+      let bestDistance = Number.POSITIVE_INFINITY
+      spans.forEach((lines, index) => {
+        const distance = Math.max(0, lines.startLine - end, start - lines.endLine)
+        if (distance < bestDistance) {
+          best = index
+          bestDistance = distance
+        }
+      })
+      return found(prepared, path, 'match', hits[best] ?? 0, needle.length)
+    }
   }
 
   // No occurrence inside the window, so every occurrence lies elsewhere.
   const first = haystack.indexOf(needle)
   if (first < 0) return mismatch(valid ? 'quote not found' : 'lines out of range')
   if (haystack.indexOf(needle, first + 1) >= 0) return mismatch('quote ambiguous')
+  return found(prepared, path, 'relocated', first, needle.length)
+}
+
+/** Start indices of every occurrence of `needle` lying entirely within `haystack[from, to)` (capped). */
+function occurrencesWithin(haystack: string, needle: string, from: number, to: number): number[] {
+  const hits: number[] = []
+  for (let index = haystack.indexOf(needle, from); index >= 0; index = haystack.indexOf(needle, index + 1)) {
+    if (index + needle.length > to || hits.length >= MAX_WINDOW_HITS) break
+    hits.push(index)
+  }
+  return hits
+}
+
+/** 1-based line range covered by normalized characters `[index, index + length)`. */
+function linesOfOccurrence(
+  prepared: PreparedFile,
+  index: number,
+  length: number,
+): {
+  readonly startLine: number
+  readonly endLine: number
+} {
   const { offsets } = prepared.norm
-  const startLine = lineOfOffset(prepared.starts, offsets[first] ?? 0)
-  const endLine = lineOfOffset(prepared.starts, offsets[first + needle.length - 1] ?? 0)
-  return found(prepared, 'relocated', { path, startLine, endLine })
+  return {
+    startLine: lineOfOffset(prepared.starts, offsets[index] ?? 0),
+    endLine: lineOfOffset(prepared.starts, offsets[index + length - 1] ?? 0),
+  }
 }
 
 /** Half-open range of normalized indices whose characters lie on lines `start..end`. */
@@ -241,12 +331,6 @@ function normalizedRange(prepared: PreparedFile, start: number, end: number): [n
   const from = prepared.starts[start - 1] ?? prepared.redacted.length
   const to = prepared.starts[end] ?? prepared.redacted.length
   return [lowerBound(prepared.norm.offsets, from), lowerBound(prepared.norm.offsets, to)]
-}
-
-/** Whether `needle` occurs entirely within `haystack[from, to)`. */
-function occursWithin(haystack: string, needle: string, from: number, to: number): boolean {
-  const index = haystack.indexOf(needle, from)
-  return index >= 0 && index + needle.length <= to
 }
 
 /** First index whose value is `>= target` (array length when none). */
@@ -261,8 +345,37 @@ function lowerBound(values: Int32Array, target: number): number {
   return lo
 }
 
-function found(prepared: PreparedFile, check: 'match' | 'relocated', location: CodeRef): QuoteVerification {
-  return { check, location, snippet: snippetOf(prepared, location.startLine, location.endLine) }
+/** A verified occurrence at normalized `[index, index + length)`: its own lines, snippet, and comment status. */
+function found(
+  prepared: PreparedFile,
+  path: string,
+  check: 'match' | 'relocated',
+  index: number,
+  length: number,
+): QuoteVerification {
+  const location: CodeRef = { path, ...linesOfOccurrence(prepared, index, length) }
+  const { offsets } = prepared.norm
+  const from = offsets[index] ?? 0
+  const to = (offsets[index + length - 1] ?? from) + 1
+  const commentOnly = isCommentOnlyRange(prepared.redacted, maskOf(prepared, path), from, to)
+  return {
+    check,
+    location,
+    snippet: snippetOf(prepared, location.startLine, location.endLine),
+    ...(commentOnly ? { commentOnly: true as const } : {}),
+  }
+}
+
+/** Comment mask per prepared file, computed on first use. */
+const masks = new WeakMap<PreparedFile, Uint8Array>()
+
+function maskOf(prepared: PreparedFile, path: string): Uint8Array {
+  let mask = masks.get(prepared)
+  if (!mask) {
+    mask = commentMask(prepared.redacted, path)
+    masks.set(prepared, mask)
+  }
+  return mask
 }
 
 function mismatch(reason: string): QuoteVerification {

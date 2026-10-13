@@ -11,16 +11,17 @@ import {
   type FindingCategory,
   type FindingSource,
   isQuoteVerified,
+  SEVERITIES,
   type Severity,
   severityRank,
   type Verification,
 } from '../../shared/domain.ts'
 import type { ChainProposal } from '../agents/roles/chain.ts'
-import type { VerifiedCitation } from '../agents/roles/common.ts'
+import { isVerifiedCode, type VerifiedCitation } from '../agents/roles/common.ts'
 import type { HunterFinding, HunterOutput } from '../agents/roles/hunter.ts'
 import type { SkepticOutput } from '../agents/roles/skeptic.ts'
 import type { Signal } from '../analysis/types.ts'
-import type { AttackStepRecord, EvidenceRecord, FindingRecord, Origin } from '../core/model.ts'
+import type { AttackStepRecord, EvidenceRecord, FindingRecord, FindingReview, Origin } from '../core/model.ts'
 import type { SecurityStore } from '../store/types.ts'
 import { fingerprintOf, normalizeCode } from './fingerprint.ts'
 
@@ -164,10 +165,20 @@ export interface HunterRecordResult {
   readonly merged: number
   readonly discarded: number
   readonly assessed: number
-  readonly ruledOut: number
+  /**
+   * Rule hits a hunter called false positives with verified code while no
+   * reviewer will follow: they are moved to `inconclusive`, not `refuted`.
+   */
+  readonly disputed: number
 }
 
-/** Persist a hunter's verified output. Findings without any verified quote are discarded. */
+/**
+ * Persist a hunter's verified output. Findings without any verified quote are
+ * discarded. A `false_positive` verdict on a rule hit never refutes it: the
+ * cited defense is attached as counter-evidence and, when no reviewer will
+ * follow and the defense is verified code (not only comments), the finding
+ * becomes `inconclusive` with the hunter's reason recorded as a limitation.
+ */
 export function recordHunterOutput(
   store: SecurityStore,
   ctx: HunterRecordContext,
@@ -177,7 +188,7 @@ export function recordHunterOutput(
   let merged = 0
   let discarded = 0
   let assessed = 0
-  let ruledOut = 0
+  let disputed = 0
   store.transaction(() => {
     for (const finding of output.findings) {
       const verifiedSteps = finding.attackPath.filter(step => isQuoteVerified(step.quoteCheck))
@@ -239,7 +250,6 @@ export function recordHunterOutput(
       const target = store.findFindingByFingerprint(ctx.scanId, fingerprint)
       if (!target) continue
       assessed++
-      const verified = assessment.evidence && isQuoteVerified(assessment.evidence.quoteCheck)
       const evidenceIds = assessment.evidence
         ? insertCitations(
             store,
@@ -251,27 +261,41 @@ export function recordHunterOutput(
           )
         : []
       if (assessment.verdict === 'false_positive') {
-        // Without a skeptic later, a hunter's cited defense is the strongest review this finding gets.
-        const ruleOut = verified === true && !ctx.willReview(target.severity) && target.verification === 'potential'
+        // A hunter never rules out a rule hit on its own: with a reviewer later, the reviewer decides; without one,
+        // a defense backed by verified code leaves the finding open as inconclusive, never refuted.
+        const verifiedDefense = assessment.evidence !== undefined && isVerifiedCode(assessment.evidence)
+        const dispute = verifiedDefense && !ctx.willReview(target.severity) && target.verification === 'potential'
         store.updateFinding(target.id, {
           counterEvidenceIds: [...target.counterEvidenceIds, ...evidenceIds],
-          ...(ruleOut
+          ...(dispute
             ? {
-                verification: 'refuted' as const,
-                review: { verdict: 'refuted' as const, reasoning: clip(assessment.reason), model: ctx.model },
+                verification: 'inconclusive' as const,
+                limitations: dedupe([
+                  ...target.limitations,
+                  clip(
+                    `An AI hunter assessed this rule hit as a false positive (${assessment.reason.trim()}), but no independent review confirmed the cited defense, so it stays open.`,
+                    600,
+                  ),
+                ]).slice(0, 10),
               }
             : {}),
         })
-        if (ruleOut) ruledOut++
+        if (dispute) disputed++
       } else if (evidenceIds.length > 0) {
         store.updateFinding(target.id, { supportEvidenceIds: [...target.supportEvidenceIds, ...evidenceIds] })
       }
     }
   })
-  return { created, merged, discarded, assessed, ruledOut }
+  return { created, merged, discarded, assessed, disputed }
 }
 
-/** Apply an independent review. Refutation and confirmation both need verified code. */
+/**
+ * Apply an independent review. Refutation needs verified counter-evidence
+ * that is code, not only comments; confirmation needs a verified step. A
+ * severity correction applies only to a confirmed verdict with verified
+ * supporting code, and lowers a deterministic critical/high rule hit by at
+ * most one level; the original severity is noted in the review reasoning.
+ */
 export function applySkepticOutput(
   store: SecurityStore,
   finding: FindingRecord,
@@ -287,7 +311,8 @@ export function applySkepticOutput(
   return store.transaction(() => {
     const counterIds = insertCitations(store, ctx, 'skeptic', 'counterevidence', output.counterevidence)
     const supportIds = insertCitations(store, ctx, 'skeptic', 'source_span', output.supporting)
-    const counterVerified = output.counterevidence.some(c => isQuoteVerified(c.quoteCheck))
+    const counterVerified = output.counterevidence.some(isVerifiedCode)
+    const supportVerified = output.supporting.some(isVerifiedCode)
     const pathVerified =
       finding.attackPath.some(step => isQuoteVerified(step.quoteCheck)) ||
       output.supporting.some(c => isQuoteVerified(c.quoteCheck))
@@ -295,7 +320,9 @@ export function applySkepticOutput(
     let reasoning = output.reasoning
     if (verdict === 'refuted' && !counterVerified) {
       verdict = 'inconclusive'
-      reasoning = `${reasoning}\n\n[Host] The reviewer claimed a defense but none of its quotes matched the source, so the finding stays open.`
+      reasoning = output.counterevidence.some(c => isQuoteVerified(c.quoteCheck))
+        ? `${reasoning}\n\n[Host] The reviewer's matching counter-evidence is only comments or documentation, which do not prove a defense, so the finding stays open.`
+        : `${reasoning}\n\n[Host] The reviewer claimed a defense but none of its quotes matched the source, so the finding stays open.`
     }
     if (verdict === 'confirmed' && !pathVerified) {
       verdict = 'inconclusive'
@@ -303,6 +330,8 @@ export function applySkepticOutput(
     }
     const verification: Verification =
       verdict === 'confirmed' ? 'strong_static_evidence' : verdict === 'refuted' ? 'refuted' : 'inconclusive'
+    const severity = reviewedSeverity(finding, output.severity, verdict, supportVerified)
+    if (severity.note) reasoning = `${reasoning}\n\n${severity.note}`
     const limitations = [
       ...finding.limitations.filter(l => !l.startsWith('Found by a pattern rule')),
       ...output.missingInformation.map(m => clip(m, 300)),
@@ -310,8 +339,7 @@ export function applySkepticOutput(
     const localized = output.localized
     return store.updateFinding(finding.id, {
       verification,
-      // A refutation's severity rests on the claimed defense; never apply it, even when downgraded to inconclusive.
-      ...(output.severity && output.verdict !== 'refuted' ? { severity: output.severity } : {}),
+      ...(severity.applied ? { severity: severity.applied } : {}),
       review: {
         verdict,
         reasoning: clip(reasoning),
@@ -413,6 +441,37 @@ export function markNewFindings(store: SecurityStore, scanId: string, previous: 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Rule-hit sources: their severity comes from a deterministic rule, not a model. */
+const DETERMINISTIC_SOURCES: ReadonlySet<FindingSource> = new Set(['secret', 'dependency', 'sast', 'external'])
+
+/**
+ * The severity a review may set, with a host note for the reasoning. Nothing
+ * changes unless the final verdict is `confirmed` with verified supporting
+ * code. A deterministic critical/high rule hit drops one level at most. A
+ * refuted finding's severity is moot, so it gets no note.
+ */
+function reviewedSeverity(
+  finding: FindingRecord,
+  proposed: Severity | undefined,
+  verdict: FindingReview['verdict'],
+  supportVerified: boolean,
+): { readonly applied?: Severity; readonly note?: string } {
+  if (proposed === undefined || proposed === finding.severity || verdict === 'refuted') return {}
+  if (verdict !== 'confirmed' || !supportVerified) {
+    return {
+      note: `[Host] The suggested severity (${proposed}) was not applied: a severity change needs a confirmed verdict with verified supporting code. Severity stays ${finding.severity}.`,
+    }
+  }
+  const from = severityRank(finding.severity)
+  const capped =
+    DETERMINISTIC_SOURCES.has(finding.source) && from <= severityRank('high') && severityRank(proposed) > from + 1
+  const applied = capped ? (SEVERITIES[from + 1] ?? proposed) : proposed
+  return {
+    applied,
+    note: `[Host] Severity changed from ${finding.severity} (original) to ${applied}${capped ? `; the reviewer suggested ${proposed}, but a deterministic ${finding.severity} rule hit is lowered by at most one level per review` : ''}.`,
+  }
+}
 
 /** The step that best identifies the issue: the last verified one (usually the sink). */
 function keyStep(steps: readonly VerifiedCitation[]): VerifiedCitation | undefined {

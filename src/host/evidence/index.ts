@@ -3,6 +3,7 @@
  * redacted snapshot before any AI evidence is trusted.
  */
 
+export { commentMask, isCommentOnlyRange } from './comments.ts'
 export {
   isWhitespace,
   type NormalizedText,
@@ -14,6 +15,7 @@ export {
   type CitedQuote,
   checkStaleness,
   excerpt,
+  MAX_EXTRA_CITED_LINES,
   type QuoteSource,
   type QuoteVerification,
   SNIPPET_MAX_CHARS,

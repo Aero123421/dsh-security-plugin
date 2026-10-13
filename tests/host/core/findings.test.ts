@@ -205,7 +205,7 @@ describe('recordSignalFindings', () => {
 describe('recordHunterOutput', () => {
   it('stores a verified finding as a potential AI finding located at its last verified step', () => {
     const result = recordHunterOutput(store, hunterCtx(), hunterOutput([hunterFinding()]))
-    expect(result).toEqual({ created: 1, merged: 0, discarded: 0, assessed: 0, ruledOut: 0 })
+    expect(result).toEqual({ created: 1, merged: 0, discarded: 0, assessed: 0, disputed: 0 })
     const [finding] = store.listFindings(SCAN)
     expect(finding).toMatchObject({
       source: 'ai',
@@ -344,20 +344,37 @@ describe('recordHunterOutput', () => {
         hunterOutput([], [{ id, verdict, reason: 'Parameterized.', ...(evidence ? { evidence } : {}) }]),
       )
 
-    it('rules out a false positive with verified counterevidence when no review will follow', () => {
+    it('never refutes without a review: a verified code defense makes the rule hit inconclusive (Quick mode)', () => {
       const result = assess('false_positive', defense, () => false, ' s1 ')
-      expect(result).toMatchObject({ assessed: 1, ruledOut: 1 })
+      expect(result).toMatchObject({ assessed: 1, disputed: 1 })
       const finding = store.findFindingByFingerprint(SCAN, fingerprint)
-      expect(finding?.verification).toBe('refuted')
-      expect(finding?.review).toEqual({ verdict: 'refuted', reasoning: 'Parameterized.', model: 'scripted/oracle' })
+      expect(finding?.verification).toBe('inconclusive')
+      expect(finding?.review).toBeUndefined()
+      expect(finding?.limitations).toContain(
+        'An AI hunter assessed this rule hit as a false positive (Parameterized.), but no independent review confirmed the cited defense, so it stays open.',
+      )
       const [counter] = store.getEvidence(SCAN, finding?.counterEvidenceIds ?? [])
       expect(counter).toMatchObject({ kind: 'counterevidence', origin: 'hunter', quoteCheck: 'match' })
       expect(counter?.claim).toMatch(/^Parameterized\. — /)
     })
 
+    it('does not count a comment-only defense, from any file, as counter-evidence', () => {
+      const comment = { ...cite('src/other.ts', 2, '// input sanitized upstream'), commentOnly: true }
+      expect(assess('false_positive', comment, () => false)).toMatchObject({ assessed: 1, disputed: 0 })
+      const finding = store.findFindingByFingerprint(SCAN, fingerprint)
+      expect(finding?.verification).toBe('potential')
+      // Still shown as context.
+      const [counter] = store.getEvidence(SCAN, finding?.counterEvidenceIds ?? [])
+      expect(counter).toMatchObject({
+        kind: 'counterevidence',
+        quote: '// input sanitized upstream',
+        quoteCheck: 'match',
+      })
+    })
+
     it('leaves the decision to the reviewer when a review will follow', () => {
       const result = assess('false_positive', defense, () => true)
-      expect(result).toMatchObject({ assessed: 1, ruledOut: 0 })
+      expect(result).toMatchObject({ assessed: 1 })
       const finding = store.findFindingByFingerprint(SCAN, fingerprint)
       expect(finding?.verification).toBe('potential')
       expect(finding?.review).toBeUndefined()
@@ -365,9 +382,9 @@ describe('recordHunterOutput', () => {
     })
 
     it('never rules out without a verified quote', () => {
-      expect(assess('false_positive', undefined, () => false)).toMatchObject({ assessed: 1, ruledOut: 0 })
+      expect(assess('false_positive', undefined, () => false)).toMatchObject({ assessed: 1 })
       expect(assess('false_positive', cite('src/db.ts', 4, 'invented', 'mismatch'), () => false)).toMatchObject({
-        ruledOut: 0,
+        disputed: 0,
       })
       const finding = store.findFindingByFingerprint(SCAN, fingerprint)
       expect(finding?.verification).toBe('potential')
@@ -380,7 +397,7 @@ describe('recordHunterOutput', () => {
       const finding = store.findFindingByFingerprint(SCAN, fingerprint)
       expect(finding?.supportEvidenceIds).toHaveLength(2)
       expect(store.getEvidence(SCAN, finding?.supportEvidenceIds ?? [])[1]?.kind).toBe('source_span')
-      expect(assess('false_positive', defense, () => false, 'S7')).toMatchObject({ assessed: 0, ruledOut: 0 })
+      expect(assess('false_positive', defense, () => false, 'S7')).toMatchObject({ assessed: 0 })
     })
   })
 })
@@ -471,7 +488,11 @@ describe('applySkepticOutput', () => {
       impact: '影響',
       recommendation: '推奨',
       limitations: ['deployment'],
-      review: { verdict: 'confirmed', reasoning: 'No guard.' },
+      review: {
+        verdict: 'confirmed',
+        reasoning: 'No guard.\n\n[Host] Severity changed from high (original) to critical.',
+        severityAdjustment: 'critical',
+      },
     })
     expect(updated.supportEvidenceIds).toHaveLength(2)
     expect(updated.supportEvidenceIds[0]).toBe('ev-0')
@@ -489,6 +510,103 @@ describe('applySkepticOutput', () => {
       applySkepticOutput(store, second, verdict({ supporting: [cite('src/app.ts', 3, 'db.query(sql)')] }), roleCtx)
         .verification,
     ).toBe('strong_static_evidence')
+  })
+
+  it('does not accept comment-only counter-evidence for a refutation', () => {
+    const finding = insertFinding({ attackPath: [verifiedStep] })
+    const comment = { ...cite('src/app.ts', 2, '// sanitized by the gateway'), commentOnly: true }
+    const updated = applySkepticOutput(
+      store,
+      finding,
+      verdict({ verdict: 'refuted', reasoning: 'Sanitized upstream.', counterevidence: [comment] }),
+      roleCtx,
+    )
+    expect(updated.verification).toBe('inconclusive')
+    expect(updated.review?.verdict).toBe('inconclusive')
+    expect(updated.review?.reasoning).toMatch(/\[Host\] The reviewer's matching counter-evidence is only comments/)
+    expect(store.getEvidence(SCAN, updated.counterEvidenceIds)[0]).toMatchObject({ quoteCheck: 'match' })
+
+    // One verified code quote next to the comment is enough.
+    const second = insertFinding({ id: 'f-2', fingerprint: 'fp-2', attackPath: [verifiedStep] })
+    const code = cite('src/app.ts', 3, 'if (!isAdmin(req.user)) return res.status(403).end()')
+    expect(
+      applySkepticOutput(store, second, verdict({ verdict: 'refuted', counterevidence: [comment, code] }), roleCtx)
+        .verification,
+    ).toBe('refuted')
+  })
+
+  describe('severity corrections', () => {
+    const support = [cite('src/app.ts', 3, 'db.query(sql)')]
+    const review = (overrides: Partial<FindingRecord>, output: Partial<SkepticOutput>) =>
+      applySkepticOutput(store, insertFinding({ attackPath: [verifiedStep], ...overrides }), verdict(output), roleCtx)
+
+    it('ignores a severity change on an inconclusive verdict and notes it', () => {
+      const updated = review({ severity: 'high' }, { verdict: 'inconclusive', severity: 'low', supporting: support })
+      expect(updated.severity).toBe('high')
+      expect(updated.review?.severityAdjustment).toBe('low')
+      expect(updated.review?.reasoning).toBe(
+        'No guard.\n\n[Host] The suggested severity (low) was not applied: a severity change needs a confirmed verdict with verified supporting code. Severity stays high.',
+      )
+    })
+
+    it('ignores a severity change on a confirmation without verified supporting code', () => {
+      // The attack path is verified, so the confirmation stands, but the new severity has no evidence.
+      const unverified = review({ severity: 'high' }, { severity: 'critical' })
+      expect(unverified).toMatchObject({ verification: 'strong_static_evidence', severity: 'high' })
+      expect(unverified.review?.reasoning).toMatch(/The suggested severity \(critical\) was not applied/)
+
+      const mismatched = review(
+        { id: 'f-2', fingerprint: 'fp-2', severity: 'high' },
+        { severity: 'low', supporting: [cite('src/app.ts', 3, 'db.raw(x)', 'mismatch')] },
+      )
+      expect(mismatched.severity).toBe('high')
+
+      const commentOnly = review(
+        { id: 'f-3', fingerprint: 'fp-3', severity: 'high' },
+        { severity: 'low', supporting: [{ ...cite('src/app.ts', 3, '// low impact'), commentOnly: true }] },
+      )
+      expect(commentOnly.severity).toBe('high')
+    })
+
+    it('lowers a deterministic critical/high rule hit by at most one level per review', () => {
+      const sast = review({ source: 'sast', severity: 'critical' }, { severity: 'low', supporting: support })
+      expect(sast.severity).toBe('high')
+      expect(sast.review?.severityAdjustment).toBe('low')
+      expect(sast.review?.reasoning).toBe(
+        'No guard.\n\n[Host] Severity changed from critical (original) to high; the reviewer suggested low, but a deterministic critical rule hit is lowered by at most one level per review.',
+      )
+      const secret = review(
+        { id: 'f-2', fingerprint: 'fp-2', source: 'secret', severity: 'high' },
+        { severity: 'info', supporting: support },
+      )
+      expect(secret.severity).toBe('medium')
+      const dependency = review(
+        { id: 'f-3', fingerprint: 'fp-3', source: 'dependency', severity: 'high' },
+        { severity: 'medium', supporting: support },
+      )
+      expect(dependency.severity).toBe('medium')
+      expect(dependency.review?.reasoning).toBe('No guard.\n\n[Host] Severity changed from high (original) to medium.')
+    })
+
+    it('applies other confirmed, evidenced changes as proposed', () => {
+      const ai = review({ source: 'ai', severity: 'critical' }, { severity: 'low', supporting: support })
+      expect(ai.severity).toBe('low')
+      const medium = review(
+        { id: 'f-2', fingerprint: 'fp-2', source: 'sast', severity: 'medium' },
+        { severity: 'info', supporting: support },
+      )
+      expect(medium.severity).toBe('info')
+      const raised = review(
+        { id: 'f-3', fingerprint: 'fp-3', source: 'sast', severity: 'low' },
+        { severity: 'critical', supporting: support },
+      )
+      expect(raised.severity).toBe('critical')
+      const same = review(
+        { id: 'f-4', fingerprint: 'fp-4', severity: 'high' },
+        { severity: 'high', supporting: support },
+      )
+      expect(same.review?.reasoning).toBe('No guard.')
+    })
   })
 
   it('records inconclusive verdicts with the missing information', () => {

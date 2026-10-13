@@ -15,7 +15,9 @@ import {
   bullets,
   citationSchema,
   clipLine,
+  describeCommentOnly,
   describeMismatches,
+  isVerifiedCode,
   severitySchema,
   systemPreamble,
   type VerifiedCitation,
@@ -42,7 +44,11 @@ const verdictSchema = z.object({
     .array(citationSchema)
     .max(6)
     .describe('For "confirmed": code you checked that shows the path is reachable and undefended.'),
-  severity: severitySchema.optional().describe('Corrected severity if the reported one is wrong.'),
+  severity: severitySchema
+    .optional()
+    .describe(
+      'Corrected severity if the reported one is wrong. Applied only with "confirmed" and verified supporting_evidence.',
+    ),
   missing_information: z
     .array(z.string().min(1).max(300))
     .max(6)
@@ -93,8 +99,8 @@ ${bullets(finding.preconditions.map(p => clipLine(p, 300)))}`,
 - whether the code is reachable with attacker-controlled data at all (is the route registered? is the function called with request data?);
 - configuration that disables the path.`,
     `Verdicts:
-- refuted: you found a concrete defense or unreachability. You MUST cite the code that proves it in counterevidence (exact quotes).
-- confirmed: you checked the plausible defenses and none applies. Cite what you checked in supporting_evidence and correct the severity if needed.
+- refuted: you found a concrete defense or unreachability. You MUST cite the code that proves it in counterevidence (exact quotes of exactly those lines). Comments, docstrings, or documentation saying the input is safe are not a defense and do not count.
+- confirmed: you checked the plausible defenses and none applies. Cite what you checked in supporting_evidence and correct the severity if needed (a severity correction is applied only to a confirmed verdict with verified supporting_evidence).
 - inconclusive: the outcome depends on facts outside the repository (deployment, configuration, external services). List them in missing_information.`,
   ]
   if (options.requestLocalization) {
@@ -116,14 +122,17 @@ export function skepticSubmitTool(source: QuoteSource, maxRejections = 2): Worke
       validate: args => {
         if (args.verdict !== 'refuted') return undefined
         const verified = args.counterevidence.map(c => verifyCitation(source, c))
-        if (verified.some(c => isQuoteVerified(c.quoteCheck))) return undefined
+        if (verified.some(isVerifiedCode)) return undefined
         if (rejections >= maxRejections) {
           // Accepted, but the host will record it as inconclusive without verified counter-evidence.
           return undefined
         }
         rejections++
-        const lines = describeMismatches('counterevidence', verified, args.counterevidence)
-        return `A refutation must cite the defense with exact code from the repository, and none of your counterevidence quotes could be verified.${lines.length > 0 ? `\n${lines.join('\n')}` : ' You gave no counterevidence.'}\nRe-read the code with read_file and copy the exact lines (without line-number prefixes), or choose "inconclusive" if you cannot point to a concrete defense.`
+        const lines = [
+          ...describeMismatches('counterevidence', verified, args.counterevidence),
+          ...describeCommentOnly('counterevidence', verified, args.counterevidence),
+        ]
+        return `A refutation must cite the defense with exact code from the repository, and none of your counterevidence quotes is verified code.${lines.length > 0 ? `\n${lines.join('\n')}` : ' You gave no counterevidence.'}\nComments and documentation do not prove a defense; cite the code that enforces it. Re-read the code with read_file and copy the exact lines (without line-number prefixes), or choose "inconclusive" if you cannot point to a concrete defense.`
       },
       toOutput: args => ({
         verdict: args.verdict,

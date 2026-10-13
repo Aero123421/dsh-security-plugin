@@ -340,9 +340,146 @@ describe('verifyQuote: snippet limits', () => {
 
     const short = Array.from({ length: 30 }, (_, i) => `v${i + 1} = ${i}`)
     const s2 = sourceOf({ 's.py': short.join('\n') })
-    const r2 = verifyQuote(s2, { path: 's.py', startLine: 1, endLine: 30, quote: 'v1 = 0 v2 = 1' })
+    const r2 = verifyQuote(s2, { path: 's.py', startLine: 1, endLine: 30, quote: short.join('\n') })
+    expect(r2.location).toEqual({ path: 's.py', startLine: 1, endLine: 30 })
     expect(r2.snippet!.split('\n')).toHaveLength(12)
     expect(r2.snippet!.endsWith('v12 = 11 …')).toBe(true)
+  })
+})
+
+/** A 60-line file where `isAdmin(req.user)` occurs on lines 8 and 30 and a unique statement on line 50. */
+const ADMIN = Array.from({ length: 60 }, (_, i) => {
+  const line = i + 1
+  if (line === 8) return '  if (!isAdmin(req.user)) return res.status(403).end()'
+  if (line === 30) return '  const canExport = isAdmin(req.user)'
+  if (line === 50) return '  const config = loadConfig(process.env.CONFIG_PATH)'
+  return `const filler${line} = ${line}`
+}).join('\n')
+
+describe('verifyQuote: cited ranges are narrowed and bounded', () => {
+  const source = sourceOf({ 'src/admin.ts': ADMIN })
+  const cite = (startLine: number, endLine: number, quote: string) =>
+    verifyQuote(source, { path: 'src/admin.ts', startLine, endLine, quote })
+  const CONFIG = 'const config = loadConfig(process.env.CONFIG_PATH)'
+
+  it('does not let a wide cited range verify a quote that occurs twice (audit repro)', () => {
+    expect(cite(20, 20, 'isAdmin(req.user)')).toEqual({ check: 'mismatch', reason: 'quote ambiguous' })
+    const wide = cite(1, 40, 'isAdmin(req.user)')
+    expect(wide).toEqual({
+      check: 'mismatch',
+      reason: 'quote ambiguous: it occurs 2 times in lines 1-43; cite the exact lines of one occurrence',
+    })
+  })
+
+  it('stores the occurrence itself, not the cited range, as location and snippet', () => {
+    expect(cite(10, 50, CONFIG)).toEqual({
+      check: 'match',
+      location: { path: 'src/admin.ts', startLine: 50, endLine: 50 },
+      snippet: '  const config = loadConfig(process.env.CONFIG_PATH)',
+    })
+    // An occurrence within the slack window is also reported at its own line.
+    expect(cite(11, 11, 'if (!isAdmin(req.user))')).toMatchObject({
+      check: 'match',
+      location: { startLine: 8, endLine: 8 },
+      snippet: '  if (!isAdmin(req.user)) return res.status(403).end()',
+    })
+  })
+
+  it('rejects a cited range wider than the quote lines + 40 and says how to cite', () => {
+    expect(cite(1, 60, CONFIG)).toEqual({
+      check: 'mismatch',
+      reason: 'cited range too wide: lines 1-60 (60 lines) for a 1-line quote; cite only the lines the quote is on',
+    })
+    expect(cite(10, 50, CONFIG).check).toBe('match') // 41 lines
+    expect(cite(10, 51, CONFIG).reason).toMatch(/^cited range too wide: lines 10-51 \(42 lines\)/)
+    // The allowance grows with the quote's own lines, ignoring blank lines around it.
+    const threeLines = '\nconst filler48 = 48\nconst filler49 = 49\n  const config = loadConfig(\n'
+    expect(cite(8, 50, threeLines)).toMatchObject({ check: 'match', location: { startLine: 48, endLine: 50 } })
+    expect(cite(7, 50, threeLines).reason).toMatch(/^cited range too wide: lines 7-50 \(44 lines\) for a 3-line quote/)
+    // Wide citations past the end of the file are rejected too instead of being relocated.
+    expect(cite(1, 10_000, CONFIG).reason).toMatch(/^cited range too wide/)
+  })
+
+  it('honors a custom maxExtraLines', () => {
+    const cited = { path: 'src/admin.ts', startLine: 45, endLine: 50, quote: 'loadConfig(process.env.CONFIG_PATH)' }
+    expect(verifyQuote(source, cited).check).toBe('match')
+    expect(verifyQuote(source, cited, { maxExtraLines: 4 }).reason).toMatch(/^cited range too wide/)
+    expect(verifyQuote(source, cited, { maxExtraLines: 5 }).check).toBe('match')
+  })
+
+  it('accepts a repeated quote only when the cited range is tight, taking the nearest occurrence', () => {
+    const lines = ['a()', 'check(user.id)', 'b()', 'check(user.id)', 'c()', 'd()', 'e()', 'f()', 'g()', 'h()']
+    const near = sourceOf({ 'a.ts': lines.join('\n') })
+    const at = (startLine: number, endLine: number, options = {}) =>
+      verifyQuote(near, { path: 'a.ts', startLine, endLine, quote: 'check(user.id)' }, options)
+    expect(at(4, 4)).toMatchObject({ check: 'match', location: { startLine: 4, endLine: 4 } })
+    expect(at(2, 2)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
+    expect(at(5, 5)).toMatchObject({ check: 'match', location: { startLine: 4, endLine: 4 } })
+    expect(at(1, 7)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } }) // 7 <= 1 + 2 × 3
+    expect(at(1, 8).reason).toBe(
+      'quote ambiguous: it occurs 2 times in lines 1-10; cite the exact lines of one occurrence',
+    )
+    expect(at(2, 4, { slackLines: 0 }).reason).toMatch(/^quote ambiguous: it occurs 2 times in lines 2-4/)
+    expect(at(2, 2, { slackLines: 0 })).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
+  })
+
+  it('narrows a short quote accepted from a short cited range to its own line', () => {
+    const s = sourceOf({ 'b.ts': 'x()\n})\n\n\ny()\n' })
+    expect(verifyQuote(s, { path: 'b.ts', startLine: 2, endLine: 4, quote: '})' })).toEqual({
+      check: 'match',
+      location: { path: 'b.ts', startLine: 2, endLine: 2 },
+      snippet: '})',
+    })
+  })
+})
+
+describe('verifyQuote: comment-only quotes', () => {
+  const API = [
+    'export function handler(req, res) {', // 1
+    '  // input sanitized upstream by the gateway', // 2
+    '  const id = clean(req.query.id) // validated by the gateway', // 3
+    '  /*', // 4
+    '   * Safe: the ORM escapes every value.', // 5
+    '   */', // 6
+    "  const url = 'https://api.example.com/v1/items'", // 7
+    '  return db.find(id, url)', // 8
+    '}', // 9
+  ].join('\n')
+  const source = sourceOf({
+    'src/api.ts': API,
+    'app/db.py': 'def find(q):\n    """Input is validated upstream."""\n    return run(q)\n',
+    'README.md': 'All input is sanitized upstream.\n',
+  })
+  const check = (path: string, line: number, quote: string) =>
+    verifyQuote(source, { path, startLine: line, endLine: line, quote })
+
+  it('flags matches that lie entirely in comments, docstrings, or documentation', () => {
+    expect(check('src/api.ts', 2, '// input sanitized upstream by the gateway')).toMatchObject({
+      check: 'match',
+      commentOnly: true,
+    })
+    expect(check('src/api.ts', 2, 'input sanitized upstream').commentOnly).toBe(true)
+    expect(check('src/api.ts', 3, 'validated by the gateway').commentOnly).toBe(true)
+    expect(check('src/api.ts', 5, 'Safe: the ORM escapes every value.').commentOnly).toBe(true)
+    expect(check('src/api.ts', 4, '/*\n * Safe: the ORM escapes every value.\n */').commentOnly).toBe(true)
+    expect(check('app/db.py', 2, '"""Input is validated upstream."""').commentOnly).toBe(true)
+    expect(check('README.md', 1, 'All input is sanitized upstream.').commentOnly).toBe(true)
+    // Relocated comment quotes are flagged as well.
+    expect(
+      verifyQuote(
+        source,
+        { path: 'src/api.ts', startLine: 9, endLine: 9, quote: 'Safe: the ORM escapes' },
+        { slackLines: 0 },
+      ),
+    ).toMatchObject({ check: 'relocated', commentOnly: true })
+  })
+
+  it('does not flag quotes that contain code', () => {
+    expect(check('src/api.ts', 3, 'const id = clean(req.query.id)').commentOnly).toBeUndefined()
+    expect(check('src/api.ts', 3, 'clean(req.query.id) // validated').commentOnly).toBeUndefined()
+    expect(check('src/api.ts', 7, "'https://api.example.com/v1/items'").commentOnly).toBeUndefined()
+    expect(check('app/db.py', 3, 'return run(q)')).toMatchObject({ check: 'match' })
+    expect(check('app/db.py', 3, 'return run(q)').commentOnly).toBeUndefined()
   })
 })
 
