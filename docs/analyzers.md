@@ -80,7 +80,7 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 | `js.path-traversal` | Path traversal | CWE-22 | high | low |
 | `js.ssrf` | Server-side request forgery | CWE-918 | high | low |
 | `js.open-redirect` | Open redirect | CWE-601 | medium | low |
-| `js.xss` | Reflected / DOM cross-site scripting | CWE-79 | high | – |
+| `js.xss` | Reflected / DOM cross-site scripting, including Markdown rendered as raw HTML (`marked`, `showdown`, `markdown-it` with `html: true`, remark/rehype with raw HTML) without a sanitizer | CWE-79 | high | – |
 | `js.template-unescaped-output` | Unescaped template output | CWE-79 | medium | low |
 | `js.insecure-deserialization` | Insecure deserialization (node-serialize) | CWE-502 | critical | medium |
 | `js.unsafe-yaml-load` | js-yaml `load()` on dynamic data | CWE-502 | medium | low |

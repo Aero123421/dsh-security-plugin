@@ -19,7 +19,7 @@ import { asConnection, asLlm, asWorkspaceRegistry } from './dsh/adapters.ts'
 import type { LoggerPort } from './dsh/ports.ts'
 import { registerRpcRoutes } from './rpc/server.ts'
 import { ScanController } from './scan/controller.ts'
-import { createHandlers } from './service.ts'
+import { createHandlers, hostPathMasker } from './service.ts'
 import { SettingsService } from './settings.ts'
 import { openSecurityStore } from './store/sqlite.ts'
 
@@ -71,6 +71,7 @@ export function apply(ctx: HostContext, input?: Partial<Config>): void {
     astGrep: loadEngine,
     now,
     pluginVersion: __PLUGIN_VERSION__,
+    dataDir,
   })
 
   // Registered first so it is disposed last: the controller must stop before the store closes.
@@ -92,6 +93,7 @@ export function apply(ctx: HostContext, input?: Partial<Config>): void {
     logger,
     pluginVersion: __PLUGIN_VERSION__,
     now,
+    dataDir,
   })
 
   ctx.inject(['connection'], scoped => {
@@ -100,7 +102,8 @@ export function apply(ctx: HostContext, input?: Partial<Config>): void {
       logger.warn('dsh-security: this DSH build has no exact-route support; the Security page is unavailable')
       return
     }
-    scoped.effect(() => registerRpcRoutes(connection, handlers, { logger }), 'dsh-security: rpc routes')
+    const maskPaths = (text: string) => hostPathMasker({ workspaces, dataDir })(text)
+    scoped.effect(() => registerRpcRoutes(connection, handlers, { logger, maskPaths }), 'dsh-security: rpc routes')
   })
   logger.info(`dsh-security ${__PLUGIN_VERSION__}: data in ${dataDir}`)
 }

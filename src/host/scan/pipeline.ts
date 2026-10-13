@@ -8,7 +8,8 @@
  * so completed work is never repeated and nothing is duplicated.
  */
 
-import type { Coverage, WorkerView } from '../../shared/contracts.ts'
+import { homedir, tmpdir } from 'node:os'
+import type { AnalyzerStatus, Coverage, WorkerView } from '../../shared/contracts.ts'
 import { type RoleName, SCAN_PHASES, type ScanPhase } from '../../shared/domain.ts'
 import type { ModelRef } from '../../shared/settings.ts'
 import { chainSubmitTool, chainSystem, chainTask } from '../agents/roles/chain.ts'
@@ -29,7 +30,7 @@ import type { Toolkit } from '../analysis/toolkit.ts'
 import type { Config } from '../config.ts'
 import type { AgentRunRecord, FindingRecord, ScanRecord, TaskRecord, ThreatModelRecord } from '../core/model.ts'
 import type { LlmPort, LoggerPort } from '../dsh/ports.ts'
-import { maskRoot } from '../evidence/text.ts'
+import { createPathMasker, type PathMasker } from '../paths.ts'
 import type { SecurityStore } from '../store/types.ts'
 import { type AnalysisContext, type AnalysisStep, analyzeWorkspace } from './analysis.ts'
 import { ScanBudgetGate } from './budget.ts'
@@ -64,6 +65,8 @@ export interface PipelineDeps {
   readonly astGrep: () => Promise<AstGrepHandle | undefined>
   readonly now: () => Date
   readonly live: LiveWorkers
+  /** Plugin data directory, masked as `<data>` in recorded messages. */
+  readonly dataDir?: string
 }
 
 const HUNT_KINDS = new Set<TaskRecord['kind']>([
@@ -102,6 +105,7 @@ export class ScanJob {
   private scan: ScanRecord
   private discarded = 0
   private blockedNotified = false
+  private masker: { readonly key: string; readonly mask: PathMasker } | undefined
 
   constructor(
     scanId: string,
@@ -194,7 +198,7 @@ export class ScanJob {
     const { snapshot } = this.analysis
     this.scan = this.deps.store.updateScan(this.scan.id, {
       snapshotDigest: digest,
-      analyzers: this.analysis.analyzers,
+      analyzers: this.maskedAnalyzers(),
       ...(snapshot.commit ? { commit: snapshot.commit } : {}),
     })
     for (const warning of this.analysis.warnings.slice(0, 30)) this.event('warn', 'analysis-warning', warning)
@@ -250,8 +254,8 @@ export class ScanJob {
         language: this.language(),
         inventory: this.analysis.inventory,
         fileCount: this.analysis.snapshot.files.size,
-        endpoints: this.inScopeEndpoints(),
-        signals: this.analysis.signals,
+        endpoints: this.modelEndpoints(),
+        signals: this.analysis.signals.map(signal => this.analysis.privacy.signal(signal)),
         maxHypotheses: max,
       }),
       submit: plannerSubmitTool(max),
@@ -290,11 +294,12 @@ export class ScanJob {
     const plan = planHuntTasks({
       mode: this.scan.mode,
       snapshot: this.analysis.snapshot,
-      endpoints: this.inScopeEndpoints(),
+      endpoints: this.modelEndpoints(),
       signals: this.analysis.signals,
       hypotheses: this.scan.threatModel?.hypotheses ?? [],
       includeTests: this.scan.settings.scan.includeTests,
       maxTasks: this.scan.budget.maxTasks,
+      isWithheld: path => this.analysis.privacy.isWithheld(path),
     })
     for (const planned of plan.tasks) this.ensure(planned)
     if (plan.overflow > 0) {
@@ -326,6 +331,7 @@ export class ScanJob {
       this.scan.mode,
       this.scan.settings.scan.reviewThreshold,
       Math.max(this.scan.budget.maxTasks, 10),
+      path => this.analysis.privacy.isWithheld(path),
     )
     for (const task of planned) this.ensure(task)
     const tasks = this.deps.store.listTasks(this.scan.id).filter(t => t.kind === 'review')
@@ -340,9 +346,16 @@ export class ScanJob {
     }
     this.phase('chain')
     const route = this.route('chain')
+    const { privacy } = this.analysis
     const candidates = this.deps.store
       .listFindings(this.scan.id)
-      .filter(f => f.verification !== 'refuted' && (f.source === 'ai' || f.source === 'sast'))
+      .filter(
+        f =>
+          f.verification !== 'refuted' &&
+          (f.source === 'ai' || f.source === 'sast') &&
+          !(f.location && privacy.isWithheld(f.location.path)) &&
+          privacy.reviewable(f),
+      )
       .slice(0, 40)
     if (!route || candidates.length < 2 || this.budget.exhausted()) {
       this.skipPhases('chain')
@@ -360,7 +373,7 @@ export class ScanJob {
       const ids = new Map(candidates.map((f, index) => [`F${index + 1}`, f]))
       const { result, ctx } = await this.runAgent(task, route, {
         system: chainSystem(this.language()),
-        task: chainTask([...ids.entries()].map(([id, finding]) => ({ id, finding }))),
+        task: chainTask([...ids.entries()].map(([id, finding]) => ({ id, finding: privacy.finding(finding) }))),
         submit: chainSubmitTool(this.analysis.quoteSource),
         maxTurns: Math.min(this.scan.budget.maxTurnsPerWorker, MAX_SHORT_ROLE_TURNS),
       })
@@ -429,11 +442,8 @@ export class ScanJob {
       this.event('info', `run-${request}`, request === 'pause' ? 'Scan paused' : 'Scan interrupted because DSH stopped')
       return
     }
-    // The message reaches the browser (scan summary, activity log): never include the absolute root.
-    const message = maskRoots(error instanceof Error ? error.message : String(error), [
-      this.scan.workspaceRoot,
-      this.analysis?.snapshot.root,
-    ])
+    // The message reaches the browser (scan summary, activity log): never include an absolute Host path.
+    const message = this.mask(error instanceof Error ? error.message : String(error))
     this.deps.logger.error('dsh-security: scan failed', error)
     this.scan = store.updateScan(this.scan.id, {
       status: 'failed',
@@ -449,29 +459,33 @@ export class ScanJob {
   // -------------------------------------------------------------------------
 
   private async runHunter(task: TaskRecord, route: ModelRef): Promise<void> {
+    const { privacy } = this.analysis
     const endpointIds = new Set(task.input.endpointIds ?? [])
-    const endpoints = this.analysis.endpoints.filter(e => endpointIds.has(e.id))
+    const endpoints = this.analysis.endpoints.filter(e => endpointIds.has(e.id) && privacy.endpointVisible(e))
     const wanted = new Set(task.input.signalFingerprints ?? [])
     const signals: TaskSignal[] = this.analysis.signals
       .filter(s => wanted.has(signalFingerprint(s)))
       .map((signal, index) => ({ id: `S${index + 1}`, signal }))
+    // Withheld hits keep their id (path and rule only), but the hunter cannot rule on what it cannot read.
     const signalIds = new Map(
-      signals.filter(s => isReportableSignal(s.signal)).map(s => [s.id, signalFingerprint(s.signal)] as const),
+      signals
+        .filter(s => isReportableSignal(s.signal) && !privacy.isWithheld(s.signal.location.path))
+        .map(s => [s.id, signalFingerprint(s.signal)] as const),
     )
-    const targets = new Set(task.input.targetPaths)
+    const targets = new Set(task.input.targetPaths.filter(path => !privacy.isWithheld(path)))
     const assessed = new Set(signalIds.values())
     const known = this.deps.store
       .listFindings(this.scan.id)
       .filter(f => f.location && targets.has(f.location.path) && !assessed.has(f.fingerprint))
-      .map(f => `${f.title} (${f.location?.path}:${f.location?.startLine})`)
+      .map(f => `${privacy.scrub(f.title)} (${f.location?.path}:${f.location?.startLine})`)
     const { result, ctx } = await this.runAgent<HunterOutput>(task, route, {
       system: hunterSystem(this.language()),
       task: hunterTask({
         kind: task.kind,
         focus: task.input.focus,
-        targetPaths: task.input.targetPaths,
+        targetPaths: [...targets],
         endpoints,
-        signals,
+        signals: signals.map(({ id, signal }) => ({ id, signal: privacy.signal(signal) })),
         ...(task.input.hypothesis ? { hypothesis: task.input.hypothesis } : {}),
         ...(this.scan.threatModel ? { threatModelSummary: this.scan.threatModel.summary } : {}),
         known,
@@ -520,9 +534,21 @@ export class ScanJob {
       this.deps.store.updateTask(task.id, { status: 'skipped', finishedAt: this.iso() })
       return
     }
+    const { privacy } = this.analysis
+    if (!privacy.reviewable(finding)) {
+      // Planned before the withheld check existed (resumed scan): a reviewer could not see any evidence.
+      this.deps.store.updateTask(task.id, {
+        status: 'skipped',
+        finishedAt: this.iso(),
+        error: { code: 'withheld', message: 'The evidence is in files withheld by the privacy settings.' },
+      })
+      return
+    }
     const { result, ctx } = await this.runAgent<SkepticOutput>(task, route, {
       system: skepticSystem(this.language()),
-      task: skepticTask(finding, { requestLocalization: this.language() !== 'en' && finding.source !== 'ai' }),
+      task: skepticTask(privacy.finding(finding), {
+        requestLocalization: this.language() !== 'en' && finding.source !== 'ai',
+      }),
       submit: skepticSubmitTool(this.analysis.quoteSource),
       maxTurns: Math.min(this.scan.budget.maxTurnsPerWorker, MAX_SHORT_ROLE_TURNS),
     })
@@ -649,7 +675,8 @@ export class ScanJob {
         ...(route.maxOutputTokens ? { maxOutputTokens: route.maxOutputTokens } : {}),
       },
       system: spec.system,
-      task: spec.task,
+      // Backstop over the whole message: no known secret value or absolute root, whatever the builder included.
+      task: this.analysis.privacy.scrub(spec.task),
       tools,
       maxTurns: spec.maxTurns,
       budget: this.budget,
@@ -760,6 +787,11 @@ export class ScanJob {
     return this.scan.language ?? 'en'
   }
 
+  /** In-scope endpoints a model may be told about (route text from withheld files is withheld too). */
+  private modelEndpoints() {
+    return this.inScopeEndpoints().filter(e => this.analysis.privacy.endpointVisible(e))
+  }
+
   private inScopeEndpoints() {
     const includeTests = this.scan.settings.scan.includeTests
     return this.analysis.endpoints.filter(
@@ -795,7 +827,7 @@ export class ScanJob {
         'No HTTP endpoints were detected; the attack surface may use a framework this version does not recognize.',
       )
     }
-    for (const analyzer of this.analysis.analyzers) {
+    for (const analyzer of this.maskedAnalyzers()) {
       if (!analyzer.available && analyzer.source !== 'disabled')
         gaps.push(`${analyzer.id} unavailable: ${analyzer.reason ?? 'unknown'}`)
     }
@@ -813,7 +845,7 @@ export class ScanJob {
         failed,
         skipped,
       },
-      analyzers: this.analysis.analyzers,
+      analyzers: this.maskedAnalyzers(),
       discardedUnverifiable: this.discarded > discarded ? this.discarded : discarded,
       gaps,
     }
@@ -863,7 +895,32 @@ export class ScanJob {
     message: string,
     data?: Record<string, unknown>,
   ) {
-    this.deps.store.appendEvent(this.scan.id, level, type, message, data)
+    this.deps.store.appendEvent(this.scan.id, level, type, this.mask(message), data)
+  }
+
+  /**
+   * Replace absolute Host paths (project root, data, temp and home directories) in text that is
+   * recorded for the browser: tool stderr and spawn errors quote them.
+   */
+  private mask(text: string): string {
+    const root = this.analysis?.snapshot.root
+    const key = root ?? ''
+    if (this.masker?.key !== key) {
+      this.masker = {
+        key,
+        mask: createPathMasker({
+          workspaceRoots: [this.scan.workspaceRoot, root],
+          dataDir: this.deps.dataDir,
+          tmp: tmpdir(),
+          home: homedir(),
+        }),
+      }
+    }
+    return this.masker.mask(text)
+  }
+
+  private maskedAnalyzers(): AnalyzerStatus[] {
+    return this.analysis.analyzers.map(a => (a.reason === undefined ? a : { ...a, reason: this.mask(a.reason) }))
   }
 
   private notice(level: 'info' | 'warn' | 'error', key: string, text: string): void {
@@ -905,10 +962,6 @@ function roleLabel(role: RoleName): string {
       : role === 'skeptic'
         ? 'Reviewer'
         : 'Chain researcher'
-}
-
-function maskRoots(text: string, roots: readonly (string | undefined)[]): string {
-  return roots.reduce<string>((out, root) => (root ? maskRoot(out, root) : out), text)
 }
 
 function firstLine(text: string): string {

@@ -19,6 +19,7 @@
 import type { RpcFailure, RpcMethodName, RpcRequest, RpcResponse, RpcResult } from '../../shared/contracts.ts'
 import { RPC_METHOD_NAMES, RPC_NAMESPACE } from '../../shared/contracts.ts'
 import type { ConnectionFetchRoute, ConnectionPort, LoggerPort } from '../dsh/ports.ts'
+import type { PathMasker } from '../paths.ts'
 import { badRequestFromZod, toRpcFailure } from './errors.ts'
 import { isLoopbackRequest } from './loopback.ts'
 import { requestSchemaFor } from './schemas.ts'
@@ -41,6 +42,8 @@ export interface RpcServerOptions {
   readonly logger: LoggerPort
   /** Largest accepted request body in bytes; default {@link DEFAULT_MAX_BODY_BYTES}. */
   readonly maxBodyBytes?: number
+  /** Replaces absolute Host paths in `RpcError` messages and details before they are sent. */
+  readonly maskPaths?: PathMasker
 }
 
 /** Default request body cap: 1 MiB. */
@@ -208,7 +211,7 @@ export function createMethodHandler<M extends RpcMethodName>(
     try {
       result = { ok: true, value: await handler(parsed.data, call) }
     } catch (error) {
-      const failure = toRpcFailure(error, logger)
+      const failure = toRpcFailure(error, logger, options.maskPaths)
       logger.warn(`dsh-security: RPC ${method} failed (${failure.code})`)
       result = { ok: false, error: failure }
     }

@@ -549,6 +549,59 @@ export class Redactor {
     out += content.slice(cursor)
     return redactText(out)
   }
+
+  /**
+   * The values behind the recorded secret spans, with their rule ids, longest
+   * first. `contentOf` returns a file's current text; a span whose text no
+   * longer hashes to its fingerprint is left out. Host-only: the result is
+   * for scrubbing other text and must never be stored or sent anywhere.
+   */
+  secretValues(contentOf: (path: string) => string | undefined): { readonly value: string; readonly ruleId: string }[] {
+    const seen = new Map<string, string>()
+    for (const [path, matches] of this.#byPath) {
+      const content = contentOf(path)
+      if (content === undefined) continue
+      for (const match of matches) {
+        if (match.end > content.length || match.end <= match.start) continue
+        const value = content.slice(match.start, match.end)
+        if (secretFingerprint(match.ruleId, path, value) !== match.fingerprint) continue
+        if (!seen.has(value)) seen.set(value, match.ruleId)
+      }
+    }
+    return [...seen.entries()]
+      .map(([value, ruleId]) => ({ value, ruleId }))
+      .sort((a, b) => b.value.length - a.value.length)
+  }
+}
+
+/**
+ * Replace each of `secrets` wherever it occurs in `text` with
+ * `[REDACTED:<ruleId>]` (line count preserved). A secret cut off at the end
+ * of a clipped excerpt (`…`) is caught too when at least 6 characters of it
+ * remain.
+ */
+export function redactKnownSecrets(
+  text: string,
+  secrets: readonly { readonly value: string; readonly ruleId: string }[],
+): string {
+  let out = text
+  for (const { value, ruleId } of secrets) {
+    if (value.length < 4) continue
+    if (out.includes(value)) out = out.split(value).join(redactSpan(value, ruleId))
+  }
+  const clipped = /…\s*$/.exec(out)
+  if (clipped) {
+    const body = out.slice(0, clipped.index)
+    for (const { value, ruleId } of secrets) {
+      for (let n = Math.min(value.length - 1, body.length); n >= 6; n--) {
+        if (body.endsWith(value.slice(0, n))) {
+          out = `${body.slice(0, body.length - n)}[REDACTED:${ruleId}]${out.slice(clipped.index)}`
+          return out
+        }
+      }
+    }
+  }
+  return out
 }
 
 /**

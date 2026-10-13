@@ -584,3 +584,102 @@ describe.each(MODES)('template files (%s mode)', (_mode, handle) => {
     ).toEqual(['src/C.vue:3', 'src/D.svelte:2', 'views/a.ejs:2', 'views/b.hbs:2', 'views/c.pug:2'])
   })
 })
+
+describe.each(MODES)('Markdown rendered as raw HTML (%s mode)', (_mode, handle) => {
+  const check = async (path: string, code: string) =>
+    expect(hits(await sast({ [path]: code }, handle), 'js.xss')).toEqual(expectedHits(code))
+
+  it('flags marked output inserted unsanitized, through variables and TS casts', async () => {
+    await check(
+      'components/Description.tsx',
+      `import { marked } from 'marked'
+import DOMPurify from 'dompurify'
+import sanitizeHtml from 'sanitize-html'
+import xss from 'xss'
+export function Description({ description }: Props) {
+  const html = marked.parse(description, { async: false }) as string
+  return <section dangerouslySetInnerHTML={{ __html: html }} /> // VULN
+}
+export const Inline = ({ text }) => <p dangerouslySetInnerHTML={{ __html: marked(text) }} /> // VULN
+export const Bio = ({ user }) => <p dangerouslySetInnerHTML={{ __html: String(marked.parseInline(user.bio)) }} /> // VULN
+export const Purified = ({ text }) => <p dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(marked.parse(text)) }} />
+export const Cleaned = ({ text }) => <p dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked(text)) }} />
+export const Filtered = ({ text }) => <p dangerouslySetInnerHTML={{ __html: xss(marked(text)) }} />
+export function Stored({ text }) {
+  const safe = DOMPurify.sanitize(marked.parse(text))
+  return <p dangerouslySetInnerHTML={{ __html: safe }} />
+}
+export const Static = () => <p dangerouslySetInnerHTML={{ __html: marked('**Welcome**') }} />
+export function render(el, comment) {
+  el.innerHTML = marked.parse(comment.body) // VULN
+}`,
+    )
+  })
+
+  it('honors a sanitizing marked hook and Markdown read from repository files', async () => {
+    await check(
+      'src/docs.js',
+      `import { marked } from 'marked'
+import DOMPurify from 'dompurify'
+import { readFileSync } from 'node:fs'
+marked.use({ hooks: { postprocess: html => DOMPurify.sanitize(html) } })
+export const Page = ({ text }) => <div dangerouslySetInnerHTML={{ __html: marked.parse(text) }} />
+export const Readme = () => <div dangerouslySetInnerHTML={{ __html: marked.parse(readFileSync('README.md', 'utf8')) }} />`,
+    )
+  })
+
+  it('flags markdown-it only when raw HTML is enabled', async () => {
+    await check(
+      'src/comments.js',
+      `import MarkdownIt from 'markdown-it'
+const md = new MarkdownIt({ html: true, linkify: true })
+const strict = new MarkdownIt()
+const cm = MarkdownIt('commonmark')
+export function show(el, comment) {
+  el.innerHTML = md.render(comment.body) // VULN
+  el.innerHTML = strict.render(comment.body)
+  el.innerHTML = cm.renderInline(comment.title) // VULN
+}`,
+    )
+  })
+
+  it('flags showdown and remark pipelines that keep raw HTML, not sanitized ones', async () => {
+    await check(
+      'components/Post.jsx',
+      `import showdown from 'showdown'
+import { unified } from 'unified'
+import remarkParse from 'remark-parse'
+import remarkRehype from 'remark-rehype'
+import rehypeRaw from 'rehype-raw'
+import rehypeSanitize from 'rehype-sanitize'
+import rehypeStringify from 'rehype-stringify'
+const converter = new showdown.Converter()
+export const Preview = ({ md }) => <div dangerouslySetInnerHTML={{ __html: converter.makeHtml(md) }} /> // VULN
+export async function Post({ body }) {
+  const file = await unified().use(remarkParse).use(remarkRehype, { allowDangerousHtml: true }).use(rehypeRaw).use(rehypeStringify).process(body)
+  return <article dangerouslySetInnerHTML={{ __html: String(file) }} /> // VULN
+}
+export async function SafePost({ body }) {
+  const out = await unified().use(remarkParse).use(remarkRehype).use(rehypeSanitize).use(rehypeStringify).process(body)
+  return <article dangerouslySetInnerHTML={{ __html: String(out) }} />
+}`,
+    )
+  })
+
+  it('reports request-controlled Markdown with high confidence', async () => {
+    const signals = await sast(
+      {
+        'src/preview.js': `import { marked } from 'marked'
+export function GET(request) {
+  const text = request.nextUrl.searchParams.get('md')
+  return <div dangerouslySetInnerHTML={{ __html: marked(text) }} />
+}`,
+      },
+      handle,
+    )
+    const [hit] = signals.filter(s => s.ruleId === 'js.xss')
+    expect(hit?.kind).toBe('vulnerability')
+    expect(hit?.title).toContain('Markdown')
+    expect(hit?.cwe).toBe('CWE-79')
+  })
+})

@@ -123,7 +123,8 @@ const en = {
   'error.security/workspace-unavailable': 'This project can’t be read right now. Check that its folder still exists.',
   'error.security/no-model': 'No AI model is set up for scanning yet. Choose one under Settings → Models.',
   'error.security/consent-required': 'Scans need your permission to send redacted code to the AI model.',
-  'error.security/busy': 'A scan of this project is already queued or running. Wait for it to finish, or pause or cancel it first.',
+  'error.security/busy':
+    'A scan of this project is already queued or running. Wait for it to finish, or pause or cancel it first.',
   'error.security/invalid-state': 'That action isn’t possible while the scan is in its current state.',
   'error.security/toolkit-unavailable': 'The tool can’t be installed on this machine.',
   'error.security/internal': 'Something went wrong on the host.',
@@ -625,7 +626,8 @@ const ja = {
   'error.security/no-model':
     'スキャンに使う AI モデルがまだ設定されていません。「設定」タブの「AI モデル」で選んでください。',
   'error.security/consent-required': 'AI レビューを行うには、伏せ字にしたコードを AI モデルに送る許可が必要です。',
-  'error.security/busy': 'このプロジェクトのスキャンがすでに実行中か順番待ちです。終わるのを待つか、先に一時停止またはキャンセルしてください。',
+  'error.security/busy':
+    'このプロジェクトのスキャンがすでに実行中か順番待ちです。終わるのを待つか、先に一時停止またはキャンセルしてください。',
   'error.security/invalid-state': 'スキャンの今の状態では、その操作はできません。',
   'error.security/toolkit-unavailable': 'このコンピューターにはツールをインストールできません。',
   'error.security/internal': 'ホストで問題が発生しました。',

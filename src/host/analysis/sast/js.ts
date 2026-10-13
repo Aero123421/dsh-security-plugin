@@ -175,6 +175,20 @@ const XSS_DOM: RuleMeta = {
   origins: ['request', 'browser'],
 }
 
+/** Markdown rendered to HTML by a renderer that passes raw HTML through, then inserted unsanitized. */
+const XSS_MARKDOWN: RuleMeta = {
+  id: 'js.xss',
+  title: 'Cross-site scripting (XSS) via Markdown rendered as raw HTML',
+  category: 'xss',
+  cwe: 'CWE-79',
+  severity: 'high',
+  message:
+    'Markdown is converted to HTML and inserted into the page as raw HTML (`dangerouslySetInnerHTML`, `innerHTML`) without sanitizing the result. The renderer used here (`marked`, `showdown`, `markdown-it` with `html: true`, or a remark/rehype pipeline that allows raw HTML) copies HTML written inside the Markdown straight into its output, so text such as `<img src=x onerror=...>` from whoever wrote the Markdown runs as script in every reader’s browser.',
+  recommendation:
+    'Sanitize the generated HTML right before inserting it, for example `DOMPurify.sanitize(marked.parse(text))`, `sanitize-html`, or `rehype-sanitize` in a unified pipeline. Or render Markdown without raw HTML: `markdown-it` with its default `html: false`, or `react-markdown` without `rehype-raw`.',
+  references: [REF.injection, cweUrl('CWE-79')],
+}
+
 const XSS_TEMPLATE: RuleMeta = {
   id: 'js.template-unescaped-output',
   title: 'Unescaped template output',
@@ -831,9 +845,133 @@ function domXssCall(chk: Checker, call: CallFact): void {
 function htmlSink(chk: Checker, at: Span, value: Span): void {
   const values = chk.values(value)
   if (values.every(v => isSafeHtml(chk, v))) return
+  const markdown = markdownHtml(chk, values)
+  if (markdown === 'safe') return
+  if (markdown) {
+    chk.report(XSS_MARKDOWN, at, markdown)
+    return
+  }
   const taint = chk.ex.taintResolved(value)
   if (!taint && chk.ex.isConstant(value)) return
   chk.check(XSS_DOM, at, taint, true)
+}
+
+// ---------------------------------------------------------------------------
+// Markdown rendered to raw HTML
+// ---------------------------------------------------------------------------
+
+const MD_PASS_THROUGH = /^(?:String|toString|trim|trimEnd|trimStart)$/
+const MD_REPO_FILE = /readFileSync|readFile\s*\(|import\.meta\.glob|\.mdx?['"`]/
+const MD_UNSAFE_PIPELINE = /allowDangerousHtml\s*:\s*true|sanitize\s*:\s*false|rehype-?raw|rehypeRaw/
+const MD_SANITIZED_PIPELINE = /rehype-?sanitize|rehypeSanitize/i
+const MD_HOOK_SANITIZER = /sanitize|DOMPurify|filterXSS|\bxss\b/i
+
+/** A Markdown render call: its Markdown argument, and whether the renderer keeps raw HTML. */
+interface MarkdownRender {
+  readonly input: Span
+  readonly raw: boolean
+}
+
+/**
+ * How an HTML sink's `values` relate to Markdown rendering:
+ * - a vulnerability when one of them is the output of a renderer that keeps
+ *   raw HTML (`marked`, `showdown`, `markdown-it` created with `html: true`,
+ *   a remark/unified pipeline with `allowDangerousHtml` or `sanitize: false`)
+ *   applied to dynamic, unsanitized Markdown;
+ * - `'safe'` when every value that is not sanitized HTML is a Markdown render
+ *   that cannot carry raw HTML (escaping renderer, sanitized pipeline or
+ *   hook, constant Markdown, Markdown read from repository files);
+ * - `undefined` otherwise (the generic HTML-sink rule decides).
+ */
+function markdownHtml(chk: Checker, values: readonly Span[]): Classification | 'safe' | undefined {
+  let allSafe = true
+  for (const value of values) {
+    if (isSafeHtml(chk, value)) continue
+    const render = markdownRender(chk, value, 0)
+    if (!render) {
+      allSafe = false
+      continue
+    }
+    const { input } = render
+    if (!render.raw || chk.ex.isConstant(input) || isSanitizerCall(chk, input) || MD_REPO_FILE.test(chk.text(input)))
+      continue
+    const taint = chk.ex.taintResolved(input)
+    if (taint && taint.origin !== 'cli') {
+      return { kind: 'vulnerability', confidence: taint.direct ? 'high' : 'medium', taint }
+    }
+    return {
+      kind: 'vulnerability',
+      confidence: 'medium',
+      note: 'The Markdown is not a constant; if users can write it (a profile, comment, or description stored in the database), any of them can attack the readers.',
+    }
+  }
+  return allSafe ? 'safe' : undefined
+}
+
+/** The Markdown render behind `value`, looking through pass-through wrappers and up to two identifiers. */
+function markdownRender(chk: Checker, value: Span, depth: number): MarkdownRender | undefined {
+  const inside = chk.model.calls.filter(c => c.start >= value.start && c.end <= value.end)
+  for (const call of inside) {
+    const render = markdownRenderCall(chk, call)
+    if (!render) continue
+    // Every call around the render inside this value must pass its result through unchanged.
+    const around = inside.filter(c => c !== call && c.start <= call.start && c.end >= call.end)
+    if (around.every(c => MD_PASS_THROUGH.test(c.name) && !isSanitizerCall(chk, c))) return render
+  }
+  if (depth >= 2 || inside.some(c => !MD_PASS_THROUGH.test(c.name))) return undefined
+  // `String(file)`, `file.toString()`, `file.value`, `await x as string`: follow the identifier.
+  const m = /^\s*(?:String\s*\(\s*)?(?:\(\s*)?(?:await\s+)?([A-Za-z_$][\w$]*)\b/.exec(chk.text(value))
+  if (!m?.[1]) return undefined
+  const start = value.start + m[0].length - m[1].length
+  const id: Span = { start, end: start + m[1].length }
+  for (const resolved of chk.values(id)) {
+    if (resolved.start === id.start && resolved.end === id.end) continue
+    const render = markdownRender(chk, resolved, depth + 1)
+    if (render) return render
+  }
+  return undefined
+}
+
+/** `call` as a Markdown render, if it is one. */
+function markdownRenderCall(chk: Checker, call: CallFact): MarkdownRender | undefined {
+  const q = chk.qualify(call.callee)
+  const input = chk.positional(call, 0)
+  if (!input) return undefined
+  if (chk.imports(/^marked$/) && /^marked(?:\.marked)?(?:\.(?:parse|parseInline))?$/.test(q)) {
+    // marked keeps raw HTML; a `marked.use({ hooks: { postprocess: DOMPurify.sanitize } })` setup removes it.
+    const hooked = chk.model.calls.some(
+      c =>
+        /^marked(?:\.marked)?\.(?:use|setOptions)$/.test(chk.qualify(c.callee)) && MD_HOOK_SANITIZER.test(chk.text(c)),
+    )
+    return { input, raw: !hooked }
+  }
+  if (call.name === 'makeHtml' && chk.imports(/^showdown$/)) return { input, raw: true }
+  if ((call.name === 'render' || call.name === 'renderInline') && chk.imports(/^markdown-it$/)) {
+    // markdown-it escapes raw HTML unless created with `html: true` (or the `commonmark` preset).
+    return { input, raw: /\bhtml\s*:\s*true\b|['"`]commonmark['"`]/.test(initializerText(chk, call)) }
+  }
+  if (
+    (call.name === 'process' || call.name === 'processSync') &&
+    chk.imports(/^(?:remark|unified|remark-html|remark-rehype|rehype-stringify)$/)
+  ) {
+    const pipeline = `${chk.text(call)}\n${initializerText(chk, call)}`
+    return { input, raw: MD_UNSAFE_PIPELINE.test(pipeline) && !MD_SANITIZED_PIPELINE.test(pipeline) }
+  }
+  return undefined
+}
+
+/** Source of the expression that initialized a call's receiver (`md` in `md.render(x)`), or the call itself. */
+function initializerText(chk: Checker, call: CallFact): string {
+  const receiver = call.receiver
+  if (!/^[A-Za-z_$][\w$]*$/.test(receiver)) return chk.text(call)
+  const source = chk.model.source
+  const decl = new RegExp(`\\b${receiver.replace(/\$/g, '\\$')}\\s*=\\s*`, 'g')
+  for (let m = decl.exec(source); m; m = decl.exec(source)) {
+    const from = m.index + m[0].length
+    const init = chk.model.calls.filter(c => c.start >= from && c.start <= from + 4).sort((a, b) => b.end - a.end)[0]
+    if (init) return source.slice(from, init.end)
+  }
+  return chk.text(call)
 }
 
 /** A sanitizer call, or a template/concatenation whose every dynamic part is sanitized or constant. */

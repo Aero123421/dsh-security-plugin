@@ -8,6 +8,7 @@
 import { z } from 'zod'
 import type { ErrorCode, RpcFailure } from '../../shared/contracts.ts'
 import type { LoggerPort } from '../dsh/ports.ts'
+import { maskDeep, type PathMasker } from '../paths.ts'
 
 /** A failure the handler means to show the browser, with a stable code. */
 export class RpcError extends Error {
@@ -79,14 +80,19 @@ export function badRequestFromZod(error: z.core.$ZodError, message = 'The reques
 
 /**
  * Map anything a handler threw to a wire failure.
- * - `RpcError` passes through unchanged.
+ * - `RpcError` passes through, with absolute Host paths in its message and
+ *   string details replaced by `maskPaths` when given.
  * - Any zod error (classic or core) becomes `security/bad-request` with
  *   `details.issues`.
  * - Anything else becomes `security/internal` with a generic message; the
  *   real error is logged at `error`.
  */
-export function toRpcFailure(error: unknown, logger: LoggerPort): RpcFailure {
-  if (error instanceof RpcError) return error.toFailure()
+export function toRpcFailure(error: unknown, logger: LoggerPort, maskPaths?: PathMasker): RpcFailure {
+  if (error instanceof RpcError) {
+    const failure = error.toFailure()
+    if (!maskPaths) return failure
+    return { code: failure.code, message: maskPaths(failure.message), details: maskDeep(failure.details, maskPaths) }
+  }
   if (error instanceof z.core.$ZodError) return badRequestFromZod(error)
   logger.error('dsh-security: internal RPC failure', error)
   return { code: 'security/internal', message: GENERIC_INTERNAL_MESSAGE, details: {} }

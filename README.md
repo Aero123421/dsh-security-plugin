@@ -30,7 +30,7 @@ finding. Results stay on your machine and can be exported as Markdown, JSON, or 
   not the hunter's reasoning, and tries to refute it. A refutation must cite the defending code; a confirmation
   must rest on verified code.
 - **Reports and follow-up.** Triage decisions carry over to later scans of the same project. "Fix in DSH chat"
-  hands a fix prompt to a normal DSH chat. Reports export as Markdown (English or Japanese), JSON, or
+  hands a fix prompt to a normal DSH chat. Reports export as Markdown (English, Japanese or Chinese), JSON, or
   SARIF 2.1.0 for code-scanning dashboards.
 
 ## What it does not do

@@ -4,7 +4,7 @@
  * bytes.
  */
 
-import type { FindingDetail, ReportFormat, ScanDetail } from '../../shared/contracts.ts'
+import type { FindingDetail, ReportFormat, ReportLanguage, ScanDetail } from '../../shared/contracts.ts'
 import type { Closure, Severity, TriageState, Verification } from '../../shared/domain.ts'
 import { SEVERITIES, severityRank, TRIAGE_STATES, VERIFICATIONS } from '../../shared/domain.ts'
 
@@ -16,7 +16,7 @@ export interface ReportInput {
   /** ISO timestamp of report generation. */
   readonly generatedAt: string
   readonly pluginVersion: string
-  readonly language: 'en' | 'ja'
+  readonly language: ReportLanguage
 }
 
 /** Display name of the tool in every report. */

@@ -17,6 +17,7 @@ import type { Endpoint, Signal, Snapshot } from '../analysis/types.ts'
 import type { FindingRecord, TaskInput, TaskKind } from '../core/model.ts'
 import type { RoleName } from '../../shared/domain.ts'
 import { signalFingerprint } from './findings.ts'
+import { hasVisibleEvidence } from './privacy.ts'
 
 export interface PlannedTask {
   readonly key: string
@@ -42,6 +43,12 @@ export interface HuntPlanInput {
   readonly hypotheses: readonly Hypothesis[]
   readonly includeTests: boolean
   readonly maxTasks: number
+  /**
+   * Paths that must never be shown to a model. No task is planned for work
+   * whose only material is in such files, and they are left out of target
+   * lists (a worker cannot read them anyway).
+   */
+  readonly isWithheld?: (path: string) => boolean
 }
 
 const ENDPOINTS_PER_TASK = 8
@@ -65,20 +72,28 @@ const SOURCE_LANGUAGES = new Set([
 
 /** Hunt tasks for one scan, best first, cut at `maxTasks`. */
 export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTask[]; readonly overflow: number } {
-  const inScope = (path: string) => input.includeTests || input.snapshot.files.get(path)?.isTest !== true
+  const withheld = input.isWithheld ?? (() => false)
+  const visible = (path: string) => !withheld(path)
+  const inScope = (path: string) =>
+    visible(path) && (input.includeTests || input.snapshot.files.get(path)?.isTest !== true)
   const steering = input.signals.filter(
     s => (s.kind === 'vulnerability' || s.kind === 'sink') && inScope(s.location.path),
   )
+  const endpoints = input.endpoints.filter(e => visible(e.declaredAt.path))
   const candidates: PlannedTask[] =
     input.mode === 'quick'
       ? planTriage(steering)
       : [
           ...planEndpoints(
-            input.endpoints.filter(e => inScope(endpointPath(e))),
+            endpoints.filter(e => inScope(endpointPath(e))),
             steering,
           ),
-          ...planSignals(steering, input.endpoints),
-          ...planHypotheses(input.hypotheses.filter(h => h.targetPaths.some(inScope))),
+          ...planSignals(steering, endpoints),
+          ...planHypotheses(
+            input.hypotheses
+              .map(h => ({ ...h, targetPaths: h.targetPaths.filter(visible) }))
+              .filter(h => h.targetPaths.some(inScope)),
+          ),
         ]
   if (input.mode !== 'quick') {
     const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
@@ -94,6 +109,7 @@ export function planReviewTasks(
   mode: ScanMode,
   threshold: Severity,
   max: number,
+  isWithheld: (path: string) => boolean = () => false,
 ): PlannedTask[] {
   if (mode === 'quick') return []
   const effective: Severity = mode === 'research' ? 'low' : threshold
@@ -102,7 +118,9 @@ export function planReviewTasks(
       f =>
         f.verification === 'potential' &&
         (f.source === 'ai' || f.source === 'sast' || f.source === 'external') &&
-        severityAtLeast(f.severity, effective),
+        severityAtLeast(f.severity, effective) &&
+        // A reviewer who can see none of the evidence cannot judge it; the finding keeps its deterministic verification.
+        hasVisibleEvidence(f, isWithheld),
     )
     .sort((a, b) => severityRank(a.severity) - severityRank(b.severity) || (a.title < b.title ? -1 : 1))
     .slice(0, max)
@@ -113,7 +131,7 @@ export function planReviewTasks(
       title: `Review: ${f.title}`,
       priority: 100 - severityRank(f.severity) * 10,
       input: {
-        targetPaths: f.location ? [f.location.path] : [],
+        targetPaths: f.location && !isWithheld(f.location.path) ? [f.location.path] : [],
         findingId: f.id,
         focus: [f.category],
       },

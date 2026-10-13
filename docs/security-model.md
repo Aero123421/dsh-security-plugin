@@ -80,7 +80,14 @@ the provider the user chose. The next section covers how that content is reduced
   service-account JSON, Terraform state, plus the user's `withheldGlobs`) are scanned by the built-in analyzers but
   never returned by any worker tool. They are skipped by search, marked `[withheld]` in listings, and cannot be
   quoted as evidence. Paths that are malformed or escape the root are treated as withheld. Task messages are
-  built from analyzer signals without a withheld check, so see *Residual risks*.
+  held to the same rule (`scan/privacy.ts`): a signal or finding in a withheld file keeps only its path and rule id,
+  with `[content withheld by privacy settings]` in place of its code, title and message; no Hunter task targets a
+  withheld file; endpoints declared in one are not listed; and a finding whose only evidence is in withheld files gets
+  no Skeptic review or chain analysis (it keeps its deterministic verification).
+- **Task messages are redacted too.** Every excerpt the host writes into a task (rule-hit snippets, attack-path
+  excerpts, finding text) passes through the scan's `Redactor` (every secret value the built-in scan found, wherever
+  it occurs, including SAST and external-analyzer snippets) and `redactText`, and the whole task message is scrubbed
+  once more before it is sent.
 - **Root masking.** The absolute snapshot root is replaced in every tool output, so the model does not learn the
   user's home path or user name from tool output.
 - **Limits.** Redaction is pattern-based. A credential in an unknown format, in a file not on the withheld list,
@@ -127,12 +134,13 @@ the provider the user chose. The next section covers how that content is reduced
 
 - Paths in findings, evidence, coverage and reports are workspace-relative. The one deliberate absolute path is the
   project's **display path** (`WorkspaceSummary.displayPath`): home-relative (`~/…`) when the project is under the
-  Host user's home directory, the full path otherwise. A scan failure message is masked against the project root.
+  Host user's home directory, the full path otherwise.
+- Free text that can quote Host paths (scan errors, reasons for unavailable or failed external analyzers and toolkit
+  installs such as a tool's stderr or a spawn error, analyzer warnings, activity-log messages, `RpcError` messages and
+  details) is path-masked by `host/paths.ts` when it is recorded and again when it is sent: project roots become
+  `<project>`, the plugin data directory `<data>`, the temp directory `<tmp>` and the home directory `~` (longest
+  first, `/` and `\` spellings, case-insensitive for Windows paths).
 - Transcript contents and raw secrets are never sent to the browser.
-- Exception: free-text *reasons* for unavailable or failed external analyzers and toolkit installs (for example the
-  first line of a tool's stderr, or a spawn error) are passed through as written. They are redacted for secrets but
-  not path-masked, so they can contain Host paths such as a temp or toolkit directory. They are shown only to
-  authenticated DSH users.
 - Text from the repository and from models is rendered as text. The client never uses `dangerouslySetInnerHTML` or
   `innerHTML`. External links (tool homepages) open only after a URL check, with `rel="noopener noreferrer"`.
 - SARIF locations are relative to `%SRCROOT%`, which is deliberately left without a URI. Markdown reports escape
@@ -206,11 +214,4 @@ the provider the user chose. The next section covers how that content is reduced
   shows up as gaps, not as safety.
 - **Local data.** `security.db` holds redacted code excerpts and transcripts. Anyone with access to the user's
   account can read it.
-- **Rule-hit excerpts from withheld files.** Withheld files are blocked at the tool layer only. A Hunter task lists
-  the `vulnerability`/`sink` hits it should verify with a redacted excerpt of up to 240 characters, and a Skeptic
-  task shows the redacted attack-path excerpt of the finding it reviews (up to 14 lines; for rule findings, the
-  analyzer's snippet of up to 5–6 lines). Neither filters by withheld path. So a rule hit inside a file matched by
-  `withheldGlobs`, or a Gitleaks finding in a built-in withheld file such as `.env.local` that gets a Skeptic
-  review, sends a short redacted excerpt of that file to the provider.
-
 Report vulnerabilities in the plugin as described in [SECURITY.md](../SECURITY.md).

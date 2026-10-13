@@ -16,13 +16,14 @@ import { buildInventory } from '../analysis/inventory.ts'
 import { queryOsv } from '../analysis/osv.ts'
 import { extractRoutes } from '../analysis/routes/index.ts'
 import { runSast } from '../analysis/sast/engine.ts'
-import { Redactor, scanSecrets, secretSignals } from '../analysis/secrets.ts'
+import { Redactor, redactKnownSecrets, scanSecrets, secretSignals } from '../analysis/secrets.ts'
 import { takeSnapshot } from '../analysis/snapshot.ts'
 import type { Toolkit } from '../analysis/toolkit.ts'
 import type { AnalyzerRun, Dependency, Endpoint, Inventory, Signal, Snapshot } from '../analysis/types.ts'
 import { workspaceQuoteSource, type WorkspaceView } from '../agents/tools/workspace.ts'
 import type { Config } from '../config.ts'
 import type { QuoteSource } from '../evidence/quote.ts'
+import { ModelPrivacy } from './privacy.ts'
 
 export interface AnalysisContext {
   readonly snapshot: Snapshot
@@ -37,6 +38,8 @@ export interface AnalysisContext {
   /** Quote verification over exactly what the workspace tools show. */
   readonly quoteSource: QuoteSource
   readonly withheldGlobs: readonly string[]
+  /** Policy for text the host writes into model requests (withheld files, secret redaction). */
+  readonly privacy: ModelPrivacy
   /** Workspace view for one worker; `onRead` records files the worker read. */
   view(onRead?: (path: string) => void): WorkspaceView
 }
@@ -186,11 +189,19 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   const withheldGlobs = settings.privacy.withheldGlobs
   const quoteSource = workspaceQuoteSource({ snapshot, redactor, withheldGlobs })
   const astGrep = options.astGrep
+  // SAST and external analyzers redact only the high-confidence patterns; a value the secret scan found
+  // (for example a generic password assignment) must not survive in their excerpts either.
+  const secretValues = redactor.secretValues(path => snapshot.files.get(path)?.content)
+  const redacted = dedupeSignals(signals).map(signal =>
+    signal.analyzer === 'secrets' || secretValues.length === 0
+      ? signal
+      : { ...signal, snippet: redactKnownSecrets(signal.snippet, secretValues) },
+  )
   return {
     snapshot,
     inventory,
     redactor,
-    signals: dedupeSignals(signals),
+    signals: redacted,
     endpoints,
     dependencies,
     analyzers,
@@ -198,6 +209,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
     ...(astGrep ? { astGrep } : {}),
     quoteSource,
     withheldGlobs,
+    privacy: new ModelPrivacy({ snapshot, redactor, withheldGlobs }),
     view: onRead => ({
       snapshot,
       redactor,

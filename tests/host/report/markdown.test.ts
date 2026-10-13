@@ -196,6 +196,74 @@ describe('renderMarkdown in Japanese', () => {
   })
 })
 
+describe('renderMarkdown in Simplified Chinese', () => {
+  it('uses Chinese headings and labels', () => {
+    const md = renderMarkdown(reportInput({ language: 'zh' }))
+    expectInOrder(md, [
+      '# DSH Security 报告: Acme API',
+      '## 扫描信息',
+      '## 如何阅读本报告',
+      '## 汇总',
+      '没有发现问题，并不代表就是安全的。',
+      '## 覆盖范围',
+      '## 威胁模型',
+      '## 发现的问题',
+      '### 已通过代码确认（1 个）',
+      '### 需要确认（3 个）',
+      '### 已排除（1 个）',
+    ])
+    expect(md).toContain('| 严重程度 | **严重** |')
+    expect(md).toContain('| 确认程度 | 强有力的静态证据 |')
+    expect(md).toContain('✓ 引用已核实')
+    expect(md).toContain('| 模式 | 深入 |')
+    expect(md).toContain('41 分 25 秒')
+    for (const english of ['How to read', 'Needs proof', 'Ruled out', 'Known gaps', 'Attack path', 'quote verified']) {
+      expect(md).not.toContain(english)
+    }
+    fenceBalance(md)
+  })
+})
+
+describe('renderMarkdown language parity', () => {
+  const languages = ['en', 'ja', 'zh'] as const
+  const render = (language: (typeof languages)[number]) => renderMarkdown(reportInput({ language }))
+  const shape = (md: string) => ({
+    headings: md.split('\n').flatMap(line => {
+      const match = /^(#{1,6}) /.exec(line)
+      return match ? [match[1]!.length] : []
+    }),
+    tableRows: md.split('\n').filter(line => line.startsWith('|')).length,
+    details: md.split('<details>').length - 1,
+    fences: md.split('\n').filter(line => /^\s*`{3,}/.test(line)).length,
+  })
+
+  it('renders the same sections, tables, and findings in every language', () => {
+    const en = shape(render('en'))
+    expect(en.headings.filter(level => level === 4)).toHaveLength(5)
+    for (const language of ['ja', 'zh'] as const) expect(shape(render(language)), language).toEqual(en)
+  })
+
+  it('leaves no label key or missing value in any language', () => {
+    for (const language of languages) {
+      const md = render(language)
+      for (const key of [
+        'open_proof_gap',
+        'ruled_out',
+        'strong_static_evidence',
+        'proven_dynamic',
+        'accepted_risk',
+        'false_positive',
+        'undefined',
+        'null',
+        '[object Object]',
+        'NaN',
+      ]) {
+        expect(md, `${language}: ${key}`).not.toContain(key)
+      }
+    }
+  })
+})
+
 describe('Markdown escaping of untrusted text', () => {
   it('chooses a fence longer than any backtick run in a snippet', () => {
     const snippet = 'const md = `\n```\n# not a heading\n````\n`'

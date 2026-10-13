@@ -6,6 +6,7 @@
 import type {
   Coverage,
   FindingDetail,
+  ReportLanguage,
   ScanDetail,
   ScanSummary,
   ScanUsage,
@@ -24,7 +25,7 @@ export interface JsonReport {
   readonly $schema: typeof JSON_REPORT_SCHEMA_ID
   readonly schemaVersion: typeof JSON_REPORT_SCHEMA_VERSION
   readonly generatedAt: string
-  readonly language: 'en' | 'ja'
+  readonly language: ReportLanguage
   readonly tool: { readonly name: string; readonly version: string; readonly informationUri: string }
   readonly workspace: { readonly title: string }
   readonly scan: {

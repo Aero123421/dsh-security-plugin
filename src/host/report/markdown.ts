@@ -5,7 +5,7 @@
  * untrusted text.
  */
 
-import type { AttackStepView, EvidenceView, FindingDetail } from '../../shared/contracts.ts'
+import type { AttackStepView, EvidenceView, FindingDetail, ReportLanguage } from '../../shared/contracts.ts'
 import type { CodeRef, QuoteCheck } from '../../shared/domain.ts'
 import { formatCodeRef, ROLE_NAMES, SEVERITIES, TRIAGE_STATES, VERIFICATIONS } from '../../shared/domain.ts'
 import type { ReportInput } from './common.ts'
@@ -62,8 +62,10 @@ function htmlText(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-function number(value: number, language: 'en' | 'ja'): string {
-  return Number.isFinite(value) ? value.toLocaleString(language === 'ja' ? 'ja-JP' : 'en-US') : '—'
+const NUMBER_LOCALES: Readonly<Record<ReportLanguage, string>> = { en: 'en-US', ja: 'ja-JP', zh: 'zh-CN' }
+
+function number(value: number, language: ReportLanguage): string {
+  return Number.isFinite(value) ? value.toLocaleString(NUMBER_LOCALES[language]) : '—'
 }
 
 function elapsed(ms: number, labels: ReportLabels): string {

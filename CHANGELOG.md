@@ -8,6 +8,20 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- Markdown reports in Simplified Chinese (`zh`); `exportReport` no longer falls back to English for Chinese scans.
+- `js.xss` flags Markdown rendered to raw HTML (`marked`, `showdown`, `markdown-it` with `html: true`, remark/rehype
+  pipelines that allow raw HTML) and inserted with `dangerouslySetInnerHTML`/`innerHTML` without a sanitizer.
+
+### Security
+
+- Task messages sent to models no longer include content from withheld files (rule-hit snippets, attack-path
+  excerpts, finding text); such findings are not sent for review. Excerpts in task messages are redacted with every
+  secret value the secret scan found.
+- Absolute Host paths (project root, data, temp and home directories) are masked in scan errors, analyzer and toolkit
+  failure reasons, warnings, activity-log messages and RPC error details.
+
 ## [0.1.0] - 2026-10-13
 
 First public release.

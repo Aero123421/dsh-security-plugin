@@ -140,7 +140,7 @@ next time settings load. Each scan copies its budget when it is created.
 | --- | --- | --- | --- |
 | `storage.retentionDays` | `90` | 0–3650 | At startup, delete scans older than this (0 keeps everything). Queued, running and paused scans are kept. Triage decisions are kept regardless. |
 | `storage.keepTranscripts` | `true` | | Store each AI worker's full conversation (gzip) for audit. |
-| `ui.language` | `auto` | auto / en / ja / zh | UI language. `auto` follows DSH's locale, then the browser's first choice among en/ja/zh. New scans ask models to write in this language. Markdown reports are English or Japanese. |
+| `ui.language` | `auto` | auto / en / ja / zh | UI language. `auto` follows DSH's locale, then the browser's first choice among en/ja/zh. New scans ask models to write in this language. Markdown reports follow the scan language (English, Japanese or Simplified Chinese). |
 
 ## High-risk switches and the loopback rule
 

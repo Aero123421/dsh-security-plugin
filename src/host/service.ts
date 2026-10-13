@@ -1,10 +1,12 @@
 /**
  * The Host-side application service: one handler per RPC method, projecting
  * durable records into wire DTOs. Handlers never return absolute paths or
- * raw secrets; finding text and snippets are already redacted at write time.
+ * raw secrets; finding text and snippets are already redacted at write time,
+ * and free text that can quote Host paths (errors, analyzer and toolkit
+ * reasons, warnings, event messages) is path-masked when projected.
  */
 
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import type {
   AnalyzerStatus,
   Bootstrap,
@@ -37,6 +39,7 @@ import { snapshotWorkspace } from './scan/analysis.ts'
 import type { ScanController } from './scan/controller.ts'
 import { endpointPath, planHuntTasks } from './scan/planning.ts'
 import { buildFixPrompt } from './fix-prompt.ts'
+import { createPathMasker, homeRelative, maskDeep, type PathMasker } from './paths.ts'
 import type { SettingsService } from './settings.ts'
 import type { SecurityStore } from './store/types.ts'
 
@@ -52,6 +55,8 @@ export interface ServiceDeps {
   readonly logger: LoggerPort
   readonly pluginVersion: string
   readonly now: () => Date
+  /** Plugin data directory (database, managed toolkit), masked as `<data>` in browser-bound text. */
+  readonly dataDir?: string
 }
 
 const ESTIMATE_TOKENS_PER_TASK = { min: 15_000, max: 90_000 } as const
@@ -60,6 +65,10 @@ const MODEL_INFO_TIMEOUT_MS = 5_000
 
 export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const { store, settings, controller } = deps
+  const maskPaths = (): PathMasker => hostPathMasker(deps)
+
+  /** Masker for text about one scan: its own root as well as every registered project. */
+  const scanMask = (scan: ScanRecord): PathMasker => hostPathMasker(deps, [scan.workspaceRoot])
 
   const requireScan = (scanId: string): ScanRecord => {
     const scan = store.getScan(scanId)
@@ -87,12 +96,13 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
       ...(scan.finishedAt ? { finishedAt: scan.finishedAt } : {}),
       counts,
       confirmed,
-      ...(scan.error ? { error: scan.error } : {}),
+      ...(scan.error ? { error: { ...scan.error, message: scanMask(scan)(scan.error.message) } } : {}),
       ...(scan.commit ? { commit: scan.commit } : {}),
     }
   }
 
   const detail = (scan: ScanRecord): ScanDetail => {
+    const mask = scanMask(scan)
     const live = controller.liveWorkers(scan.id)
     const workers =
       live.length > 0
@@ -128,8 +138,16 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
         maxMinutes: scan.budget.maxMinutes,
       },
       workers: workers.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1)).slice(0, 30),
-      ...(scan.coverage ? { coverage: scan.coverage } : {}),
-      notices: notices(store, scan.id),
+      ...(scan.coverage
+        ? {
+            coverage: {
+              ...scan.coverage,
+              analyzers: scan.coverage.analyzers.map(a => maskAnalyzer(a, mask)),
+              gaps: scan.coverage.gaps.map(mask),
+            },
+          }
+        : {}),
+      notices: notices(store, scan.id).map(n => ({ ...n, text: mask(n.text) })),
       models: scan.models,
       ...(scan.threatModel
         ? {
@@ -234,7 +252,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
         return {
           id: workspace.id,
           title: workspace.title,
-          displayPath: displayPath(workspace.path),
+          displayPath: homeRelative(workspace.path, homedir()),
           ...(last ? { lastScan: summary(last) } : {}),
         }
       })
@@ -401,14 +419,14 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
           workspaceTitle: scan.workspaceTitle,
           generatedAt: deps.now().toISOString(),
           pluginVersion: deps.pluginVersion,
-          language: scan.language === 'ja' ? 'ja' : 'en',
+          language: scan.language ?? 'en',
         },
         payload.format,
       )
     },
 
     async listEvents(payload) {
-      requireScan(payload.scanId)
+      const mask = scanMask(requireScan(payload.scanId))
       return store
         .listEvents(payload.scanId, payload.afterSeq ?? 0, Math.min(payload.limit ?? 200, 1000))
         .filter(event => event.level !== 'debug')
@@ -418,13 +436,13 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
             at: event.at,
             level: event.level,
             type: event.type,
-            message: event.message,
+            message: mask(event.message),
           }),
         )
     },
 
     async listToolkit() {
-      return deps.toolkit ? await deps.toolkit.status() : []
+      return deps.toolkit ? maskDeep(await deps.toolkit.status(), maskPaths()) : []
     },
 
     async installTool(payload, call) {
@@ -440,10 +458,11 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
         )
       }
       try {
-        return await deps.toolkit.install(payload.toolId, { signal: call.signal })
+        return maskDeep(await deps.toolkit.install(payload.toolId, { signal: call.signal }), maskPaths())
       } catch (error) {
         if (error instanceof ToolkitError) {
-          throw new RpcError('security/toolkit-unavailable', error.message, { reason: error.code })
+          // Download, tar and file-system errors quote the toolkit directory.
+          throw new RpcError('security/toolkit-unavailable', maskPaths()(error.message), { reason: error.code })
         }
         throw error
       }
@@ -526,12 +545,35 @@ function notices(store: SecurityStore, scanId: string): ScanNotice[] {
   return [...latest.values()]
 }
 
-function displayPath(path: string): string {
-  const home = homedir()
-  if (home && (path === home || path.startsWith(`${home}/`) || path.startsWith(`${home}\\`))) {
-    return `~${path.slice(home.length)}`
+/**
+ * Path masker for browser-bound text: `extraRoots` and every registered
+ * project root → `<project>`, the data directory → `<data>`, the temp
+ * directory → `<tmp>`, the home directory → `~`.
+ */
+export function hostPathMasker(
+  deps: Pick<ServiceDeps, 'workspaces' | 'dataDir'>,
+  extraRoots: readonly string[] = [],
+): PathMasker {
+  let registered: string[] = []
+  try {
+    registered =
+      deps
+        .workspaces()
+        ?.list()
+        .map(w => w.path) ?? []
+  } catch {
+    // A registry that cannot be listed still leaves the other directories masked.
   }
-  return path
+  return createPathMasker({
+    workspaceRoots: [...extraRoots, ...registered],
+    dataDir: deps.dataDir,
+    tmp: tmpdir(),
+    home: homedir(),
+  })
+}
+
+function maskAnalyzer(status: AnalyzerStatus, mask: PathMasker): AnalyzerStatus {
+  return status.reason === undefined ? status : { ...status, reason: mask(status.reason) }
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

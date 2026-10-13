@@ -1,8 +1,10 @@
 /**
- * Labels and explanatory text for the Markdown report, in English and
- * Japanese. Machine-readable formats (JSON, SARIF) keep stable English ids.
+ * Labels and explanatory text for the Markdown report, in English, Japanese
+ * and Simplified Chinese. Machine-readable formats (JSON, SARIF) keep stable
+ * English ids.
  */
 
+import type { ReportLanguage } from '../../shared/contracts.ts'
 import type {
   Closure,
   FindingSource,
@@ -156,6 +158,12 @@ const JA_CLOSURES: Readonly<Record<Closure, string>> = {
   confirmed: '確認済み',
   open_proof_gap: '要検証',
   ruled_out: '除外',
+}
+
+const ZH_CLOSURES: Readonly<Record<Closure, string>> = {
+  confirmed: '已通过代码确认',
+  open_proof_gap: '需要确认',
+  ruled_out: '已排除',
 }
 
 const EN: ReportLabels = {
@@ -508,11 +516,186 @@ const JA: ReportLabels = {
   },
 }
 
+const ZH: ReportLabels = {
+  title: 'DSH Security 报告',
+  generated: (at, tool) => `由 ${tool} 于 ${at} 生成。`,
+
+  sections: {
+    scan: '扫描信息',
+    howToRead: '如何阅读本报告',
+    summary: '汇总',
+    coverage: '覆盖范围',
+    threatModel: '威胁模型',
+    findings: '发现的问题',
+  },
+
+  field: '项目',
+  value: '值',
+  scanFields: {
+    workspace: '工作区',
+    scanId: '扫描 ID',
+    mode: '模式',
+    status: '状态',
+    phase: '最后阶段',
+    commit: '提交',
+    dirty: '（有未提交的更改）',
+    started: '开始时间',
+    finished: '结束时间',
+    model: role => `模型（${role}）`,
+    usage: '用量',
+    budget: '预算',
+    error: '错误',
+  },
+  notRecorded: '未记录',
+  noModels: '未使用模型',
+  usageLine: (calls, input, output, tools, elapsed) =>
+    `模型调用 ${calls} 次 · 输入 ${input} 个 token · 输出 ${output} 个 token · 工具调用 ${tools} 次 · ${elapsed}`,
+  budgetLine: (calls, tokens, minutes) => `模型调用 ${calls} 次 · ${tokens} 个 token · ${minutes} 分钟`,
+  elapsed: (h, m, s) => (h > 0 ? `${h} 小时 ${pad2(m)} 分 ${pad2(s)} 秒` : m > 0 ? `${m} 分 ${pad2(s)} 秒` : `${s} 秒`),
+
+  howToRead: {
+    intro:
+      '每个问题都有两个相互独立的评级。在决定先修复哪个之前，请同时查看这两项：严重的问题也可能尚未得到证实，而低风险的问题也可能已经被确认。',
+    severity:
+      '**严重程度** 回答的是“如果问题属实，后果有多严重？”从 **严重**（攻击者可能接管系统或其数据），依次经过高、中、低，到 **信息**（值得了解，但没有直接风险）。',
+    verification: '**确认程度** 回答的是“我们有多确定它是真实存在的？”各级别从强到弱依次为：',
+    groups:
+      '问题按确认程度分组：**已通过代码确认**（已实际验证，或有强有力的静态证据）、**需要确认**（可能存在或无法判定，请人工核实）、**已排除**（独立审查已予以否定，为保持透明仍列出）。',
+    quoteCheck:
+      '引用的代码片段旁的 ✓ 表示主机在所引用的位置找到了完全一致的代码；⚠ 表示未能找到（找不到引用、文件已更改，或没有可检查的内容）。',
+  },
+
+  summary: {
+    severity: '严重程度',
+    total: '合计',
+    triageLine: parts => `处理状态：${parts}。`,
+    newLine: count => `与上次扫描相比新增 ${count} 个问题。`,
+  },
+
+  zeroFindingsNote: {
+    heading: '没有发现问题，并不代表就是安全的。',
+    noneReported: '本次扫描没有报告已确认或需要确认的问题。',
+    body: '这是一次预算和覆盖范围都有限的 AI 辅助审查（参见“覆盖范围”）。它可能遗漏漏洞，尤其是未读取的代码、无法看到的配置，以及只在运行时才出现的行为。请将其与测试、代码审查和专业的安全评估结合使用。',
+  },
+
+  coverage: {
+    item: '项目',
+    count: '数量',
+    filesAnalyzed: '已分析的文件',
+    filesReadByAi: 'AI 读取的文件',
+    filesExcluded: '已排除的文件',
+    endpointsReviewed: '已审查的接口',
+    tasks: '审查任务',
+    tasksLine: (planned, completed, failed, skipped) =>
+      `计划 ${planned} · 完成 ${completed} · 失败 ${failed} · 跳过 ${skipped}`,
+    discardedUnverifiable: '因无法验证而丢弃的候选问题',
+    analyzers: '分析器',
+    available: '可用',
+    unavailable: '不可用',
+    gaps: '已知的覆盖缺口',
+    noGaps: '没有记录到覆盖缺口。',
+    notices: '扫描提示',
+    missing: '本次扫描未记录覆盖范围（扫描可能尚未完成）。',
+  },
+
+  threatModel: {
+    assets: '需要保护的资产',
+    actors: '参与者',
+    trustBoundaries: '信任边界',
+  },
+
+  groupHeading: (closure, count) => `${ZH_CLOSURES[closure]}（${count} 个）`,
+  showRuledOut: count => `显示 ${count} 个已排除的问题`,
+  noFindingsInGroup: '无。',
+
+  finding: {
+    severity: '严重程度',
+    verification: '确认程度',
+    cwe: 'CWE',
+    location: '位置',
+    noLocation: '不对应特定位置',
+    source: '来源',
+    rule: '规则',
+    category: '类别',
+    reportedBy: '报告者',
+    triage: '处理状态',
+    isNew: '上次扫描后新增',
+    yes: '是',
+    id: 'ID',
+    fingerprint: '指纹',
+    summary: '概要',
+    impact: '影响',
+    preconditions: '前提条件',
+    attackPath: '攻击路径',
+    evidence: '证据',
+    counterevidence: '反证',
+    review: '独立审查',
+    reviewModel: model => `模型：${model}`,
+    limitations: '局限性',
+    recommendation: '修复建议',
+    references: '参考资料',
+    triageNote: '处理备注',
+    none: '无记录。',
+  },
+
+  severities: { critical: '严重', high: '高', medium: '中', low: '低', info: '信息' },
+  verifications: {
+    proven_dynamic: '已实际验证',
+    strong_static_evidence: '强有力的静态证据',
+    potential: '可能存在',
+    inconclusive: '无法判定',
+    refuted: '已否定',
+  },
+  verificationHelp: {
+    proven_dynamic: '已在隔离环境中复现。仅检查代码的扫描不会给出此级别。',
+    strong_static_evidence:
+      '主机已对照源代码引用确认了一条可到达的代码路径及其前提条件，且独立审查没有发现有效的防护措施。',
+    potential: '尚未经任何人确认的假设或自动检测信号。请把它当作线索，而不是结论。',
+    inconclusive: '独立审查既无法确认，也无法否定。',
+    refuted: '独立审查指出了代码中具体的防护措施。',
+  },
+  closures: ZH_CLOSURES,
+  triage: { open: '待处理', accepted_risk: '已接受风险', false_positive: '误报', fixed: '已修复' },
+  statuses: {
+    queued: '排队中',
+    running: '运行中',
+    paused: '已暂停',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    interrupted: '已中断',
+  },
+  modes: { quick: '快速', deep: '深入', research: '研究' },
+  sources: {
+    secret: '密钥检测',
+    dependency: '依赖项审计',
+    sast: '静态分析规则',
+    ai: 'AI 审查',
+    external: '外部分析器',
+  },
+  roles: {
+    default: '默认',
+    planner: '规划者',
+    hunter: '猎手',
+    skeptic: '审查者',
+    chain: '攻击链分析',
+    analyzer: '分析器',
+  },
+  reviewVerdicts: { confirmed: '确认', refuted: '否定', inconclusive: '无法判定' },
+  quoteChecks: {
+    match: '✓ 引用已核实',
+    relocated: '✓ 引用已核实（已更正行号）',
+    mismatch: '⚠ 在源代码中找不到该引用',
+    stale: '⚠ 快照之后文件已更改',
+    unchecked: '⚠ 未检查',
+  },
+}
+
 function pad2(value: number): string {
   return String(value).padStart(2, '0')
 }
 
 /** Report labels for one language. */
-export function labelsFor(language: 'en' | 'ja'): ReportLabels {
-  return language === 'ja' ? JA : EN
+export function labelsFor(language: ReportLanguage): ReportLabels {
+  return language === 'ja' ? JA : language === 'zh' ? ZH : EN
 }

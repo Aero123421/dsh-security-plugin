@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { AstGrepHandle } from '../../../src/host/analysis/astgrep.ts'
+import type { Toolkit } from '../../../src/host/analysis/toolkit.ts'
 import { Config, operatorLimits } from '../../../src/host/config.ts'
 import type { EventRecord } from '../../../src/host/core/model.ts'
 import type {
@@ -237,6 +238,8 @@ export interface HarnessOptions {
   readonly astGrep?: () => Promise<AstGrepHandle | undefined>
   readonly logger?: LoggerPort
   readonly allowRemoteHighRisk?: boolean
+  readonly toolkit?: Toolkit
+  readonly dataDir?: string
 }
 
 export interface Harness {
@@ -268,13 +271,14 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     settings,
     llm: () => llm,
     workspaces: () => registry,
-    toolkit: undefined,
+    toolkit: options.toolkit,
     config,
     logger: options.logger ?? logger,
     fetch: noNetwork,
     astGrep: options.astGrep ?? (async () => undefined),
     now: () => new Date(),
     pluginVersion: '0.0.0-test',
+    ...(options.dataDir ? { dataDir: options.dataDir } : {}),
   })
   const events = (scanId: string): EventRecord[] => {
     const out: EventRecord[] = []
