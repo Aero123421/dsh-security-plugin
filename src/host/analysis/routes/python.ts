@@ -1,12 +1,17 @@
 /**
  * Route extraction for Python frameworks: Flask (app and blueprints),
  * FastAPI (apps and `APIRouter`s) and Django URLconfs.
+ *
+ * `register_blueprint`, `include_router` and Django `include(...)` children
+ * are recorded symbolically (`items.router`, `from .views import bp`,
+ * `include('shop.urls')`) and resolved across files by the linker.
  */
 
 import { resolveRelativeImport } from '../outline.ts'
 import type { CallFact, ClassFact, DecoratorFact, FileModel, FnFact, Span } from '../sast/model.ts'
 import { callAt } from '../sast/taint.ts'
-import { ANY_RECEIVER, type RouteFileContext, refOf } from './common.ts'
+import { ANY_RECEIVER, AUTH_HINT, joinRoute, type RouteFileContext, refOf, refString } from './common.ts'
+import { joinModule } from './link.ts'
 
 const FLASK_VERBS: Readonly<Record<string, string>> = {
   get: 'GET',
@@ -37,6 +42,7 @@ export function extractPyRoutes(ctx: RouteFileContext): void {
   const { model } = ctx
   const receivers = findReceivers(ctx)
   decoratedRoutes(ctx, receivers)
+  beforeRequestHooks(ctx)
   mounts(ctx, receivers)
   if (/(?:^|\/)urls\.py$/.test(model.path) || /\burlpatterns\s*=/.test(model.source)) djangoRoutes(ctx)
   // Flask `app.add_url_rule('/x', view_func=f)` and Starlette `Route('/x', endpoint)`
@@ -45,10 +51,18 @@ export function extractPyRoutes(ctx: RouteFileContext): void {
   }
 }
 
+/** Flask/FastAPI apps and routers, module-level or created in an app factory (`def create_app(): app = Flask(...)`). */
 function findReceivers(ctx: RouteFileContext): Map<string, Receiver> {
   const { model, ex } = ctx
   const out = new Map<string, Receiver>()
-  for (const v of model.vars) {
+  const bindings = [
+    ...model.vars.map(v => ({ name: v.name, value: v.value })),
+    ...model.assigns
+      .filter(a => a.fn && a.op === '=' && !a.destructured && a.targets.length === 1)
+      .map(a => ({ name: a.targets[0]!.name, value: a.value })),
+  ]
+  for (const v of bindings) {
+    if (out.has(v.name)) continue
     const call = callAt(model, v.value)
     if (!call) continue
     const name = call.callee.replace(/^.*\./, '')
@@ -61,20 +75,59 @@ function findReceivers(ctx: RouteFileContext): Map<string, Receiver> {
     const deps = keyword(call, 'dependencies')
     const middleware = deps ? dependencyNames(ctx, deps) : []
     out.set(v.name, { framework, prefix, middleware })
+    ctx.sink.receivers.push({ file: model.path, receiver: v.name })
   }
   return out
 }
 
-function decoratedRoutes(ctx: RouteFileContext, receivers: Map<string, Receiver>): void {
+/** A receiver imported from a module of the snapshot (`from .views import admin`). */
+function importedReceiver(ctx: RouteFileContext, name: string): boolean {
+  return ctx.model.imports.some(
+    imp => imp.kind === 'from' && imp.source.startsWith('.') && imp.bindings.some(b => b.local === name),
+  )
+}
+
+/**
+ * Flask `@bp.before_request` / `bp.before_request(fn)` hooks, as middleware
+ * scoped to the receiver (they run before every route of the blueprint or
+ * app, whatever the declaration order). A hook counts as an auth hint when
+ * its name or body suggests an authentication check.
+ */
+function beforeRequestHooks(ctx: RouteFileContext): void {
   const { model, ex } = ctx
-  // Blueprint-wide `@bp.before_request` hooks named like auth.
-  const beforeRequest = new Map<string, string[]>()
+  const add = (receiver: string, name: string, body: string, offset: number): void => {
+    const label = `before_request:${name}`
+    const hint = AUTH_HINT.test(name) || BEFORE_REQUEST_AUTH.test(body)
+    ctx.sink.scoped.push({
+      file: model.path,
+      receiver,
+      names: [label],
+      offset,
+      ordered: false,
+      ...(hint ? { hints: [label] } : {}),
+    })
+  }
   for (const fn of model.fns) {
     for (const dec of fn.decorators) {
       const m = /^([A-Za-z_]\w*)\.before_(?:app_)?request$/.exec(dec.name)
-      if (m && fn.name) beforeRequest.set(m[1]!, [...(beforeRequest.get(m[1]!) ?? []), `before_request:${fn.name}`])
+      if (m && fn.name) add(m[1]!, fn.name, ex.text(fn.body), dec.start)
     }
   }
+  for (const call of model.calls) {
+    if (!/^before_(?:app_)?request$/.test(call.name) || call.receiver === '' || call.decorator) continue
+    const arg = call.args[0]
+    const name = arg ? ex.text(arg).trim() : ''
+    if (!/^[A-Za-z_][\w.]*$/.test(name)) continue
+    const fn = model.fns.find(f => f.name === name && !f.parent)
+    add(call.receiver, name, fn ? ex.text(fn.body) : '', call.start)
+  }
+}
+
+const BEFORE_REQUEST_AUTH =
+  /\b(?:abort\(\s*40[13]|is_authenticated|is_anonymous|current_user|login_required|verify_jwt_in_request|g\.user\b|session\[|session\.get\(|Unauthorized|Forbidden|redirect\(\s*url_for\(\s*['"][\w.]*login)/
+
+function decoratedRoutes(ctx: RouteFileContext, receivers: Map<string, Receiver>): void {
+  const { model, ex } = ctx
   for (const fn of model.fns) {
     if (fn.decorators.length === 0) continue
     const routeDecs = fn.decorators.filter(d => {
@@ -82,7 +135,9 @@ function decoratedRoutes(ctx: RouteFileContext, receivers: Map<string, Receiver>
       return (
         m !== null &&
         m[2]! in FLASK_VERBS &&
-        (receivers.has(m[1]!) || /^(?:app|api|bp|blueprint|router|\w+_bp|\w+_router|\w+_blueprint)$/.test(m[1]!))
+        (receivers.has(m[1]!) ||
+          /^(?:app|api|bp|blueprint|router|\w+_bp|\w+_router|\w+_blueprint)$/.test(m[1]!) ||
+          importedReceiver(ctx, m[1]!))
       )
     })
     if (routeDecs.length === 0) continue
@@ -115,12 +170,7 @@ function decoratedRoutes(ctx: RouteFileContext, receivers: Map<string, Receiver>
         methods = listed.length > 0 ? listed : ['GET']
       }
       const decDeps = dec.args?.find(a => a.keyword === 'dependencies')
-      const middleware = [
-        ...decoratorMw,
-        ...(decDeps ? dependencyNames(ctx, decDeps) : []),
-        ...paramDeps,
-        ...(beforeRequest.get(recv!) ?? []),
-      ]
+      const middleware = [...decoratorMw, ...(decDeps ? dependencyNames(ctx, decDeps) : []), ...paramDeps]
       for (const method of methods) {
         ctx.sink.routes.push({
           framework,
@@ -152,61 +202,25 @@ function mounts(ctx: RouteFileContext, receivers: Map<string, Receiver>): void {
   }
   for (const call of model.calls) {
     if (call.name !== 'register_blueprint' && call.name !== 'include_router') continue
-    const childArg = call.args.find(a => !a.keyword)
+    if (call.receiver === '') continue
+    const childArg = call.args.find(a => !a.keyword) ?? keyword(call, 'blueprint') ?? keyword(call, 'router')
     if (!childArg) continue
     const prefixArg = keyword(call, 'url_prefix') ?? keyword(call, 'prefix')
     const prefix = prefixArg ? (ex.literal(prefixArg) ?? '') : ''
     const deps = keyword(call, 'dependencies')
     const middleware = deps ? dependencyNames(ctx, deps) : []
-    const target = pyMountTarget(ctx, childArg)
-    const parent = { file: model.path, receiver: call.receiver }
-    if (target) {
-      ctx.sink.mounts.push({
-        parent,
-        child: target,
-        prefix,
-        middleware,
-        offset: call.start,
-        at: refOf(model, call),
-        ...(call.name === 'register_blueprint' && prefixArg ? { replacesPrefix: true } : {}),
-      })
-    } else {
-      ctx.sink.warnings.push(
-        `${model.path}:${refOf(model, call).startLine}: could not resolve '${ex.text(childArg).trim()}' mounted at '${prefix || '/'}'; its routes keep their local paths.`,
-      )
-    }
+    const text = ex.text(childArg).trim().replace(/\s+/g, '')
+    const child = ctx.scope.refOfText(text, call.start)
+    ctx.sink.mounts.push({
+      parent: { file: model.path, receiver: call.receiver },
+      child: child ?? { kind: 'missing', spec: text },
+      prefix,
+      middleware,
+      offset: call.start,
+      ...(call.name === 'register_blueprint' && prefixArg ? { replacesPrefix: true } : {}),
+      unresolved: `${refString(model, call)}: could not resolve '${text}' mounted at '${prefix || '/'}'; its routes keep their local paths.`,
+    })
   }
-}
-
-function pyMountTarget(ctx: RouteFileContext, arg: Span): { file: string; receiver: string } | undefined {
-  const { model, snapshot, ex } = ctx
-  const text = ex.text(arg).trim().replace(/\s+/g, '')
-  const dotted = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(text)
-  const name = dotted ? dotted[1]! : text
-  if (!/^[A-Za-z_]\w*$/.test(name)) return undefined
-  if (!dotted && model.vars.some(v => v.name === name)) return { file: model.path, receiver: name }
-  for (const imp of model.imports) {
-    const binding = imp.bindings.find(b => b.local === name)
-    if (!binding) continue
-    if (imp.kind === 'from') {
-      // `from .routes import users` (module) or `from .routes.users import router` (object)
-      const asModule = resolveRelativeImport(model.path, joinModule(imp.source, binding.imported), snapshot)
-      if (asModule && dotted) return { file: asModule, receiver: dotted[2]! }
-      const file = resolveRelativeImport(model.path, imp.source, snapshot)
-      if (file) return { file, receiver: binding.imported }
-      if (asModule) return { file: asModule, receiver: 'router' }
-    } else if (dotted) {
-      const file = resolveRelativeImport(model.path, imp.source, snapshot)
-      if (file) return { file, receiver: dotted[2]! }
-    }
-    return undefined
-  }
-  return undefined
-}
-
-function joinModule(base: string, name: string): string {
-  if (/^\.+$/.test(base)) return base + name
-  return `${base}.${name}`
 }
 
 function addUrlRule(ctx: RouteFileContext, call: CallFact, receivers: Map<string, Receiver>): void {
@@ -245,37 +259,47 @@ function addUrlRule(ctx: RouteFileContext, call: CallFact, receivers: Map<string
 // Django
 // ---------------------------------------------------------------------------
 
+interface DjangoPattern {
+  readonly call: CallFact
+  readonly pattern: string
+  readonly view: Span
+}
+
+/** A `path()`/`re_path()`/`url()` call of a URLconf: its normalized pattern (`/orders/<int:id>/`) and view. */
+function djangoPattern(ctx: RouteFileContext, call: CallFact): DjangoPattern | undefined {
+  const fn = call.callee.replace(/^.*\./, '')
+  if (fn !== 'path' && fn !== 're_path' && fn !== 'url') return undefined
+  if (call.receiver !== '' && !/^(?:django\.urls|urls|django\.conf\.urls)$/.test(call.receiver)) return undefined
+  const routeArg = call.args.find(a => !a.keyword) ?? keyword(call, 'route')
+  const view = call.args.filter(a => !a.keyword)[1] ?? keyword(call, 'view')
+  if (!routeArg || !view) return undefined
+  let route = ctx.ex.literal(routeArg)
+  if (route === undefined) return undefined
+  if (fn !== 'path') route = route.replace(/^\^/, '').replace(/\$$/, '')
+  return { call, pattern: route === '' ? '' : `/${route}`.replace(/\/{2,}/g, '/'), view }
+}
+
 function djangoRoutes(ctx: RouteFileContext): void {
-  const { model, ex, snapshot } = ctx
-  for (const call of model.calls) {
-    const fn = call.callee.replace(/^.*\./, '')
-    if (fn !== 'path' && fn !== 're_path' && fn !== 'url') continue
-    if (call.receiver !== '' && !/^(?:django\.urls|urls|django\.conf\.urls)$/.test(call.receiver)) continue
-    const routeArg = call.args.find(a => !a.keyword) ?? keyword(call, 'route')
-    const viewArg = call.args.filter(a => !a.keyword)[1] ?? keyword(call, 'view')
-    if (!routeArg || !viewArg) continue
-    let route = ex.literal(routeArg)
-    if (route === undefined) continue
-    if (fn !== 'path') route = route.replace(/^\^/, '').replace(/\$$/, '')
-    const pattern = route === '' ? '' : `/${route}`.replace(/\/{2,}/g, '/')
+  const { model, ex } = ctx
+  const patterns = model.calls.map(call => djangoPattern(ctx, call)).filter((p): p is DjangoPattern => !!p)
+  // `path('api/', include([path('users/', ...), ...]))`: inline lists prefix the patterns inside them.
+  const inline: { span: Span; prefix: string }[] = []
+  for (const p of patterns) {
+    const viewCall = callAt(model, p.view)
+    const list = viewCall && /(?:^|\.)include$/.test(viewCall.callee) ? viewCall.args[0] : undefined
+    if (list && ex.isArrayLiteral(list)) inline.push({ span: list, prefix: p.pattern })
+  }
+  const prefixOf = (at: number): string => {
+    let prefix = ''
+    for (const i of inline) if (i.span.start < at && at < i.span.end) prefix = joinRoute(prefix, i.prefix)
+    return prefix
+  }
+  for (const { call, pattern: own, view: viewArg } of patterns) {
+    const outer = prefixOf(call.start)
+    const pattern = outer ? joinRoute(outer, own) : own
     const viewCall = callAt(model, viewArg)
     if (viewCall && /(?:^|\.)include$/.test(viewCall.callee)) {
-      const target = viewCall.args[0] ? ex.literal(viewCall.args[0]) : undefined
-      const resolved = target ? resolveRelativeImport(model.path, target, snapshot) : undefined
-      if (resolved) {
-        ctx.sink.mounts.push({
-          parent: { file: model.path, receiver: ANY_RECEIVER },
-          child: { file: resolved, receiver: ANY_RECEIVER },
-          prefix: pattern === '/' ? '' : pattern,
-          middleware: [],
-          offset: call.start,
-          at: refOf(model, call),
-        })
-      } else {
-        ctx.sink.warnings.push(
-          `${model.path}:${refOf(model, call).startLine}: include(${target ? `'${target}'` : ex.text(viewCall.args[0] ?? viewArg).trim()}) at '${pattern}' was not followed; routes it defines are listed without this prefix.`,
-        )
-      }
+      djangoInclude(ctx, call, viewCall, pattern)
       continue
     }
     const viewText = ex.text(viewArg).trim().replace(/\s+/g, '')
@@ -297,6 +321,50 @@ function djangoRoutes(ctx: RouteFileContext): void {
       offset: call.start,
     })
   }
+}
+
+/**
+ * `include('shop.urls')`, `include(('shop.urls', 'shop'))`, `include(shop_urls)`
+ * (an imported module) or `include('shop.urls', namespace='shop')`: mount
+ * every pattern of the included URLconf under `pattern`. Inline lists are
+ * handled by `djangoRoutes`.
+ */
+function djangoInclude(ctx: RouteFileContext, call: CallFact, include: CallFact, pattern: string): void {
+  const { model, ex, snapshot } = ctx
+  let arg = include.args.find(a => !a.keyword) ?? keyword(include, 'arg')
+  if (arg && ex.isArrayLiteral(arg)) return
+  const tuple = arg ? ex.elements(arg) : []
+  if (arg && tuple.length > 0) arg = tuple[0]
+  const parent = { file: model.path, receiver: ANY_RECEIVER }
+  const prefix = pattern === '/' ? '' : pattern
+  const target = arg ? ex.literal(arg) : undefined
+  const text = target !== undefined ? `'${target}'` : ex.text(arg ?? include).trim()
+  const unresolved = `${refString(model, call)}: include(${text}) at '${pattern}' was not followed; routes it defines are listed without this prefix.`
+  if (target !== undefined) {
+    const resolved = resolveRelativeImport(model.path, target, snapshot)
+    if (!resolved) {
+      ctx.sink.warnings.push(unresolved)
+      return
+    }
+    ctx.sink.mounts.push({
+      parent,
+      child: { kind: 'receiver', file: resolved, receiver: ANY_RECEIVER },
+      prefix,
+      middleware: [],
+      offset: call.start,
+    })
+    return
+  }
+  const child = arg ? ctx.scope.refOfText(ex.text(arg).trim().replace(/\s+/g, ''), call.start) : undefined
+  ctx.sink.mounts.push({
+    parent,
+    child: child ?? { kind: 'missing', spec: text },
+    prefix,
+    middleware: [],
+    offset: call.start,
+    moduleReceiver: ANY_RECEIVER,
+    unresolved,
+  })
 }
 
 /** Find a view by simple name in this file, an imported module, or the sibling `views.py`. */

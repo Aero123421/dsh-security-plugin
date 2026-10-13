@@ -2,12 +2,18 @@
  * Route extraction for JavaScript/TypeScript frameworks: Express (including
  * `Router` mounts and `router.route()` chains), Fastify, Koa router, Hono,
  * NestJS and Next.js (app router and pages API).
+ *
+ * Receivers are identified by `FileScope.idOf`, so a plugin parameter
+ * (`fastify@120`) never collides with a module-level `fastify`. Mounted
+ * children (`app.use('/api', auth, ordersRouter)`, `register(plugin)`,
+ * `app.route('/x', sub)`, `registerRoutes(app)`) are recorded symbolically
+ * and resolved across files by the linker.
  */
 
 import { resolveRelativeImport } from '../outline.ts'
 import type { CallFact, FileModel, FnFact, Span } from '../sast/model.ts'
 import { callAt } from '../sast/taint.ts'
-import { type RawRoute, type RouteFileContext, refOf } from './common.ts'
+import { type RawRoute, type RouteFileContext, refOf, refString, type UseArg } from './common.ts'
 
 const HTTP_METHODS: ReadonlySet<string> = new Set([
   'get',
@@ -38,7 +44,7 @@ const NEST_METHODS: Readonly<Record<string, string>> = {
 const FRAMEWORK_MODULES: readonly [RegExp, string][] = [
   [/^(?:express|express-serve-static-core|router|express-promise-router)$/, 'express'],
   [/^fastify$/, 'fastify'],
-  [/^(?:@koa\/router|koa-router|koa-tree-router)$/, 'koa'],
+  [/^(?:koa|@koa\/router|koa-router|koa-tree-router)$/, 'koa'],
   [/^hono(?:\/.*)?$/, 'hono'],
   [/^(?:restify)$/, 'restify'],
   [/^(?:@hapi\/hapi|hapi)$/, 'hapi'],
@@ -62,8 +68,9 @@ export function extractJsRoutes(ctx: RouteFileContext): void {
   const receivers = findReceivers(ctx)
   if (receivers.size === 0 && !looksLikeServerCode(model) && !importsFramework(model)) return
   for (const call of model.calls) {
-    if (call.decorator || call.receiver === '' || call.tagged) continue
-    callRoute(ctx, call, receivers)
+    if (call.decorator || call.tagged) continue
+    if (call.receiver !== '') callRoute(ctx, call, receivers)
+    registrationCall(ctx, call, receivers)
   }
 }
 
@@ -87,7 +94,7 @@ function findReceivers(ctx: RouteFileContext): Map<string, ReceiverInfo> {
     if (/^(?:express|Router|express\.Router)$/.test(callee)) return 'express'
     if (/^(?:fastify|Fastify)$/.test(callee)) return 'fastify'
     if (/^(?:Hono|OpenAPIHono)$/.test(callee)) return 'hono'
-    if (/^(?:KoaRouter|Router)$/.test(callee)) return 'koa'
+    if (/^(?:Koa|KoaRouter|Router)$/.test(callee)) return 'koa'
     return undefined
   }
   for (const assign of model.assigns) {
@@ -120,8 +127,6 @@ function findReceivers(ctx: RouteFileContext): Map<string, ReceiverInfo> {
       }
     }
     if (!call || !fw) continue
-    const callee = call.callee
-    if (fw === 'koa' && /^Koa$/.test(callee)) continue
     let prefix: string | undefined
     const opts = call.args[0]
     if (opts && ctx.ex.isObjectLiteral(opts)) {
@@ -131,21 +136,40 @@ function findReceivers(ctx: RouteFileContext): Map<string, ReceiverInfo> {
     // `new Hono().basePath('/api')`
     const base = /\.basePath\(\s*(['"`])([^'"`]+)\1\s*\)/.exec(ctx.ex.text(assign.value))
     if (base) prefix = base[2]!
-    out.set(name, {
+    const id = ctx.scope.idOf(name, assign.start)
+    out.set(id, {
       framework: fw === 'koa-router' || fw === '@koa/router' ? 'koa' : fw,
       local: true,
       ...(prefix ? { prefix } : {}),
     })
-    if (prefix) ctx.sink.prefixes.push({ file: model.path, receiver: name, prefix })
+    ctx.sink.receivers.push({ file: model.path, receiver: id })
+    if (prefix) ctx.sink.prefixes.push({ file: model.path, receiver: id, prefix })
   }
   // Fastify plugins: `async function routes(fastify, opts) { fastify.get(...) }`
   for (const fn of model.fns) {
     const first = fn.params[0]?.name
-    if (first && /^(?:fastify|instance|server|app)$/.test(first) && !out.has(first) && /fastify/i.test(model.source)) {
-      out.set(first, { framework: 'fastify', local: false })
+    if (first && /^(?:fastify|instance|server|app)$/.test(first) && /fastify/i.test(model.source)) {
+      out.set(`${first}@${fn.start}`, { framework: 'fastify', local: false })
     }
   }
   return out
+}
+
+/**
+ * The receiver name as written: an identifier (`app`), or the root of a
+ * chain of calls that return the receiver (`app.use(a).use(b)`,
+ * `app.get('/a', h).post('/b', h)`); other text as is (`this.app`).
+ */
+function receiverName(text: string): string {
+  if (/^[A-Za-z_$][\w$]*$/.test(text)) return text
+  const root = /^([A-Za-z_$][\w$]*)\.(?:use|get|post|put|patch|delete|del|all|options|head)\(/.exec(text)?.[1]
+  return root && text.endsWith(')') ? root : text
+}
+
+/** Receiver id (see `FileScope.idOf`) for a receiver as written. */
+function receiverId(ctx: RouteFileContext, text: string, at: number): string {
+  const name = receiverName(text)
+  return /^[A-Za-z_$][\w$]*$/.test(name) ? ctx.scope.idOf(name, at) : name
 }
 
 function looksLikeServerCode(model: FileModel): boolean {
@@ -205,9 +229,9 @@ function callRoute(ctx: RouteFileContext, call: CallFact, receivers: Map<string,
     routeChain(ctx, call, receivers)
     return
   }
-  const receiver = call.receiver
+  const receiver = receiverId(ctx, call.receiver, call.start)
   const info = receivers.get(receiver)
-  if (!info && !plausibleReceiver(ctx, receiver)) return
+  if (!info && !plausibleReceiver(ctx, receiverName(call.receiver))) return
   const framework = info?.framework ?? guessFramework(ctx.model)
   if (
     call.name === 'use' ||
@@ -216,6 +240,12 @@ function callRoute(ctx: RouteFileContext, call: CallFact, receivers: Map<string,
     call.name === 'addHook'
   ) {
     mountOrMiddleware(ctx, call, receiver, framework)
+    return
+  }
+  if (call.name === 'prefix' && framework === 'koa' && call.args.length === 1) {
+    // @koa/router `router.prefix('/v2')`
+    const prefix = ctx.ex.literal(call.args[0]!)
+    if (prefix) ctx.sink.prefixes.push({ file: ctx.model.path, receiver, prefix })
     return
   }
   if (call.name === 'route' && framework === 'fastify') {
@@ -258,7 +288,7 @@ function callRoute(ctx: RouteFileContext, call: CallFact, receivers: Map<string,
 function routeChain(ctx: RouteFileContext, call: CallFact, receivers: Map<string, ReceiverInfo>): void {
   const m = /^(.*?)\.route\((['"`])([^'"`]*)\2\)/.exec(call.receiver)
   if (!m) return
-  const receiver = m[1]!
+  const receiver = receiverId(ctx, m[1]!, call.start)
   const path = m[3]!
   const framework = receivers.get(receiver)?.framework ?? guessFramework(ctx.model)
   const method = call.name.toLowerCase()
@@ -294,15 +324,19 @@ function addCallRoute(
   ctx.sink.routes.push(route)
 }
 
-/** `app.use('/api', auth, router)`, `app.use(auth)`, `fastify.register(plugin, { prefix })`, `router.use('/x', r.routes())`. */
+/**
+ * `app.use('/api', auth, router)`, `app.use(auth)`, `router.use('/x', r.routes())`,
+ * Hono `app.route('/x', sub)`, `fastify.register(plugin, { prefix })` and
+ * Fastify `addHook('preHandler', fn)`.
+ */
 function mountOrMiddleware(ctx: RouteFileContext, call: CallFact, receiver: string, framework: string): void {
   const { model } = ctx
+  const parent = { file: model.path, receiver }
   if (call.name === 'addHook') {
     const hook = ctx.ex.literal(call.args[0] ?? { start: 0, end: 0 })
     if (!hook || !/^(?:onRequest|preHandler|preValidation|preParsing)$/.test(hook)) return
     const names = call.args[1] ? middlewareNames(ctx, call.args[1]) : []
-    if (names.length > 0)
-      ctx.sink.scoped.push({ file: model.path, receiver, names, offset: call.start, ordered: false })
+    if (names.length > 0) ctx.sink.scoped.push({ ...parent, names, offset: call.start, ordered: false })
     return
   }
   if (call.name === 'register') {
@@ -311,26 +345,23 @@ function mountOrMiddleware(ctx: RouteFileContext, call: CallFact, receiver: stri
     const opts = call.args[1]
     const prefixSpan = opts && ctx.ex.isObjectLiteral(opts) ? ctx.ex.prop(opts, 'prefix') : undefined
     const prefix = prefixSpan ? (ctx.ex.literal(prefixSpan) ?? '') : ''
-    const target = mountTarget(ctx, plugin)
-    if (target) {
-      ctx.sink.mounts.push({
-        parent: { file: model.path, receiver },
-        child: target,
-        prefix,
-        middleware: [],
-        offset: call.start,
-        at: refOf(model, call),
-      })
-    } else if (
-      !/^(?:require\(|import\()?['"`]?@?fastify[/-]|cors|helmet|cookie|formbody|multipart|static|swagger|rateLimit|rate-limit|jwt|auth/i.test(
+    const child = ctx.scope.refOfExpr(plugin)
+    const knownPlugin =
+      /^(?:require\(|import\()?['"`]?@?fastify[/-]|cors|helmet|cookie|formbody|multipart|static|swagger|rateLimit|rate-limit|jwt|auth/i.test(
         ctx.ex.text(plugin),
-      ) &&
-      prefix
-    ) {
-      ctx.sink.warnings.push(
-        `${refString(model, call)}: could not resolve the plugin registered under '${prefix}'; its routes keep their local paths.`,
       )
-    }
+    ctx.sink.mounts.push({
+      parent,
+      child: child ?? { kind: 'missing', spec: ctx.ex.text(plugin).trim() },
+      prefix,
+      middleware: [],
+      offset: call.start,
+      ...(prefix && !knownPlugin
+        ? {
+            unresolved: `${refString(model, call)}: could not resolve the plugin registered under '${prefix}'; its routes keep their local paths.`,
+          }
+        : {}),
+    })
     return
   }
   const args = [...call.args]
@@ -345,91 +376,72 @@ function mountOrMiddleware(ctx: RouteFileContext, call: CallFact, receiver: stri
     }
   }
   if (rest.length === 0) return
-  const middleware: string[] = []
+  // Hono `app.route('/x', sub)` always mounts; `use` arguments are routers or middleware.
+  const mountsOnly = call.name === 'route'
+  const useArgs: UseArg[] = []
   for (const arg of rest) {
-    const target = mountTarget(ctx, arg)
-    if (target) {
-      ctx.sink.mounts.push({
-        parent: { file: model.path, receiver },
-        child: target,
-        prefix,
-        middleware: [...middleware],
-        offset: call.start,
-        at: refOf(model, call),
-      })
-      continue
-    }
-    const names = middlewareNames(ctx, arg)
-    if (names.length === 0) continue
-    if (isUnresolvedRouter(ctx, arg)) {
-      ctx.sink.warnings.push(
-        `${refString(model, call)}: router '${ctx.ex.text(arg).trim()}' mounted at '${prefix || '/'}' could not be resolved in the snapshot; its routes keep their local paths.`,
-      )
-      continue
-    }
-    middleware.push(...names)
+    const text = ctx.ex.text(arg).trim()
+    // Koa `router.allowedMethods()` answers OPTIONS/405 for the router mounted next to it.
+    if (/\.allowedMethods\(\s*\)$/.test(text)) continue
+    const ref = ctx.scope.refOfExpr(arg)
+    const routerLike = mountsOnly || looksLikeRouter(text)
+    useArgs.push({
+      names: middlewareNames(ctx, arg),
+      ...(ref ? { ref } : {}),
+      ...(routerLike
+        ? {
+            unresolved: `${refString(model, call)}: router '${text}' mounted at '${prefix || '/'}' could not be resolved in the snapshot; its routes keep their local paths.`,
+          }
+        : {}),
+    })
   }
-  if (middleware.length > 0) {
-    ctx.sink.scoped.push({
-      file: model.path,
-      receiver,
-      names: middleware,
+  ctx.sink.uses.push({
+    parent,
+    prefix,
+    args: useArgs,
+    offset: call.start,
+    end: call.end,
+    ordered: framework !== 'fastify',
+  })
+}
+
+/** An argument that names a router (`ordersRouter`, `api.routes()`, `require('./routes/x')`) rather than middleware. */
+function looksLikeRouter(text: string): boolean {
+  if (/^(?:require|import)\(\s*['"`]\./.test(text)) return true
+  const name = /^([A-Za-z_$][\w$]*)(?:\.(?:routes|middleware)\(\))?$/.exec(text)?.[1]
+  return name !== undefined && /(?:router|routes|api|controller)$/i.test(name)
+}
+
+/**
+ * `registerRoutes(app)`, `require('./routes')(app)`: a function in the
+ * snapshot that receives an app/router registers routes on it through its
+ * parameter. Recorded as a mount of that parameter under the app, with no
+ * prefix; the linker drops it when the callee is not such a function.
+ */
+function registrationCall(ctx: RouteFileContext, call: CallFact, receivers: Map<string, ReceiverInfo>): void {
+  if (call.args.length === 0 || /^(?:require|import)$/.test(call.callee)) return
+  if (call.receiver !== '' && (HTTP_METHODS.has(call.name.toLowerCase()) || REGISTRATION_METHODS.test(call.name)))
+    return
+  for (let index = 0; index < call.args.length; index++) {
+    const arg = call.args[index]!
+    if (arg.splat) break
+    const text = ctx.ex.text(arg).trim()
+    if (!/^[A-Za-z_$][\w$]*$/.test(text)) continue
+    const receiver = ctx.scope.idOf(text, call.start)
+    if (!receivers.has(receiver) && !plausibleReceiver(ctx, text)) continue
+    const fn = ctx.scope.refOfText(call.callee, call.start)
+    if (!fn) return
+    ctx.sink.mounts.push({
+      parent: { file: ctx.model.path, receiver },
+      child: { kind: 'param', fn, index },
+      prefix: '',
+      middleware: [],
       offset: call.start,
-      ordered: framework !== 'fastify',
-      ...(prefix && prefix !== '/' ? { pathPrefix: prefix } : {}),
     })
   }
 }
 
-/** Resolve a mounted router argument to `{ file, receiver }`. */
-function mountTarget(ctx: RouteFileContext, arg: Span): { file: string; receiver: string } | undefined {
-  const { model, snapshot } = ctx
-  let text = ctx.ex.text(arg).trim().replace(/\s+/g, '')
-  text = text.replace(/\.(?:routes|middleware|allowedMethods)\(\)$/, '').replace(/^await/, '')
-  // `require('./routes/users')` or `import('./x')`
-  const req = /^(?:require|import)\((['"`])(\.{1,2}\/[^'"`]+)\1\)(?:\.([A-Za-z_$][\w$]*))?$/.exec(text)
-  if (req) {
-    const path = resolveRelativeImport(model.path, req[2]!, snapshot)
-    return path ? { file: path, receiver: req[3] ?? 'default' } : undefined
-  }
-  if (!/^[A-Za-z_$][\w$]*$/.test(text)) return undefined
-  // Local router created in this file.
-  if (
-    model.assigns.some(
-      a =>
-        a.targets.length === 1 &&
-        a.targets[0]!.name === text &&
-        a.op === '=' &&
-        /(?:Router|express|Hono|fastify|KoaRouter)\b/.test(ctx.ex.text(a.value)),
-    )
-  ) {
-    return { file: model.path, receiver: text }
-  }
-  // Local Fastify plugin function.
-  if (model.fns.some(fn => fn.name === text && !fn.parent && fn.params.length >= 1)) {
-    const fn = model.fns.find(f => f.name === text)!
-    const first = fn.params[0]?.name
-    if (first) return { file: model.path, receiver: first }
-  }
-  for (const imp of model.imports) {
-    const binding = imp.bindings.find(b => b.local === text)
-    if (!binding) continue
-    if (!imp.source.startsWith('.')) return undefined
-    const path = resolveRelativeImport(model.path, imp.source, snapshot)
-    if (!path) return undefined
-    return { file: path, receiver: binding.imported === '*' ? 'default' : binding.imported }
-  }
-  return undefined
-}
-
-function isUnresolvedRouter(ctx: RouteFileContext, arg: Span): boolean {
-  const text = ctx.ex.text(arg).trim()
-  if (!/^[A-Za-z_$][\w$]*(?:\.routes\(\))?$|^require\(/.test(text)) return false
-  if (/^require\(\s*['"`]\./.test(text)) return true
-  const name = text.replace(/\.routes\(\)$/, '')
-  if (!/(?:router|routes|api|controller)$/i.test(name)) return false
-  return ctx.model.imports.some(imp => imp.source.startsWith('.') && imp.bindings.some(b => b.local === name))
-}
+const REGISTRATION_METHODS = /^(?:use|route|register|addHook|listen|set|enable|disable|engine|param|decorate)$/
 
 /** `fastify.route({ method, url, preHandler, handler })` */
 function fastifyRouteObject(ctx: RouteFileContext, call: CallFact, receiver: string): void {
@@ -797,9 +809,4 @@ function guessFramework(model: FileModel): string {
     if (fw) return fw
   }
   return 'express'
-}
-
-function refString(model: FileModel, span: Span): string {
-  const r = refOf(model, span)
-  return `${r.path}:${r.startLine}`
 }

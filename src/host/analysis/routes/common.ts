@@ -2,6 +2,11 @@
  * Shared vocabulary for route extraction: raw routes registered on a
  * receiver (an app/router variable), mounts that attach one receiver under
  * another with a prefix, and receiver-scoped middleware.
+ *
+ * Extractors describe mounted children symbolically (`Ref`), because whether
+ * `requireAuth` in `app.use('/api', requireAuth, ordersRouter)` is a router
+ * or middleware depends on another file. The linker (`link.ts`) resolves the
+ * references once every file has been extracted.
  */
 
 import type { CodeRef } from '../../../shared/domain.ts'
@@ -9,8 +14,9 @@ import type { AstGrepHandle } from '../astgrep.ts'
 import { type FileModel, lineAt, type Span } from '../sast/model.ts'
 import type { Expr } from '../sast/taint.ts'
 import type { Snapshot, SnapshotFile } from '../types.ts'
+import type { FileScope } from './link.ts'
 
-/** Receiver id meaning "every receiver in the file" (Fastify plugins, Django URLconfs). */
+/** Receiver id meaning "every receiver in the file" (Django URLconfs). */
 export const ANY_RECEIVER = '*'
 
 export interface RawRoute {
@@ -19,7 +25,10 @@ export interface RawRoute {
   /** Path as declared on its receiver, before mount prefixes. */
   readonly path: string
   readonly file: string
-  /** App/router variable the route is registered on; `undefined` when it cannot be mounted. */
+  /**
+   * Receiver id the route is registered on (see `MountTarget.receiver`);
+   * `undefined` when it cannot be mounted.
+   */
   readonly receiver: string | undefined
   readonly declaredAt: CodeRef
   readonly handler?: CodeRef
@@ -32,19 +41,82 @@ export interface RawRoute {
   readonly params?: readonly string[]
 }
 
+/**
+ * An app/router within a file. `receiver` is the variable name for a
+ * module-level binding, `name@<offset>` for a parameter or local of the
+ * function starting at `offset` (JavaScript), or `ANY_RECEIVER`.
+ */
 export interface MountTarget {
   readonly file: string
   readonly receiver: string
 }
 
+/**
+ * Symbolic reference to a value that may be an app, router or plugin.
+ * `export` with name `*` is the module object itself (`require('./x')`).
+ */
+export type Ref =
+  | { readonly kind: 'receiver'; readonly file: string; readonly receiver: string }
+  | { readonly kind: 'local'; readonly file: string; readonly name: string }
+  | { readonly kind: 'export'; readonly file: string; readonly name: string }
+  | { readonly kind: 'member'; readonly object: Ref; readonly name: string }
+  | { readonly kind: 'fn'; readonly file: string; readonly start: number }
+  | { readonly kind: 'call'; readonly callee: Ref | undefined; readonly args: readonly (Ref | undefined)[] }
+  | { readonly kind: 'param'; readonly fn: Ref; readonly index: number }
+  /** A package import: known, but never an app/router of this snapshot. */
+  | { readonly kind: 'external' }
+  /** A local import that is not in the snapshot. */
+  | { readonly kind: 'missing'; readonly spec: string }
+
+/** A mount whose child is known to be an app/router/plugin, pending resolution. */
+export interface PendingMount {
+  readonly parent: MountTarget
+  readonly child: Ref
+  readonly prefix: string
+  readonly middleware: readonly string[]
+  readonly offset: number
+  /** The mount prefix replaces the child's own prefix (Flask `register_blueprint(url_prefix=...)`). */
+  readonly replacesPrefix?: boolean
+  /** Receiver to use when `child` resolves to a whole module (Django `include(urls_module)` → `*`). */
+  readonly moduleReceiver?: string
+  /** Warning recorded when `child` does not resolve; without one the mount is dropped silently. */
+  readonly unresolved?: string
+}
+
+/** One argument of an Express/Koa `use(...)` call after the optional path. */
+export interface UseArg {
+  /** Middleware names the argument contributes when it is not a router. */
+  readonly names: readonly string[]
+  readonly ref?: Ref
+  /**
+   * Set when the argument looks like a router (`ordersRouter`,
+   * `require('./x')`): the warning recorded when `ref` does not resolve, in
+   * which case it is neither a mount nor middleware. Other unresolved
+   * arguments count as middleware.
+   */
+  readonly unresolved?: string
+}
+
+/** `app.use('/api', auth, router)`: routers among `args` become mounts, the rest middleware. */
+export interface UseCall {
+  readonly parent: MountTarget
+  readonly prefix: string
+  readonly args: readonly UseArg[]
+  readonly offset: number
+  readonly end: number
+  /** Middleware it registers applies only to later registrations (Express/Koa/Hono). */
+  readonly ordered: boolean
+}
+
+/** A resolved mount of `child` under `parent`. */
 export interface Mount {
   readonly parent: MountTarget
   readonly child: MountTarget
   readonly prefix: string
   readonly middleware: readonly string[]
+  /** File holding the mount call; `offset` is an offset into it. */
+  readonly file: string
   readonly offset: number
-  readonly at: CodeRef
-  /** The mount prefix replaces the child's own prefix (Flask `register_blueprint(url_prefix=...)`). */
   readonly replacesPrefix?: boolean
 }
 
@@ -65,13 +137,18 @@ export interface ScopedMiddleware {
   readonly ordered: boolean
   /** Applies only to paths under this prefix. */
   readonly pathPrefix?: string
+  /** Names that count as auth hints whatever they are called (a hook whose body checks auth). */
+  readonly hints?: readonly string[]
 }
 
 export interface RouteSink {
   readonly routes: RawRoute[]
-  readonly mounts: Mount[]
+  readonly mounts: PendingMount[]
+  readonly uses: UseCall[]
   readonly scoped: ScopedMiddleware[]
   readonly prefixes: ReceiverPrefix[]
+  /** Apps and routers created by a known constructor (`express.Router()`, `APIRouter()`). */
+  readonly receivers: MountTarget[]
   readonly warnings: string[]
 }
 
@@ -82,8 +159,20 @@ export interface RouteFileContext {
   readonly snapshot: Snapshot
   readonly astGrep: AstGrepHandle | undefined
   readonly sink: RouteSink
+  /** Receiver ids and symbolic values for this file. */
+  readonly scope: FileScope
   /** Code model of another snapshot file (cached). */
   readonly modelOf: (file: SnapshotFile) => FileModel | undefined
+}
+
+/** An empty sink. */
+export function newSink(): RouteSink {
+  return { routes: [], mounts: [], uses: [], scoped: [], prefixes: [], receivers: [], warnings: [] }
+}
+
+/** Map key for a receiver. */
+export function targetKey(file: string, receiver: string): string {
+  return `${file}\0${receiver}`
 }
 
 /**
@@ -108,6 +197,11 @@ export function refOf(model: FileModel, span: Span): CodeRef {
     startLine,
     endLine: Math.max(startLine, lineAt(model, Math.max(span.start, span.end - 1))),
   }
+}
+
+/** `path:line` of a span, for warnings. */
+export function refString(model: FileModel, span: Span): string {
+  return `${model.path}:${lineAt(model, span.start)}`
 }
 
 /** Join a mount prefix and a route path (`/api` + `/users` → `/api/users`). */
