@@ -29,6 +29,7 @@ import type { Toolkit } from '../analysis/toolkit.ts'
 import type { Config } from '../config.ts'
 import type { AgentRunRecord, FindingRecord, ScanRecord, TaskRecord, ThreatModelRecord } from '../core/model.ts'
 import type { LlmPort, LoggerPort } from '../dsh/ports.ts'
+import { maskRoot } from '../evidence/text.ts'
 import type { SecurityStore } from '../store/types.ts'
 import { type AnalysisContext, type AnalysisStep, analyzeWorkspace } from './analysis.ts'
 import { ScanBudgetGate } from './budget.ts'
@@ -127,13 +128,14 @@ export class ScanJob {
 
   async run(): Promise<void> {
     const { store } = this.deps
+    const resumed = this.scan.startedAt !== undefined
     this.scan = store.updateScan(this.scan.id, {
       status: 'running',
-      ...(this.scan.startedAt ? {} : { startedAt: this.iso() }),
+      ...(resumed ? {} : { startedAt: this.iso() }),
       clearError: true,
     })
     this.budget = new ScanBudgetGate(this.scan.budget, this.scan.usage, this.signal, () => this.deps.now().getTime())
-    this.event('info', 'run-start', `Scan ${this.scan.startedAt === this.scan.updatedAt ? 'started' : 'resumed'}`)
+    this.event('info', 'run-start', `Scan ${resumed ? 'resumed' : 'started'}`)
     try {
       await this.analyze()
       if (this.aiEnabled()) {
@@ -427,7 +429,11 @@ export class ScanJob {
       this.event('info', `run-${request}`, request === 'pause' ? 'Scan paused' : 'Scan interrupted because DSH stopped')
       return
     }
-    const message = error instanceof Error ? error.message : String(error)
+    // The message reaches the browser (scan summary, activity log): never include the absolute root.
+    const message = maskRoots(error instanceof Error ? error.message : String(error), [
+      this.scan.workspaceRoot,
+      this.analysis?.snapshot.root,
+    ])
     this.deps.logger.error('dsh-security: scan failed', error)
     this.scan = store.updateScan(this.scan.id, {
       status: 'failed',
@@ -535,20 +541,29 @@ export class ScanJob {
     let next = 0
     this.progress(done, total)
     const workers = Math.max(1, Math.min(this.scan.settings.scan.parallelWorkers, this.deps.config.maxParallelWorkers))
+    let halted = false
     const loop = async (): Promise<void> => {
-      while (next < queue.length) {
-        this.checkStopped()
-        if (this.budget.exhausted()) return
-        const task = queue[next++]
-        if (!task) return
-        await run(task)
-        this.checkStopped()
-        done++
-        this.progress(done, total)
-        this.persistUsage()
+      try {
+        while (next < queue.length && !halted) {
+          this.checkStopped()
+          if (this.budget.exhausted()) return
+          const task = queue[next++]
+          if (!task) return
+          await run(task)
+          this.checkStopped()
+          done++
+          this.progress(done, total)
+          this.persistUsage()
+        }
+      } catch (error) {
+        halted = true
+        throw error
       }
     }
-    await Promise.all(Array.from({ length: workers }, loop))
+    // Wait for every worker before propagating a stop or failure, so none keeps writing after the run has ended.
+    const results = await Promise.allSettled(Array.from({ length: workers }, loop))
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
     this.checkStopped()
     // Budget ran out: what is left will not run in this scan.
     for (const task of queue.slice(next)) {
@@ -890,6 +905,10 @@ function roleLabel(role: RoleName): string {
       : role === 'skeptic'
         ? 'Reviewer'
         : 'Chain researcher'
+}
+
+function maskRoots(text: string, roots: readonly (string | undefined)[]): string {
+  return roots.reduce<string>((out, root) => (root ? maskRoot(out, root) : out), text)
 }
 
 function firstLine(text: string): string {

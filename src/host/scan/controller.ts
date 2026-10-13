@@ -52,6 +52,13 @@ export class ScanController {
         'DSH stopped while this scan was running. Resume it to continue.',
       )
       for (const task of store.listTasks(scan.id, ['running'])) store.updateTask(task.id, { status: 'pending' })
+      // Close runs that were in flight so the scan does not show workers that will never finish.
+      const at = this.deps.now().toISOString()
+      for (const run of store.listAgentRuns(scan.id)) {
+        if (run.status === 'running') {
+          store.updateAgentRun(run.id, { status: 'cancelled', stopReason: 'interrupted', finishedAt: at })
+        }
+      }
     }
     const retention = this.deps.settings.get().settings.storage.retentionDays
     if (retention > 0) {

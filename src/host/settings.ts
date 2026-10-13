@@ -91,7 +91,9 @@ const storedSettings = z.object({
 
 /** Parse a stored value, filling and repairing anything missing or invalid. */
 export function readStoredSettings(value: unknown): SecuritySettings {
-  const parsed = storedSettings.parse(value ?? {})
+  // A root that is not a plain object (damaged JSON, an array) repairs to the defaults like any other field.
+  const root = typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}
+  const parsed = storedSettings.parse(root)
   const models: Record<string, ModelRef> = {}
   for (const key of ['default', ...ROLE_NAMES] as const) {
     const ref = parsed.models[key]

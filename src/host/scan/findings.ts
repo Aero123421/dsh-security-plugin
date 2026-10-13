@@ -310,7 +310,8 @@ export function applySkepticOutput(
     const localized = output.localized
     return store.updateFinding(finding.id, {
       verification,
-      ...(output.severity && verdict !== 'refuted' ? { severity: output.severity } : {}),
+      // A refutation's severity rests on the claimed defense; never apply it, even when downgraded to inconclusive.
+      ...(output.severity && output.verdict !== 'refuted' ? { severity: output.severity } : {}),
       review: {
         verdict,
         reasoning: clip(reasoning),
@@ -349,7 +350,10 @@ export function recordChains(
   let discarded = 0
   store.transaction(() => {
     for (const chain of chains) {
-      const parts = chain.findingIds.map(id => ids.get(id.trim().toUpperCase())).filter(f => f !== undefined)
+      // Distinct parts only: citing one finding twice is not a chain.
+      const parts = [
+        ...new Set(chain.findingIds.map(id => ids.get(id.trim().toUpperCase())).filter(f => f !== undefined)),
+      ]
       const key = keyStep(chain.attackPath)
       if (parts.length < 2 || !key?.location || !chain.attackPath.some(s => isQuoteVerified(s.quoteCheck))) {
         discarded++

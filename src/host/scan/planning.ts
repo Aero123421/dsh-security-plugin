@@ -150,7 +150,8 @@ function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[
       const unguarded = part.filter(e => e.authHints.length === 0).length
       const mutating = part.filter(e => MUTATING.has(e.method)).length
       const params = part.reduce((n, e) => n + e.params.length, 0)
-      const handlerPaths = part.flatMap(e => (e.handler && e.handler.path !== path ? [e.handler.path] : []))
+      // Groups are keyed by the handler file; also start from the file that declares (mounts) the route.
+      const declarationPaths = part.flatMap(e => (e.declaredAt.path !== path ? [e.declaredAt.path] : []))
       return {
         key: `endpoints:${path}#${index}`,
         kind: 'hunt-endpoints' as const,
@@ -158,7 +159,7 @@ function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[
         title: `Review ${part.length} endpoint${part.length === 1 ? '' : 's'} in ${path}`,
         priority: 50 + unguarded * 4 + mutating * 3 + Math.min(params, 6) * 2 + weight(fileSignals),
         input: {
-          targetPaths: unique([path, ...handlerPaths]),
+          targetPaths: unique([path, ...declarationPaths]),
           endpointIds: part.map(e => e.id),
           ...(index === 0 && fileSignals.length > 0
             ? { signalFingerprints: sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK).map(signalFingerprint) }
