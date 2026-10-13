@@ -248,7 +248,9 @@ function verifyPrepared(
   const haystack = prepared.norm.text
 
   if (needle.length === 0) return mismatch('quote too short')
-  const quoteLines = quote.trim().split('\n').length
+  // Non-blank lines only: matching collapses whitespace, so padding a quote with blank lines must not widen
+  // the range it may cite.
+  const quoteLines = Math.max(1, quote.split('\n').filter(line => line.trim() !== '').length)
   const span = inRange ? end - start + 1 : 0
   if (span > quoteLines + maxExtraLines) {
     return mismatch(

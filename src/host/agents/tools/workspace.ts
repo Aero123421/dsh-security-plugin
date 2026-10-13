@@ -14,7 +14,7 @@ import type { AstGrepHandle } from '../../analysis/astgrep.ts'
 import { findSymbol, outlineFile } from '../../analysis/outline.ts'
 import { isSensitivePath, type Redactor, redactText } from '../../analysis/secrets.ts'
 import type { Endpoint, Snapshot, SnapshotFile } from '../../analysis/types.ts'
-import { yieldToEventLoop } from '../../analysis/types.ts'
+import { isEndpointVisible, yieldToEventLoop } from '../../analysis/types.ts'
 import { normalizePath } from '../../evidence/normalize.ts'
 import { type QuoteSource, snapshotQuoteSource } from '../../evidence/quote.ts'
 import { clipText, countLines, maskRoot, numberLines, stripCr } from '../../evidence/text.ts'
@@ -712,7 +712,7 @@ function listEndpointsTool(ws: Workspace) {
       }
       const wantedMethod = method?.trim().toUpperCase()
       const max = Math.min(limit ?? DEFAULT_ENDPOINT_LIMIT, MAX_ENDPOINT_LIMIT)
-      const all = ws.endpoints.filter(endpoint => !ws.isWithheld(endpoint.declaredAt.path))
+      const all = ws.endpoints.filter(endpoint => isEndpointVisible(endpoint, path => ws.isWithheld(path)))
       if (all.length === 0) {
         return ws.finish(
           'No endpoints were detected. Route extraction covers common JavaScript/TypeScript and Python frameworks ' +

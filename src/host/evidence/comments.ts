@@ -50,6 +50,7 @@ const C_LIKE = syntax({ line: ['//'], block: [C_BLOCK], quotes: '"\'`' })
 const CSS = syntax({ block: [C_BLOCK], quotes: '"\'' })
 const PHP = syntax({ line: ['//', '#'], block: [C_BLOCK], quotes: '"\'`' })
 const HASH = syntax({ line: ['#'], quotes: '"\'' })
+const RUBY = syntax({ line: ['#'], block: [['=begin', '=end']], quotes: '"\'' })
 const PYTHON = syntax({ line: ['#'], quotes: '"\'', tripleQuotes: true })
 const INI = syntax({ line: ['#'], lineAtStart: [';'], quotes: '"\'' })
 const SQL = syntax({ line: ['--'], block: [C_BLOCK], quotes: '"\'' })
@@ -70,22 +71,32 @@ const BY_EXTENSION: Readonly<Record<string, CommentSyntax>> = {
   ...family(PYTHON, 'py pyi pyw'),
   ...family(
     HASH,
-    'rb sh bash zsh fish ksh yml yaml toml pl pm r ex exs tf tfvars hcl conf cfg env properties nix cmake mk coffee cr jl ps1',
+    'sh bash zsh fish ksh yml yaml toml pl pm r ex exs tf tfvars hcl conf cfg env properties nix cmake mk coffee cr jl ps1',
   ),
+  ...family(RUBY, 'rb rake gemspec'),
   ...family(INI, 'ini'),
   ...family(SQL, 'sql'),
   ...family(LUA, 'lua'),
   ...family(HASKELL, 'hs elm'),
   ...family(HTML, 'html htm xhtml xml svg jsp erb ejs hbs handlebars mustache njk j2 jinja jinja2 twig liquid'),
   ...family(COMPONENT, 'vue svelte astro'),
-  ...family(PROSE, 'md markdown mdx txt text rst adoc asciidoc'),
+  ...family(PROSE, 'md markdown mdx txt text rst adoc asciidoc org'),
 }
 
 const BY_BASENAME: Readonly<Record<string, CommentSyntax>> = {
   dockerfile: HASH,
   makefile: HASH,
-  gemfile: HASH,
-  rakefile: HASH,
+  gemfile: RUBY,
+  rakefile: RUBY,
+  readme: PROSE,
+  license: PROSE,
+  licence: PROSE,
+  copying: PROSE,
+  notice: PROSE,
+  authors: PROSE,
+  changelog: PROSE,
+  changes: PROSE,
+  contributing: PROSE,
   procfile: HASH,
   '.gitignore': HASH,
   '.dockerignore': HASH,
@@ -159,18 +170,23 @@ export function commentMask(text: string, path: string): Uint8Array {
   return mask
 }
 
+/** Code characters that carry no behaviour on their own (`// sanitized upstream` followed by `}`). */
+const BARE_PUNCTUATION = new Set('{}()[];,')
+
 /**
- * Whether every non-whitespace character of `text[from, to)` lies in a
- * comment according to `mask`. An empty or blank range is not comment-only.
+ * Whether `text[from, to)` holds a comment and nothing else that does
+ * anything: every non-whitespace character lies in a comment according to
+ * `mask`, or is bare punctuation such as a closing brace. An empty or blank
+ * range, or one with punctuation but no comment, is not comment-only.
  */
 export function isCommentOnlyRange(text: string, mask: Uint8Array, from: number, to: number): boolean {
-  let sawText = false
+  let sawComment = false
   for (let i = Math.max(0, from); i < Math.min(to, text.length); i++) {
     if (isWhitespace(text.charCodeAt(i))) continue
-    if (mask[i] !== 1) return false
-    sawText = true
+    if (mask[i] === 1) sawComment = true
+    else if (!BARE_PUNCTUATION.has(text[i] ?? '')) return false
   }
-  return sawText
+  return sawComment
 }
 
 function lineEnd(text: string, from: number): number {

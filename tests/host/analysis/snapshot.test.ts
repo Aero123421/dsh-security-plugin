@@ -19,6 +19,23 @@ const LIMITS: SnapshotOptions = {
   maxTotalBytes: 50 * 1024 * 1024,
 }
 
+/** File and directory symlinks need Developer Mode or admin rights on Windows; skip those tests without them. */
+const canSymlink = await (async () => {
+  const probe = await makeTempDir('dsh-symlink-probe-')
+  try {
+    await writeTree(probe.dir, { 'a.txt': 'x' })
+    await symlink(join(probe.dir, 'a.txt'), join(probe.dir, 'b.txt'))
+    await symlink(probe.dir, `${probe.dir}-dir-link`, 'dir')
+    const { rm } = await import('node:fs/promises')
+    await rm(`${probe.dir}-dir-link`, { force: true })
+    return true
+  } catch {
+    return false
+  } finally {
+    await probe.cleanup()
+  }
+})()
+
 function reasonOf(snapshot: Awaited<ReturnType<typeof takeSnapshot>>, path: string): string | undefined {
   return snapshot.excluded.find(entry => entry.path === path)?.reason
 }
@@ -111,7 +128,7 @@ describe('takeSnapshot', () => {
     expect(reasonOf(snapshot, 'docs')).toBe('user-exclude')
   })
 
-  it('never follows symlinks, including ones pointing outside the root', async () => {
+  it.skipIf(!canSymlink)('never follows symlinks, including ones pointing outside the root', async () => {
     const outside = await makeTempDir('dsh-outside-')
     try {
       await writeTree(outside.dir, { 'secret.txt': 'TOP SECRET' })
@@ -130,7 +147,7 @@ describe('takeSnapshot', () => {
     }
   })
 
-  it('resolves a symlinked root to its real path', async () => {
+  it.skipIf(!canSymlink)('resolves a symlinked root to its real path', async () => {
     const link = `${dir}-link`
     await writeTree(dir, { 'a.ts': 'x' })
     await symlink(dir, link, 'dir')

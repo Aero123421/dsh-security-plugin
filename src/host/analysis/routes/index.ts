@@ -113,6 +113,8 @@ export async function extractRoutes(
 interface Context {
   readonly prefix: string
   readonly middleware: readonly string[]
+  /** Files whose code contributed the prefix or middleware (mount calls, scoped middleware, receiver prefixes). */
+  readonly sources: readonly string[]
 }
 
 /** Per-receiver indexes over the sink, keyed by canonical receiver. */
@@ -121,6 +123,7 @@ class Graph {
   readonly #mountsByChild = new Map<string, Mount[]>()
   readonly #scopedBy = new Map<string, ScopedMiddleware[]>()
   readonly #prefixOf = new Map<string, string>()
+  readonly #prefixFile = new Map<string, string>()
   /** Fewest mounts between a receiver and a top-level app (see `heightOf`). */
   readonly #height = new Map<string, number>()
   readonly #sorted = new Map<string, readonly { readonly mount: Mount; readonly height: number }[]>()
@@ -174,6 +177,12 @@ class Graph {
     return this.#prefixOf.get(targetKey(t.file, t.receiver)) ?? ''
   }
 
+  /** The file that declared `t`'s own prefix, when it has one. */
+  prefixSource(t: MountTarget): string[] {
+    const file = this.#prefixFile.get(targetKey(t.file, t.receiver))
+    return file === undefined ? [] : [file]
+  }
+
   /** Mounts of `t`; every receiver of a file also matches an `ANY_RECEIVER` child (Django URLconfs). */
   mountsOf(t: MountTarget): readonly Mount[] {
     const own = this.#mountsByChild.get(targetKey(t.file, t.receiver)) ?? []
@@ -208,7 +217,7 @@ class Graph {
    * one file: middleware registered on an imported app runs before routes
    * other modules add to it.
    */
-  scopedFor(t: MountTarget, file: string, offset: number, path: string): string[] {
+  scopedFor(t: MountTarget, file: string, offset: number, path: string, sources?: string[]): string[] {
     const out: string[] = []
     const own = this.#scopedBy.get(targetKey(t.file, t.receiver))
     const any = t.receiver === ANY_RECEIVER ? undefined : this.#scopedBy.get(targetKey(t.file, ANY_RECEIVER))
@@ -217,6 +226,7 @@ class Graph {
         if (s.ordered && s.file === file && s.offset > offset) continue
         if (s.pathPrefix && !underPrefix(path, s.pathPrefix)) continue
         out.push(...s.names)
+        if (s.names.length > 0) sources?.push(s.file)
       }
     }
     return out
@@ -226,7 +236,10 @@ class Graph {
     const c = this.#linker.canonical(p)
     const key = targetKey(c.file, c.receiver)
     // A prefix set where the router is created wins over one set elsewhere.
-    if (!this.#prefixOf.has(key) || (p.file === c.file && p.receiver === c.receiver)) this.#prefixOf.set(key, p.prefix)
+    if (!this.#prefixOf.has(key) || (p.file === c.file && p.receiver === c.receiver)) {
+      this.#prefixOf.set(key, p.prefix)
+      this.#prefixFile.set(key, p.file)
+    }
   }
 }
 
@@ -256,7 +269,7 @@ async function resolveEndpoints(
   ): Context[] => {
     const own = graph.ownPrefix(t)
     const mountsOfT = graph.mountsByHeight(t)
-    if (mountsOfT.length === 0) return [{ prefix: own, middleware: [] }]
+    if (mountsOfT.length === 0) return [{ prefix: own, middleware: [], sources: graph.prefixSource(t) }]
     if (depth >= MAX_MOUNT_DEPTH) return []
     const out: Context[] = []
     for (const { mount, height } of mountsOfT) {
@@ -268,12 +281,14 @@ async function resolveEndpoints(
       if (--budget.steps < 0) break
       const base = mount.replacesPrefix ? mount.prefix : joinRoute(mount.prefix, own)
       const pathInParent = joinRoute(base, path)
-      const parentMw = graph.scopedFor(parent, mount.file, mount.offset, pathInParent)
+      const sources = [mount.file, ...graph.prefixSource(t)]
+      const parentMw = graph.scopedFor(parent, mount.file, mount.offset, pathInParent, sources)
       seen.add(k)
       for (const above of contexts(parent, pathInParent, depth + 1, seen, budget)) {
         out.push({
           prefix: joinRoute(above.prefix, base),
           middleware: [...above.middleware, ...parentMw, ...mount.middleware],
+          sources: [...above.sources, ...sources],
         })
         if (out.length >= MAX_PATHS_PER_ROUTE) break
       }
@@ -298,7 +313,16 @@ async function resolveEndpoints(
         })
       : []
     // Every chain cut by a limit or a cycle: list the route with its local path, as for an unresolved mount.
-    const ctxs = found.length > 0 ? found : [{ prefix: target ? graph.ownPrefix(target) : '', middleware: [] }]
+    const ctxs =
+      found.length > 0
+        ? found
+        : [
+            {
+              prefix: target ? graph.ownPrefix(target) : '',
+              middleware: [],
+              sources: target ? graph.prefixSource(target) : [],
+            },
+          ]
     for (const ctx of ctxs) addEndpoint(endpoints, graph, route, target, ctx)
   }
   return [...endpoints.values()].sort(
@@ -319,7 +343,8 @@ function addEndpoint(
 ): void {
   const joined = target === undefined ? route.path : joinRoute(ctx.prefix, route.path)
   const path = joined === '' ? '/' : joined
-  const scoped = target === undefined ? [] : graph.scopedFor(target, route.file, route.offset, route.path)
+  const sources = [...ctx.sources]
+  const scoped = target === undefined ? [] : graph.scopedFor(target, route.file, route.offset, route.path, sources)
   const middleware = dedupe([...ctx.middleware, ...scoped, ...route.middleware])
   const authHints = dedupe([
     ...middleware.filter(name => AUTH_HINT.test(name) || graph.hinted.has(name)),
@@ -327,7 +352,16 @@ function addEndpoint(
   ])
   const params = dedupe([...routeParams(path), ...(route.params ?? [])])
   const id = `${route.method} ${path} @ ${route.declaredAt.path}:${route.declaredAt.startLine}`
-  if (endpoints.has(id)) return
+  const mountedAt = dedupe(sources)
+    .filter(file => file !== route.declaredAt.path)
+    .sort(compare)
+  const existing = endpoints.get(id)
+  if (existing) {
+    // The same route reached through another chain: keep the first, but remember every contributing file.
+    const merged = dedupe([...(existing.mountedAt ?? []), ...mountedAt]).sort(compare)
+    if (merged.length > 0) endpoints.set(id, { ...existing, mountedAt: merged })
+    return
+  }
   endpoints.set(id, {
     id,
     framework: route.framework,
@@ -338,6 +372,7 @@ function addEndpoint(
     middleware,
     authHints,
     params,
+    ...(mountedAt.length > 0 ? { mountedAt } : {}),
   })
 }
 

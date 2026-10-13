@@ -202,8 +202,8 @@ directory, and under `externalTimeoutMs`. Their results are limited to files in 
 | Tool | How it runs | Produces |
 | --- | --- | --- |
 | **Gitleaks** (8.19+ uses `gitleaks dir`, older uses `detect --no-git`) | Plugin-written config with the default rules (the repository's `.gitleaks.toml` and ignore file have no effect), `--redact`, max target 10 MB per file | `secret` signals (critical for private keys, medium/low for generic rules, high otherwise) |
-| **OSV-Scanner** (v2 preferred, v1 supported) | `scan source --recursive --no-resolve --no-call-analysis=all`, plus `--offline` unless OSV lookups are on. Offline with no local database → reported unavailable. | `dependency` signals, same shape as the built-in OSV lookup |
-| **Semgrep** | Only if `semgrepConfig` is set: `semgrep scan --json --metrics=off --disable-version-check --config <path>`, 2 MB per file, 30 s per rule. Registry rules are never used. | `vulnerability` signals, categorized from CWE metadata |
+| **OSV-Scanner** (v2 preferred, v1 supported) | `scan source --recursive --no-resolve --no-call-analysis=all --config <empty plugin-written file>` (the repository's `osv-scanner.toml` ignores have no effect), plus `--offline` unless OSV lookups are on. Offline with no local database → reported unavailable. | `dependency` signals, same shape as the built-in OSV lookup |
+| **Semgrep** | Only if `semgrepConfig` is set: `semgrep scan --json --metrics=off --disable-version-check --disable-nosem --config <path>`, 2 MB per file, 30 s per rule. Registry rules are never used; `nosemgrep` comments are ignored, but a `.semgrepignore` file in the project still applies. | `vulnerability` signals, categorized from CWE metadata |
 
 Builtin and external results for the same location and category are de-duplicated (the first one wins).
 

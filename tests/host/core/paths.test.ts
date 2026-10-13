@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -161,6 +161,30 @@ describe.skipIf(process.platform === 'win32')('no absolute Host path reaches the
       for (const dir of [app.root, dataDir, homedir(), tmpdir()]) {
         expect(json.includes(dir), `${method} leaks ${dir}`).toBe(false)
       }
+    }
+  })
+})
+
+describe('createPathMasker canonical paths', () => {
+  it('also masks the canonical spelling of a symlinked directory', async () => {
+    const base = await realpath(await mkdtemp(join(tmpdir(), 'dshsec-mask-')))
+    try {
+      const real = join(base, 'real-project')
+      const link = join(base, 'linked-project')
+      await mkdir(real)
+      try {
+        await symlink(real, link, 'dir')
+      } catch {
+        return // Creating symlinks needs extra privileges on some Windows setups.
+      }
+      const mask = createPathMasker({ workspaceRoots: [link] })
+      for (const dir of [real, link]) {
+        const masked = mask(`failed to read ${join(dir, 'a.ts')}`)
+        expect(masked).toContain('<project>')
+        expect(masked).not.toContain(base)
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true })
     }
   })
 })

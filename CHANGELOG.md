@@ -8,36 +8,6 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
-### Added
-
-- Markdown reports in Simplified Chinese (`zh`); `exportReport` no longer falls back to English for Chinese scans.
-- `js.xss` flags Markdown rendered to raw HTML (`marked`, `showdown`, `markdown-it` with `html: true`, remark/rehype
-  pipelines that allow raw HTML) and inserted with `dangerouslySetInnerHTML`/`innerHTML` without a sanitizer.
-
-### Security
-
-- Task messages sent to models no longer include content from withheld files (rule-hit snippets, attack-path
-  excerpts, finding text); such findings are not sent for review. Excerpts in task messages are redacted with every
-  secret value the secret scan found.
-- Absolute Host paths (project root, data, temp and home directories) are masked in scan errors, analyzer and toolkit
-  failure reasons, warnings, activity-log messages and RPC error details.
-- Turning off *Send code to the AI model* now stops AI work in queued, paused, interrupted and running scans: in-flight
-  requests are aborted, remaining AI tasks are skipped, and the scan completes with a `consent-revoked` notice.
-  `withheldGlobs` added after a scan was created apply when it starts or resumes.
-- OSV-Scanner gets an empty plugin-written `--config`, so a repository's `osv-scanner.toml` (`[[IgnoredVulns]]`)
-  cannot hide advisories; Semgrep runs with `--disable-nosem`, so `nosemgrep` comments cannot silence rules.
-- "Fix in chat" drafts keep the title on one line and put model-written text and code snippets in fenced blocks
-  labelled as untrusted, with an instruction (en/ja/zh) to treat them as data and verify independently.
-- Workers run at most 16 tool calls per model reply and yield to the event loop between tool executions;
-  `search_code` returns the matches found before a regex timeout, with a "search stopped early" note.
-- Model requests with no stream data for `llmIdleTimeoutMs` (new operator setting, default 2 min) are abandoned and
-  retried as `TIMEOUT`; when `maxMinutes` passes, in-flight requests are aborted and the scan completes over budget.
-- More credential files are withheld from models by default: `.aws/credentials`, `.aws/config`,
-  `.docker/config.json`, `.kube/config`, `kubeconfig`, `.pgpass`, `.htpasswd`, `.dockercfg`, `.s3cfg`,
-  `credentials.tfrc.json`.
-- Documentation now states that the same-machine rule for high-risk settings is a policy for browser pages based on
-  the `Host` header, not a security boundary against clients holding the DSH credentials.
-
 ## [0.1.0] - 2026-10-13
 
 First public release.
@@ -47,70 +17,67 @@ First public release.
 - **DSH integration.** A bundle layer for DSH `>=0.2.1-alpha.2 <0.3.0-0`: a Host plugin (`lib/index.js`) and a Web
   client (`lib/client.js`). The client adds a Security sidebar entry, a Security page (Overview, Findings, History,
   Settings) and a Security section in DSH Settings. The UI is available in English, Japanese and Chinese.
-- **Scan pipeline** with Quick, Deep and Research modes. Phases: snapshot, inventory, built-in checks, entry points,
-  threat model, AI review, second opinion, attack chains, reconcile, report. Each mode has budgets for AI requests,
-  tokens, minutes, requests per reviewer and review tasks. Scans run in a queue limited by `maxConcurrentScans`.
+- **Scan pipeline** with Quick, Deep and Research modes, plus a "built-in checks only" option that sends nothing to
+  models. Phases: snapshot, inventory, built-in checks, entry points, threat model, AI review, second opinion, attack
+  chains, reconcile, report. Each mode has budgets for AI requests, tokens, minutes, requests per reviewer and review
+  tasks; the time budget aborts in-flight requests, and requests with no stream data for `llmIdleTimeoutMs` are
+  retried. Scans run in a queue limited by `maxConcurrentScans`.
 - **Pause, resume, cancel and crash recovery.** Stable task keys make a resumed scan skip completed AI work.
   Scans interrupted by a DSH shutdown can be resumed.
 - **Built-in analyzers.**
   - Secret detection with 25 rules, which also drive redaction.
   - 50 SAST rules for JavaScript/TypeScript (including EJS, Handlebars, Pug, Vue and Svelte templates), Python
     (including Jinja and Django templates), Dockerfiles, Compose and Kubernetes manifests, using an optional
-    tree-sitter engine (`@ast-grep/napi`) or a built-in tokenizer.
+    tree-sitter engine (`@ast-grep/napi`) or a built-in tokenizer. `js.xss` also covers Markdown rendered to raw HTML
+    without a sanitizer.
   - HTTP route extraction with middleware and auth hints for Express, Fastify, Koa, Hono, NestJS, Next.js, Flask,
-    FastAPI and Django.
-  - Dependency parsing for npm, pnpm, Yarn, Poetry, uv, Pipenv, requirements files, Go modules and Cargo.
+    FastAPI and Django, including routers mounted from other files (`app.use('/api', requireAuth, router)`,
+    `include_router`, `register_blueprint`, Django `include`). Rate limiters and loggers are not counted as guards.
+  - Dependency parsing for npm, pnpm, Yarn, Poetry, uv, Pipenv, requirements files, Go modules and Cargo, with
+    single-pass lock-file indexing (a 16k-package lock file parses in well under a second). Lock files are exempt
+    from `maxFileBytes` up to 32 MiB; a lock file left out for size is named in a scan warning.
 - **Optional analyzers.**
   - OSV.dev lookups (off by default; only package names and versions are sent).
   - Gitleaks, OSV-Scanner and Semgrep when installed, run without a shell, with a scrubbed environment and with
-    repository config overrides blocked.
+    repository overrides blocked (`.gitleaks.toml`, `osv-scanner.toml` ignores, `nosemgrep` comments).
   - Managed downloads of pinned Gitleaks and OSV-Scanner builds, verified by SHA-256 against `toolkit.lock.json`.
 - **Read-only AI review** using DSH's LLM registry directly, with per-role models (Planner, Hunter, Skeptic, Chain
-  analyst) and optional reasoning effort and output caps. Workers get six read-only snapshot tools and no shell,
-  network or write access.
-- **Host-verified evidence.** Every model citation is checked against the redacted snapshot. Findings without a
-  verified step are discarded and counted in Coverage.
-- **Independent skeptic review** in a fresh context. A refutation needs a verified counter-evidence quote, and a
-  confirmation needs verified code on the attack path.
-- Evidence locations are the quoted lines themselves: a citation wider than the quote + 40 lines is rejected, and a
-  quote found more than once in a loose cited range is ambiguous instead of matching the top of the range.
-- Without a following review, a hunter's `false_positive` on a rule hit leaves it `inconclusive`, never `refuted`, and
-  quotes that are only comments, docstrings or documentation never count as counter-evidence.
-- A reviewer's severity change applies only to a confirmed verdict with verified supporting code, and lowers a
-  deterministic critical/high rule hit by at most one level; the original severity is noted in the review.
+  analyst) and optional reasoning effort and output caps. Workers get six read-only snapshot tools, at most 16 tool
+  calls per reply, and no shell, network or write access.
+- **Host-verified evidence.** Every model citation is checked against the redacted snapshot, and its location is
+  narrowed to the quoted lines. Citations wider than the quote + 40 lines are rejected, and a quote that occurs more
+  than once in a loose range is ambiguous. Findings without a verified step are discarded and counted in Coverage.
+- **Independent skeptic review** in a fresh context. A refutation needs verified counter-evidence that is code, not
+  only comments or documentation; a confirmation needs verified code on the attack path. A hunter alone never rules
+  out a rule hit. Severity changes apply only to confirmed verdicts with verified code, and lower a deterministic
+  critical/high rule hit by at most one level.
 - **Separate severity and verification ratings** (Confirmed in code, Possible, Undecided, Ruled out), with closure
   derived from verification.
 - **Triage** (Open, Accepted risk, False positive, Fixed) stored per project and line-independent fingerprint, and
   carried across scans. Findings that are new since the previous scan are marked.
-- **"Fix in DSH chat"** hands a fix prompt to a normal DSH chat. "Copy fix prompt" and a Quick re-scan action are
-  also available.
-- **Reports:** Markdown (English or Japanese), JSON (`schemaVersion: 1`), and SARIF 2.1.0 with stable
+- **"Fix in DSH chat"** hands a fix prompt to a normal DSH chat, with model-written text and code fenced and labelled
+  as untrusted data. "Copy fix prompt" and a Quick re-scan action are also available.
+- **Reports:** Markdown (English, Japanese or Chinese), JSON (`schemaVersion: 1`), and SARIF 2.1.0 with stable
   `partialFingerprints` and suppressions for refuted or triaged-away findings.
-- **Privacy controls:** explicit consent before code is sent to models, built-in and user-defined withheld files,
-  and redaction of secrets and the project path in every tool output. Operators can restrict the high-risk switches
-  to the Host machine (`allowRemoteHighRiskSettings: false`).
+- **Privacy controls:** explicit consent before code is sent to models (turning it off stops AI work in queued,
+  paused and running scans), built-in and user-defined withheld files that never reach a model through tools or task
+  messages, redaction of secrets and the project path in everything sent to models, and masking of Host paths in
+  everything sent to the browser. Operators can restrict the high-risk switches to pages served on the Host machine
+  (`allowRemoteHighRiskSettings: false`); this is a browser-page policy, not a boundary against clients holding the
+  DSH credentials.
 - **Local storage** in `$DSH_HOME/security/security.db` (`node:sqlite`, owner-only permissions on POSIX), with
   retention and optional AI transcripts.
-- **Fixtures and tests:** four intentionally vulnerable fixture apps with ground truth, a benchmark harness, and a
-  deterministic scripted model for end-to-end tests without API keys.
-
-### Fixed
-
-- Lock-file line lookups are indexed in one pass (a 16k-package `pnpm-lock.yaml` or `package-lock.json` parses in
-  well under a second instead of 7–10 s), pnpm and Yarn Berry locks use a fast block-YAML reader with a fallback to
-  the full parser, and dependency parsing yields to the event loop.
-- Dependency manifests and lock files are exempt from `maxFileBytes` up to 32 MiB (still counted toward
-  `maxTotalBytes`); a lock file left out for size is named in a scan warning instead of being skipped silently.
-- Rate limiters, throttles and loggers (`loginLimiter`, `authRateLimit`, `loginThrottle`) no longer count as route
-  auth hints, so a route guarded only by them is not reported to reviewers as protected.
+- **Fixtures and tests:** four intentionally vulnerable fixture apps with ground truth, a benchmark harness
+  (`pnpm bench`, `bench/score.ts` for real-model runs), and a deterministic scripted model for end-to-end tests
+  without API keys.
 
 ### Known limitations
 
-- `toolkit.lock.json` may ship without pinned SHA-256 values for some platforms. Managed installs are then refused
-  for those assets; tools installed on `PATH` still work.
 - Code-only scans never assign the *Reproduced* (`proven_dynamic`) verification.
 - Route extraction and SAST rules cover JavaScript/TypeScript and Python only; other languages get secret,
   dependency and AI review coverage.
+- Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
+  report labels are localized.
 
 [Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Aero123421/dsh-security-plugin/releases/tag/v0.1.0

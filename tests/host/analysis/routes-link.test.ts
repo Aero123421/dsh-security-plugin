@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AstGrepHandle } from '../../../src/host/analysis/astgrep.ts'
 import { extractRoutes, MAX_PATHS_PER_ROUTE } from '../../../src/host/analysis/routes/index.ts'
-import type { Endpoint } from '../../../src/host/analysis/types.ts'
+import { type Endpoint, isEndpointVisible } from '../../../src/host/analysis/types.ts'
 import { snapshotOf } from './helpers.ts'
 import { appFixture, endpoint } from './routes-helpers.ts'
 import { MODES, PY_MODES } from './sast-helpers.ts'
@@ -98,6 +98,8 @@ describe.each(MODES)('cross-file route linking: JavaScript (%s mode)', (_mode, h
         middleware: ['cors', 'requireAuth', 'isOwner'],
         authHints: ['requireAuth'],
         params: ['id'],
+        // The mounts that shaped the path and middleware live in these files.
+        mountedAt: ['src/app.ts', 'src/routes/api.ts'],
       },
     ])
     // Stable across runs.
@@ -748,5 +750,30 @@ describe.each(PY_MODES)('cross-file route linking: Python (%s mode)', (_mode, ha
       "app/main.py:5: could not resolve 'ROUTERS[0]' mounted at '/dyn'; its routes keep their local paths.",
     ])
     expect(summary(endpoints)).toEqual(['GET /orphan [] {}'])
+  })
+})
+
+describe.each(MODES)('endpoint visibility with withheld mounts (%s mode)', (_mode, handle) => {
+  it('hides a route whose prefix or middleware comes from a withheld file', async () => {
+    const files = {
+      'internal/app.js': lines(
+        "const express = require('express')",
+        'const app = express()',
+        "app.use('/zzhiddenprefixq7', zzHiddenGuardQ7, require('../src/users'))",
+      ),
+      'src/users.js': lines(
+        "const { Router } = require('express')",
+        'const router = Router()',
+        "router.get('/list', (req, res) => res.json([]))",
+        'module.exports = router',
+      ),
+    }
+    const { endpoints } = await routesIn(files, handle)
+    const list = endpoint(endpoints, 'GET', '/zzhiddenprefixq7/list')
+    expect(list.declaredAt.path).toBe('src/users.js')
+    expect(list.mountedAt).toEqual(['internal/app.js'])
+    const withheld = (path: string): boolean => path.startsWith('internal/')
+    expect(isEndpointVisible(list, withheld)).toBe(false)
+    expect(isEndpointVisible(list, () => false)).toBe(true)
   })
 })

@@ -131,12 +131,12 @@ Before anything reaches a model, it goes through these safeguards:
   `.netrc`, `.git-credentials`, `.pgpass`, `.htpasswd`, AWS, Docker and Kubernetes client credentials
   (`.aws/credentials`, `.aws/config`, `.docker/config.json`, `.kube/config`, `kubeconfig`), service-account JSON,
   `secrets.y(a)ml`, Terraform state and `*.tfvars`. You can add
-  your own patterns under *Never send these files*. Short, redacted rule-hit excerpts from such files can still appear in
-  task descriptions (see [docs/security-model.md](docs/security-model.md#residual-risks)).
+  your own patterns under *Never send these files*. Task descriptions follow the same rule: a rule hit in such a file
+  is described by its path and rule id only, and routes declared or mounted there are not listed.
 - The absolute project path is masked in every tool output.
 - External analyzers run locally. OSV-Scanner runs offline unless OSV lookups are on. Semgrep runs only with local
   rules and with metrics off. The scanned project's own ignore settings for these tools (`.gitleaks.toml`,
-  `osv-scanner.toml`, `nosemgrep` comments) are not honoured.
+  `osv-scanner.toml`, `nosemgrep` comments) are not honoured; Semgrep still applies a `.semgrepignore` file.
 
 Redaction is pattern-based. A credential in a format the rules do not know can still reach the model, so add
 withheld patterns for files that hold such values.

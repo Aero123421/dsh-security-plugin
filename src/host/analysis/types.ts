@@ -143,6 +143,24 @@ export interface Endpoint {
   readonly authHints: readonly string[]
   /** Path parameter names. */
   readonly params: readonly string[]
+  /**
+   * Other files whose code shaped this endpoint: mount calls that contribute
+   * its prefix or inherited middleware (`app.use('/api', auth, router)`),
+   * receiver-scoped middleware, and prefixes declared elsewhere. Sorted;
+   * omitted when everything is in the declaring file.
+   */
+  readonly mountedAt?: readonly string[]
+}
+
+/**
+ * Whether an endpoint can be shown to a model without revealing a withheld
+ * file: route text, prefixes and middleware names are file content, so the
+ * declaration, the handler, and every contributing mount must be visible.
+ */
+export function isEndpointVisible(endpoint: Endpoint, isWithheld: (path: string) => boolean): boolean {
+  if (isWithheld(endpoint.declaredAt.path)) return false
+  if (endpoint.handler !== undefined && isWithheld(endpoint.handler.path)) return false
+  return !(endpoint.mountedAt ?? []).some(path => isWithheld(path))
 }
 
 export interface OutlineSymbol {

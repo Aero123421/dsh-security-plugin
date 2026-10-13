@@ -73,6 +73,22 @@ describe('commentMask', () => {
     expect(commentOnly('run.weird', '# setup\nvalue # not a comment\n', 'not a comment')).toBe(false)
   })
 
+  it('ignores bare punctuation next to a comment, but not real code', () => {
+    const ts = 'function f(id) {\n  // input sanitized upstream\n}\n'
+    expect(commentOnly('a.ts', ts, '// input sanitized upstream\n}')).toBe(true)
+    expect(commentOnly('a.ts', ts, 'function f(id) {\n  // input sanitized upstream')).toBe(false)
+    expect(commentOnly('a.ts', '}\n);\n', '}\n);')).toBe(false)
+  })
+
+  it('recognizes Ruby block comments and extensionless or .org documentation', () => {
+    const rb = '=begin\nparams are whitelisted upstream\n=end\nUser.find(params[:id])\n'
+    expect(commentOnly('app/users.rb', rb, 'params are whitelisted upstream')).toBe(true)
+    expect(commentOnly('app/users.rb', rb, 'User.find(params[:id])')).toBe(false)
+    expect(commentOnly('README', 'All input is sanitized.\n', 'All input is sanitized.')).toBe(true)
+    expect(commentOnly('pkg/LICENSE', 'Permission is hereby granted\n', 'Permission is hereby granted')).toBe(true)
+    expect(commentOnly('notes/plan.org', '* Input is escaped\n', 'Input is escaped')).toBe(true)
+  })
+
   it('never calls blank or empty ranges comment-only', () => {
     const text = '// a\n\n'
     const mask = commentMask(text, 'a.ts')

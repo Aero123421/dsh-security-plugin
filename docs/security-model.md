@@ -102,7 +102,8 @@ the provider the user chose. The next section covers how that content is reduced
   quoted as evidence. Paths that are malformed or escape the root are treated as withheld. Task messages are
   held to the same rule (`scan/privacy.ts`): a signal or finding in a withheld file keeps only its path and rule id,
   with `[content withheld by privacy settings]` in place of its code, title and message; no Hunter task targets a
-  withheld file; endpoints declared in one are not listed; and a finding whose only evidence is in withheld files gets
+  withheld file; endpoints declared, handled or mounted in one (route prefixes and middleware names are file
+  content) are not listed, in task messages or by `list_endpoints`; and a finding whose only evidence is in withheld files gets
   no Skeptic review or chain analysis (it keeps its deterministic verification).
 - **Task messages are redacted too.** Every excerpt the host writes into a task (rule-hit snippets, attack-path
   excerpts, finding text) passes through the scan's `Redactor` (every secret value the built-in scan found, wherever

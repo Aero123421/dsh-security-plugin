@@ -197,4 +197,4 @@ people who share the DSH credentials.
 | `.gitignore` files (nested, deepest match wins) | Not read into the snapshot at all. |
 | Built-in ignores | `.git`, `node_modules`, `vendor`, `dist`, `build`, `out`, `target`, `coverage`, caches, IDE folders, Python virtualenvs, `.dsh-security`, minified bundles, source maps, binaries, symlinks. |
 | `scan.excludeGlobs` | Not read into the snapshot. Counted as `user-exclude`. |
-| `privacy.withheldGlobs` and built-in credential files | Read and scanned by the built-in analyzers (so secrets in them are still found), but never returned by the workers' tools and never quotable as evidence. Redacted rule-hit excerpts can still appear in task messages ([security-model.md](security-model.md#residual-risks)). |
+| `privacy.withheldGlobs` and built-in credential files | Read and scanned by the built-in analyzers (so secrets in them are still found), but never returned by the workers' tools and never quotable as evidence. Task messages show only the path and rule id of hits in them ([security-model.md](security-model.md)). |

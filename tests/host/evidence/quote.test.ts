@@ -398,6 +398,9 @@ describe('verifyQuote: cited ranges are narrowed and bounded', () => {
     expect(cite(7, 50, threeLines).reason).toMatch(/^cited range too wide: lines 7-50 \(44 lines\) for a 3-line quote/)
     // Wide citations past the end of the file are rejected too instead of being relocated.
     expect(cite(1, 10_000, CONFIG).reason).toMatch(/^cited range too wide/)
+    // Blank lines inside the quote do not buy a wider range: matching collapses them anyway.
+    const padded = `loadConfig(${'\n'.repeat(40)}process.env.CONFIG_PATH)`
+    expect(cite(1, 60, padded).reason).toMatch(/^cited range too wide: lines 1-60 \(60 lines\) for a 2-line quote/)
   })
 
   it('honors a custom maxExtraLines', () => {

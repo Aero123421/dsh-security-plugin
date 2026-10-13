@@ -86,9 +86,9 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 モデルに届く前に、次の処理が入ります。
 
 - スキャナーが見つけた秘密情報は、すべての抜粋で `[REDACTED:<ルールID>]` に置き換えられます。ツールの出力全体にも、もう一度パターンによる伏せ字処理をかけます。秘密情報の値そのものは保存せず、検出結果には先頭数文字だけを残した伏せ字表示を記録します。
-- **送信しないファイル** は、AI のツール（一覧・読み取り・検索・引用）では一切返しません。組み込みのリスト: `.env` と `.env.*`（`.example`・`.sample`・`.template` は除く）、秘密鍵と証明書、`.npmrc`、`.pypirc`、`.netrc`、`.git-credentials`、`.pgpass`、`.htpasswd`、AWS・Docker・Kubernetes のクライアント認証情報（`.aws/credentials`、`.aws/config`、`.docker/config.json`、`.kube/config`、`kubeconfig`）、サービスアカウントの JSON、`secrets.y(a)ml`、Terraform の state と `*.tfvars`。設定の「送信しないファイル」で追加できます。ただし、こうしたファイルでルールが検出した箇所の短い抜粋（伏せ字処理済み）は、作業の指示文に含まれることがあります（[docs/security-model.md](docs/security-model.md#residual-risks)）。
+- **送信しないファイル** は、AI のツール（一覧・読み取り・検索・引用）では一切返しません。組み込みのリスト: `.env` と `.env.*`（`.example`・`.sample`・`.template` は除く）、秘密鍵と証明書、`.npmrc`、`.pypirc`、`.netrc`、`.git-credentials`、`.pgpass`、`.htpasswd`、AWS・Docker・Kubernetes のクライアント認証情報（`.aws/credentials`、`.aws/config`、`.docker/config.json`、`.kube/config`、`kubeconfig`）、サービスアカウントの JSON、`secrets.y(a)ml`、Terraform の state と `*.tfvars`。設定の「送信しないファイル」で追加できます。AI への作業の指示文も同じ扱いで、こうしたファイルでのルール検出はパスとルール ID だけを伝え、そこで定義・マウントされたルートは一覧に含めません。
 - プロジェクトの絶対パスは、すべてのツール出力で伏せられます。
-- 外部の解析ツールはこのコンピューター上で動きます。OSV-Scanner は、OSV 照会がオフならオフラインで動きます。Semgrep はローカルのルールだけを使い、利用統計の送信はオフにして実行します。スキャン対象のプロジェクト側にあるこれらのツールの除外設定（`.gitleaks.toml`、`osv-scanner.toml`、`nosemgrep` コメント）は使いません。
+- 外部の解析ツールはこのコンピューター上で動きます。OSV-Scanner は、OSV 照会がオフならオフラインで動きます。Semgrep はローカルのルールだけを使い、利用統計の送信はオフにして実行します。スキャン対象のプロジェクト側にあるこれらのツールの除外設定（`.gitleaks.toml`、`osv-scanner.toml`、`nosemgrep` コメント）は使いません。ただし Semgrep は `.semgrepignore` を読みます。
 
 伏せ字処理はパターンに基づきます。ルールが知らない形式の認証情報はモデルに届く可能性があるので、そうした値を含むファイルは「送信しないファイル」に追加してください。
 

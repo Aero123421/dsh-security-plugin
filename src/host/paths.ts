@@ -9,6 +9,8 @@
  * knows the snapshot root.
  */
 
+import { realpathSync } from 'node:fs'
+
 /** Placeholder for a project (workspace) root. */
 export const PROJECT_PLACEHOLDER = '<project>'
 /** Placeholder for the plugin data directory (database, managed toolkit). */
@@ -54,9 +56,16 @@ interface Rule {
  */
 export function createPathMasker(options: HostPathMaskOptions): PathMasker {
   const rules: Rule[] = []
-  const add = (dir: string | undefined, placeholder: string) => {
-    const rule = dir === undefined ? undefined : ruleFor(dir, placeholder)
+  const addOne = (dir: string, placeholder: string) => {
+    const rule = ruleFor(dir, placeholder)
     if (rule && !rules.some(r => r.pattern.source === rule.pattern.source)) rules.push(rule)
+  }
+  // Tools often print canonical paths (macOS `/var/…` is `/private/var/…`), so mask both spellings.
+  const add = (dir: string | undefined, placeholder: string) => {
+    if (dir === undefined) return
+    addOne(dir, placeholder)
+    const real = canonical(dir)
+    if (real !== undefined && real !== dir) addOne(real, placeholder)
   }
   for (const root of options.workspaceRoots ?? []) add(root, PROJECT_PLACEHOLDER)
   add(options.dataDir, DATA_PLACEHOLDER)
@@ -68,6 +77,14 @@ export function createPathMasker(options: HostPathMaskOptions): PathMasker {
     let out = text
     for (const rule of rules) out = out.replace(rule.pattern, rule.placeholder)
     return out
+  }
+}
+
+function canonical(dir: string): string | undefined {
+  try {
+    return realpathSync.native(dir)
+  } catch {
+    return undefined
   }
 }
 

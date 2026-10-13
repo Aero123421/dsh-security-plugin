@@ -14,7 +14,7 @@
 
 import type { FindingRecord } from '../core/model.ts'
 import { isSensitivePath, type Redactor, redactKnownSecrets, redactText } from '../analysis/secrets.ts'
-import type { Endpoint, Signal, Snapshot } from '../analysis/types.ts'
+import { type Endpoint, isEndpointVisible, type Signal, type Snapshot } from '../analysis/types.ts'
 import { maskRoot } from '../evidence/text.ts'
 
 /** Neutral stand-in for code or text that comes from a withheld file. */
@@ -105,12 +105,9 @@ export class ModelPrivacy {
     }
   }
 
-  /** Endpoints whose declaration and handler are both outside withheld files (route text is file content). */
+  /** Endpoints whose declaration, handler and contributing mounts are all outside withheld files (route text is file content). */
   endpointVisible(endpoint: Endpoint): boolean {
-    return (
-      !this.isWithheld(endpoint.declaredAt.path) &&
-      (endpoint.handler === undefined || !this.isWithheld(endpoint.handler.path))
-    )
+    return isEndpointVisible(endpoint, path => this.isWithheld(path))
   }
 
   /** Whether a reviewer could see any of the finding's evidence. */
