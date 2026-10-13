@@ -7,6 +7,7 @@ import type { Endpoint, Snapshot } from '../../../src/host/analysis/types.ts'
 import { snapshotOf } from './helpers.ts'
 
 const FIXTURES = fileURLToPath(new URL('../../fixtures/routes/', import.meta.url))
+const APPS = fileURLToPath(new URL('../../fixtures/apps/', import.meta.url))
 
 /**
  * Load one `tests/fixtures/routes/<name>` directory as a snapshot rooted at
@@ -14,7 +15,15 @@ const FIXTURES = fileURLToPath(new URL('../../fixtures/routes/', import.meta.url
  * application under analysis.
  */
 export async function routeFixture(name: string, extra: Record<string, string> = {}): Promise<Snapshot> {
-  const dir = join(FIXTURES, name)
+  return dirSnapshot(join(FIXTURES, name), extra)
+}
+
+/** Load one `tests/fixtures/apps/<name>` application (the end-to-end fixtures) as a snapshot. */
+export async function appFixture(name: string): Promise<Snapshot> {
+  return dirSnapshot(join(APPS, name), {})
+}
+
+async function dirSnapshot(dir: string, extra: Record<string, string>): Promise<Snapshot> {
   const files: Record<string, string> = {}
   const walk = async (current: string): Promise<void> => {
     for (const entry of await readdir(current, { withFileTypes: true })) {

@@ -66,7 +66,7 @@ export function extractJsRoutes(ctx: RouteFileContext): void {
   if (isNextRouteFile(file.path, ctx.snapshot)) nextRoutes(ctx)
   if (/\b(?:Controller)\s*\(/.test(model.source) && /@nestjs\/common/.test(model.source)) nestRoutes(ctx)
   const receivers = findReceivers(ctx)
-  if (receivers.size === 0 && !looksLikeServerCode(model) && !importsFramework(model)) return
+  if (receivers.size === 0 && !looksLikeServerCode(model) && !importsFramework(model) && !extendsForeignApp(ctx)) return
   for (const call of model.calls) {
     if (call.decorator || call.tagged) continue
     if (call.receiver !== '') callRoute(ctx, call, receivers)
@@ -212,6 +212,23 @@ function looksLikeClientCode(model: FileModel): boolean {
       imp.source,
     ),
   )
+}
+
+/**
+ * A module with no framework import that adds routes to an app/router it
+ * gets from elsewhere: one imported from a module that creates it
+ * (`import { router } from './base'`), or the parameter of an exported
+ * registration function (`module.exports = app => { app.get(...) }`).
+ */
+function extendsForeignApp(ctx: RouteFileContext): boolean {
+  const { model } = ctx
+  const exports = /\bexport\b|\bmodule\.exports\b|\bexports\.[\w$]+\s*=/.test(model.source)
+  return model.calls.some(call => {
+    if (!HTTP_METHODS.has(call.name.toLowerCase()) || !/^[A-Za-z_$][\w$]*$/.test(call.receiver)) return false
+    const imported = model.imports.some(imp => imp.bindings.some(b => b.local === call.receiver))
+    if (!imported && !(exports && /^(?:app|router|server|routes|[a-z]\w*Router)$/.test(call.receiver))) return false
+    return plausibleReceiver(ctx, call.receiver)
+  })
 }
 
 function importsFramework(model: FileModel): boolean {
@@ -407,7 +424,7 @@ function mountOrMiddleware(ctx: RouteFileContext, call: CallFact, receiver: stri
 
 /** An argument that names a router (`ordersRouter`, `api.routes()`, `require('./routes/x')`) rather than middleware. */
 function looksLikeRouter(text: string): boolean {
-  if (/^(?:require|import)\(\s*['"`]\./.test(text)) return true
+  if (/^(?:require|import)\(\s*['"`](?:\.|@\/|~\/|#)/.test(text)) return true
   const name = /^([A-Za-z_$][\w$]*)(?:\.(?:routes|middleware)\(\))?$/.exec(text)?.[1]
   return name !== undefined && /(?:router|routes|api|controller)$/i.test(name)
 }
