@@ -382,13 +382,39 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
   )
 }
 
-function isHttpUrl(value: string): boolean {
+/**
+ * Reference hosts rendered as links. References can be written by a model that
+ * read untrusted code, so anything else is shown as plain text the user can
+ * copy, never as a clickable link.
+ */
+const LINKED_REFERENCE_HOSTS = [
+  'cwe.mitre.org',
+  'cve.mitre.org',
+  'www.cve.org',
+  'nvd.nist.gov',
+  'osv.dev',
+  'owasp.org',
+  'cheatsheetseries.owasp.org',
+  'github.com',
+  'developer.mozilla.org',
+  'rustsec.org',
+  'pkg.go.dev',
+  'security.snyk.io',
+]
+
+/** Exported for tests. */
+export function isLinkableReference(value: string): boolean {
+  let url: URL
   try {
-    const url = new URL(value)
-    return url.protocol === 'https:' || url.protocol === 'http:'
+    url = new URL(value)
   } catch {
     return false
   }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '') return false
+  const host = url.hostname.toLowerCase()
+  if (!LINKED_REFERENCE_HOSTS.includes(host)) return false
+  // Only GitHub's advisory database, not arbitrary repositories or gists.
+  return host !== 'github.com' || url.pathname.startsWith('/advisories/')
 }
 
 function ReferenceSection(props: { readonly detail: FindingDetail }) {
@@ -434,7 +460,7 @@ function ReferenceSection(props: { readonly detail: FindingDetail }) {
           <ul className="dshsec-list dshsec-refs-list">
             {references.map(ref => (
               <li key={ref}>
-                {isHttpUrl(ref) ? (
+                {isLinkableReference(ref) ? (
                   <a href={ref} target="_blank" rel="noopener noreferrer" className="dshsec-link">
                     {ref}
                   </a>

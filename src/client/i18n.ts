@@ -499,6 +499,8 @@ const en = {
   'notice.workspace-changed':
     'The project changed while this scan was running. Evidence recorded earlier may refer to older code.',
   'notice.ai-disabled': 'AI review was not used for this scan; only the built-in checks ran.',
+  'notice.consent-revoked':
+    'Sending code to models was turned off during this scan, so the remaining AI review was skipped. Built-in check results are kept.',
 
   'time.justNow': 'just now',
 } as const
@@ -1007,6 +1009,8 @@ const ja = {
   'notice.workspace-changed':
     'スキャン中にプロジェクトが変更されました。先に記録された根拠は、古いコードを指している可能性があります。',
   'notice.ai-disabled': 'このスキャンでは AI レビューを行わず、自動チェックだけを実行しました。',
+  'notice.consent-revoked':
+    'スキャン中にモデルへのコード送信がオフにされたため、残りの AI レビューを中止しました。自動チェックの結果は残っています。',
 
   'time.justNow': 'たった今',
 } as const satisfies Record<MessageKey, string>
@@ -1486,6 +1490,7 @@ const zh = {
   'notice.task-limit': '由于该深度的任务数上限，部分优先级较低的区域未被审查。',
   'notice.workspace-changed': '扫描期间项目发生了变化。之前记录的证据可能指向旧代码。',
   'notice.ai-disabled': '本次扫描未使用 AI 审查，只运行了内置检查。',
+  'notice.consent-revoked': '扫描期间已关闭向模型发送代码，因此跳过了剩余的 AI 审查。内置检查的结果仍然保留。',
 
   'time.justNow': '刚刚',
 } as const satisfies Record<MessageKey, string>
