@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { extractRoutes } from '../../../src/host/analysis/routes/index.ts'
 import { nextRouteOf } from '../../../src/host/analysis/routes/js.ts'
-import { routeParams } from '../../../src/host/analysis/routes/common.ts'
+import { AUTH_HINT, authHintsOf, routeParams } from '../../../src/host/analysis/routes/common.ts'
 import { snapshotOf } from './helpers.ts'
 import { endpoint, routeFixture, routeList, routesOf } from './routes-helpers.ts'
 import { MODES } from './sast-helpers.ts'
@@ -323,6 +323,39 @@ describe('route helpers', () => {
     // A monorepo package: the router directory belongs to the project that has a package.json.
     const files = new Map([['apps/web/package.json', '{}']])
     expect(nextRouteOf('apps/web/app/api/route.ts', { files })).toMatchObject({ route: '/api', root: 'apps/web/' })
+  })
+
+  it('treats guard names as auth hints but not rate limiters, throttles, or loggers', () => {
+    const guards = [
+      'requireLogin',
+      'loginRequired',
+      'login_required',
+      'ensureLoggedIn',
+      'isAuthenticated',
+      'requireAuth',
+      'authenticate',
+      'passport.authenticate',
+      'Depends(get_current_user)',
+      'fastify.verifyJwt',
+      'AuthGuard',
+    ]
+    const notGuards = [
+      'loginLimiter',
+      'authRateLimit',
+      'loginThrottle',
+      'authLimiter',
+      'login_rate_limit',
+      'ThrottlerGuard',
+      'authSlowDown',
+      'auth_slowdown',
+      'authLogger',
+      'sessionLogging',
+      'rateLimit',
+      'express.json',
+    ]
+    for (const name of guards) expect(AUTH_HINT.test(name), name).toBe(true)
+    for (const name of notGuards) expect(AUTH_HINT.test(name), name).toBe(false)
+    expect(authHintsOf(['loginLimiter', 'requireLogin', 'requireLogin', 'helmet'])).toEqual(['requireLogin'])
   })
 
   it('reads parameter names from every supported pattern syntax', () => {

@@ -180,9 +180,14 @@ export function targetKey(file: string, receiver: string): string {
  * (`auth|login|session|jwt|token|passport|guard|protect|require(User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin`)
  * plus framework idioms it misses (`@Roles`, `roles_required`, `get_current_user`,
  * `staff_member_required`, `user_passes_test`, `api_key`).
+ *
+ * Names that are clearly rate limiting, throttling, or logging never count,
+ * even when they mention auth (`loginLimiter`, `authRateLimit`,
+ * `loginThrottle`, `authLogger`): telling a reviewer such a route is guarded
+ * would hide a missing check.
  */
 export const AUTH_HINT =
-  /auth|login|session|jwt|token|passport|guard|protect|require(?:User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin|role|current_?(?:active_?)?user|signed_?in|logged_?in|api_?key|passes_?test|staff|superuser/i
+  /^(?![\s\S]*(?:limit|throttl|slow_?down|logg(?:er|ing)))[\s\S]*?(?:auth|login|session|jwt|token|passport|guard|protect|require(?:User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin|role|current_?(?:active_?)?user|signed_?in|logged_?in|api_?key|passes_?test|staff|superuser)/i
 
 /** Middleware names whose text suggests auth. */
 export function authHintsOf(middleware: readonly string[]): string[] {

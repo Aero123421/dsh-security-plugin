@@ -49,6 +49,11 @@ describe.each(MODES)('cross-file route linking: JavaScript (%s mode)', (_mode, h
       'requireAdmin',
     ])
     expect(endpoint(endpoints, 'GET', '/api/products/search').authHints).toEqual([])
+    // `router.post('/login', loginLimiter, ...)`: a rate limiter is not a guard, even when named after login.
+    expect(endpoint(endpoints, 'POST', '/api/auth/login')).toMatchObject({
+      middleware: ['helmet', 'express.json', 'loginLimiter'],
+      authHints: [],
+    })
     expect(endpoints.some(e => e.route === '/:id' || e.route === '/users')).toBe(false)
   })
 
@@ -498,7 +503,8 @@ describe.each(MODES)('cross-file route linking: JavaScript (%s mode)', (_mode, h
     files['app.js'] = lines(...app)
     const started = performance.now()
     const { endpoints, warnings } = await routesIn(files, handle)
-    expect(performance.now() - started).toBeLessThan(2000)
+    // ~0.7 s locally; generous bound for slow CI runners.
+    expect(performance.now() - started).toBeLessThan(5000)
     expect(warnings).toEqual([])
 
     const perDeclaration = new Map<string, number>()

@@ -1,6 +1,7 @@
-import { mkdir, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, symlink, truncate, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { DEPENDENCY_FILE_MAX_BYTES } from '../../../src/host/analysis/dependencies.ts'
 import {
   detectLanguage,
   isGeneratedContent,
@@ -168,6 +169,44 @@ describe('takeSnapshot', () => {
     expect(reasonOf(snapshot, 'big.ts')).toBe('too-large')
     expect(snapshot.files.has('small.ts')).toBe(true)
     expect(snapshot.truncated).toBe(false)
+  })
+
+  it('exempts dependency manifests and lock files from maxFileBytes up to their own ceiling', async () => {
+    const lock = `${JSON.stringify({ lockfileVersion: 3, packages: { '': {}, pad: 'x'.repeat(3000) } })}\n`
+    await writeTree(dir, {
+      'package-lock.json': lock,
+      'api/poetry.lock': `[[package]]\nname = "x"\nversion = "1.0.0"\n# ${'x'.repeat(3000)}\n`,
+      'requirements-dev.txt': `pytest==8.0.0\n# ${'x'.repeat(3000)}\n`,
+      // Same size, but not a file the dependency parser reads.
+      'data.json': lock,
+      'Package-Lock.json': lock,
+    })
+    const snapshot = await takeSnapshot(dir, { ...LIMITS, maxFileBytes: 1000 })
+    expect([...snapshot.files.keys()]).toEqual(['api/poetry.lock', 'package-lock.json', 'requirements-dev.txt'])
+    expect(snapshot.totalBytes).toBe([...snapshot.files.values()].reduce((sum, file) => sum + file.size, 0))
+    expect(reasonOf(snapshot, 'data.json')).toBe('too-large')
+    expect(reasonOf(snapshot, 'Package-Lock.json')).toBe('too-large')
+  })
+
+  it('still excludes lock files over the dependency-file ceiling and counts lock files toward maxTotalBytes', async () => {
+    await writeTree(dir, { 'a/yarn.lock': '', 'b/Cargo.lock': 'x'.repeat(5000), 'b/main.rs': 'fn main() {}\n' })
+    // A sparse file: over the ceiling on disk without writing 32 MiB.
+    await truncate(join(dir, 'a', 'yarn.lock'), DEPENDENCY_FILE_MAX_BYTES + 1)
+    const snapshot = await takeSnapshot(dir, { ...LIMITS, maxFileBytes: 1000, maxTotalBytes: 4000 })
+    expect(reasonOf(snapshot, 'a/yarn.lock')).toBe('too-large')
+    expect(reasonOf(snapshot, 'b/Cargo.lock')).toBe('limit-bytes')
+    expect(snapshot.truncated).toBe(true)
+  })
+
+  it('records an oversized lock file even when the excluded list is full', async () => {
+    await writeTree(dir, {
+      ...Object.fromEntries(Array.from({ length: 5005 }, (_, i) => [`m/b${String(i).padStart(4, '0')}.png`, 'x'])),
+      'z/pnpm-lock.yaml': '',
+    })
+    await truncate(join(dir, 'z', 'pnpm-lock.yaml'), DEPENDENCY_FILE_MAX_BYTES + 1)
+    const snapshot = await takeSnapshot(dir, LIMITS)
+    expect(snapshot.excluded.filter(e => e.reason === 'binary')).toHaveLength(5000)
+    expect(reasonOf(snapshot, 'z/pnpm-lock.yaml')).toBe('too-large')
   })
 
   it('stops at maxFiles and marks the snapshot truncated', async () => {

@@ -10,6 +10,7 @@ import { constants } from 'node:fs'
 import { lstat, open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import ignore from 'ignore'
+import { DEPENDENCY_FILE_MAX_BYTES, isDependencyFileName } from './dependencies.ts'
 import {
   type ExcludedPath,
   type ExcludeReason,
@@ -293,6 +294,8 @@ const COMMENT_START = /^\s*(?:\/\/|\/\*|\*|#|<!--|--|;|""")/
 const MINIFIABLE_EXTENSIONS: ReadonlySet<string> = new Set(['js', 'mjs', 'cjs', 'jsx', 'css'])
 
 const EXCLUDED_CAP = 5000
+/** Extra `excluded` room for oversized lock files, so the dependency warning for them is never lost to the cap. */
+const EXCLUDED_DEPENDENCY_RESERVE = 1000
 const NUL_SCAN_BYTES = 8192
 const GITIGNORE_MAX_BYTES = 512 * 1024
 const YIELD_EVERY = 50
@@ -360,6 +363,8 @@ export function isGeneratedContent(path: string, content: string): boolean {
  * Walk `rootInput` and capture every reviewable text file under the given
  * limits. Symlinks are never followed; ignored, binary, oversized, and
  * over-limit paths are recorded in `excluded` (capped at 5000 entries).
+ * Dependency manifests and lock files may exceed `maxFileBytes` up to
+ * {@link DEPENDENCY_FILE_MAX_BYTES}; they still count toward `maxTotalBytes`.
  */
 export async function takeSnapshot(rootInput: string, options: SnapshotOptions): Promise<Snapshot> {
   const { signal } = options
@@ -375,8 +380,8 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
   let truncated = false
   let processed = 0
 
-  const exclude = (path: string, reason: ExcludeReason): void => {
-    if (excluded.length < EXCLUDED_CAP) excluded.push({ path, reason })
+  const exclude = (path: string, reason: ExcludeReason, reserved = false): void => {
+    if (excluded.length < EXCLUDED_CAP + (reserved ? EXCLUDED_DEPENDENCY_RESERVE : 0)) excluded.push({ path, reason })
   }
 
   // Breadth-first so a truncated snapshot favours shallow, usually more central files.
@@ -465,8 +470,14 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
         exclude(rel, 'binary')
         continue
       }
-      if (st.size > options.maxFileBytes) {
-        exclude(rel, 'too-large')
+      // Lock files and manifests are often larger than ordinary sources, and skipping one silently
+      // drops dependency coverage: they get their own ceiling (still counted toward the total).
+      const dependencyFile = isDependencyFileName(name)
+      const fileLimit = dependencyFile
+        ? Math.max(options.maxFileBytes, DEPENDENCY_FILE_MAX_BYTES)
+        : options.maxFileBytes
+      if (st.size > fileLimit) {
+        exclude(rel, 'too-large', dependencyFile)
         continue
       }
       if (files.length >= options.maxFiles) {
@@ -480,9 +491,9 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
         break walk
       }
 
-      const outcome = await readBounded(abs, options.maxFileBytes)
+      const outcome = await readBounded(abs, fileLimit)
       if (outcome.kind !== 'ok') {
-        exclude(rel, outcome.kind)
+        exclude(rel, outcome.kind, dependencyFile)
         continue
       }
       const bytes = outcome.bytes
