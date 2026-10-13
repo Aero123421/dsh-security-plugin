@@ -1,6 +1,7 @@
 name: Release
 
-# On a version tag (v1.2.3, v1.2.3-rc.1):
+# On a version tag (v1.2.3, v1.2.3-rc.1), or from Actions → Release → Run workflow on main with the version
+# (the workflow then creates the tag vX.Y.Z on the tested commit itself):
 #   build   — tests the tagged commit, checks that the committed lib/ matches a fresh build, packs the release
 #             tarball with SHA256SUMS, and installs that tarball into a real DSH profile (smoke test).
 #   release — receives exactly those files, re-checks the checksums, and creates a DRAFT GitHub Release.
@@ -10,6 +11,11 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without "v" (must equal package.json "version"), e.g. 0.1.0'
+        required: true
 
 permissions:
   contents: read
@@ -27,6 +33,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # pnpm version comes from "packageManager" in package.json (pnpm@10.28.0).
@@ -39,12 +47,29 @@ jobs:
       - name: Check that the tag matches package.json
         id: version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           version="$(node -p "require('./package.json').version")"
-          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+              echo "::error::Run the release from main (got ${GITHUB_REF})"
+              exit 1
+            fi
+            tag="v${INPUT_VERSION}"
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" > /dev/null; then
+              echo "::error::Tag ${tag} already exists; release a new version instead of reusing it"
+              exit 1
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [ "${tag}" != "v${version}" ]; then
+            echo "::error::Tag ${tag} does not match package.json version ${version}"
             exit 1
           fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           if [[ "${version}" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
 
@@ -78,7 +103,7 @@ jobs:
           '
 
       - name: Pack release asset and checksums
-        run: node scripts/release-pack.mjs --tag "${GITHUB_REF_NAME}"
+        run: node scripts/release-pack.mjs --tag "${{ steps.version.outputs.tag }}"
 
       - name: Write release notes
         run: |
@@ -125,17 +150,26 @@ jobs:
         working-directory: dist-artifact/release
         run: sha256sum -c SHA256SUMS
 
+      - name: Create the tag on the tested commit (Run workflow only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}"
+
       - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
           PRERELEASE: ${{ needs.build.outputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
-          flags=(--repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file dist-artifact/notes/release-notes.md)
+          flags=(--repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" --notes-file dist-artifact/notes/release-notes.md)
           if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$TAG" \
             "dist-artifact/release/dsh-security-plugin-${VERSION}.tgz" \
             dist-artifact/release/SHA256SUMS \
             "${flags[@]}"

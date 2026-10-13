@@ -67,11 +67,14 @@ tries to build it on the user's machine.
    git push origin main vX.Y.Z
    ```
 
+   Or, without pushing a tag: commit and push to `main`, then Actions → *Release* → *Run workflow* on `main` with
+   the version (`X.Y.Z`). The workflow tests that commit and creates the tag `vX.Y.Z` on it.
+
    Never move a published tag to another commit. Fix problems in a new version.
 
 ## What the release workflow does
 
-`.github/workflows/release.yml` runs on a `v*` tag:
+`.github/workflows/release.yml` runs on a `v*` tag, or from *Run workflow* on `main` with a version:
 
 1. **build** (read-only): checks that the tag matches `package.json`; runs `pnpm lint`, `pnpm typecheck`,
    `pnpm test`, `scripts/check-lib.mjs` and `scripts/verify-package.mjs`; stops if `toolkit.lock.json` still has
