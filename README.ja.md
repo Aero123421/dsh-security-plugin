@@ -26,13 +26,19 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 
 ## はじめかた
 
-1. **インストール**: DSH のプロファイル（ここでは `web`）に追加します。
+1. **インストール**: DSH の Web UI で「プラグイン → プラグインを追加」を開き、次を入力します。
 
-   ```sh
-   dsh plugin --profile web add dsh-security-plugin
+   ```text
+   github:Aero123421/dsh-security-plugin#v0.1.0
    ```
 
-   DSH の Web UI の「プラグイン」ページからもインストールできます。そのあと `dsh web` を起動（または再起動）してください。読み込まれたかどうかは、`dsh --profile web --dump-config` の出力に `# == dsh-security-plugin` というレイヤーがあるかで確認できます。
+   ターミナルから入れる場合（ここでは `web` プロファイル）:
+
+   ```sh
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.1.0
+   ```
+
+   `#` の後ろには、入れたい[リリース](https://github.com/Aero123421/dsh-security-plugin/releases)のタグを指定します。タグを省くと、未リリースの `main` ブランチが入ります。各リリースにはビルド済みの `dsh-security-plugin-X.Y.Z.tgz` と `SHA256SUMS` も添付しており、その URL を同じ場所に入れても導入できます。npm には公開していません。有効化し、再起動を求められたら DSH を再起動してください。更新するときは、新しいタグで同じように追加します。動いている版は「設定」タブで確認できます。読み込まれたかどうかは、`dsh --profile web --dump-config` の出力に `# == dsh-security-plugin` というレイヤーがあるかで確認できます。
 2. **セキュリティを開く**: サイドバーの「セキュリティ」を開き、プロジェクトを選びます。スキャンできるのは DSH に登録済みのプロジェクトです。
 3. **モデルを選ぶ**: ページの「設定」タブ →「AI モデル」で選びます。「デフォルト」を 1 つ選べば十分で、役割（プランナー・ハンター・検証役・組み合わせ分析役）ごとに別のモデルも指定できます。スキャンには、ハンター用のモデル（個別指定またはデフォルト）が最低限必要です。
 4. **新しいスキャン**:「ディープ」を選び、見積もり（ファイル数、エンドポイント数、AI レビューの作業数、トークン数の目安）を確認してから、同意のチェックボックスにチェックを入れます。この同意はセキュリティの設定に保存され、オフにするまで以降のスキャンにも適用されます。

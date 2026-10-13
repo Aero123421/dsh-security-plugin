@@ -71,9 +71,9 @@ describe('plugin entry', () => {
     apply(ctx)
     expect(injected).toEqual(['sidebar.panellist', 'main', 'settings.section'])
     const byName = Object.fromEntries(registrations.map(r => [r.options.name, r.options]))
-    expect(byName['sidebar.panellist']).toMatchObject({ id: 'security', order: 20 })
-    expect(byName.main).toMatchObject({ key: 'security' })
-    expect(byName['settings.section']).toMatchObject({ id: 'security', order: 40 })
+    expect(byName['sidebar.panellist']).toMatchObject({ id: 'dsh-security', order: 20 })
+    expect(byName.main).toMatchObject({ key: 'dsh-security' })
+    expect(byName['settings.section']).toMatchObject({ id: 'dsh-security', order: 40 })
     const label = byName['sidebar.panellist']?.label as () => string
     expect(label()).toBe('セキュリティ')
     const props = (byName.main!.inject as () => { controller: unknown })()

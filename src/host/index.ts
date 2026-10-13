@@ -34,12 +34,17 @@ export interface HostContext {
   logger: ((name: string) => LoggerPort) & LoggerPort
 }
 
+/** How long unload waits for aborted toolkit installs to clean up their staging files. */
+const INSTALL_SHUTDOWN_GRACE_MS = 5_000
+
 export function apply(ctx: HostContext, input?: Partial<Config>): void {
   const config = Config.parse(input ?? {})
   const logger = namedLogger(ctx)
   const dataDir = resolveDataDir(config)
   const store = openSecurityStore(join(dataDir, 'security.db'))
   const now = () => new Date()
+  /** Aborted on unload: toolkit downloads and other long handler work stop with the plugin. */
+  const lifetime = new AbortController()
 
   let astGrep: Promise<AstGrepHandle | undefined> | undefined
   const loadEngine = () => {
@@ -74,12 +79,23 @@ export function apply(ctx: HostContext, input?: Partial<Config>): void {
     dataDir,
   })
 
-  // Registered first so it is disposed last: the controller must stop before the store closes.
-  ctx.effect(() => () => store.close(), 'dsh-security: store')
+  // One disposer owns the shutdown order. Cordis runs a fiber's disposers concurrently
+  // (`Promise.all` in `_unload`), so separate effects could close the store while scans
+  // are still writing their final `interrupted` state.
   ctx.effect(() => {
     controller.start()
-    return () => controller.dispose()
-  }, 'dsh-security: scans')
+    return async () => {
+      lifetime.abort(new Error('dsh-security was unloaded.'))
+      try {
+        await controller.dispose()
+        await settleWithin(toolkit.settled(), INSTALL_SHUTDOWN_GRACE_MS)
+      } catch (error) {
+        logger.warn('dsh-security: shutdown did not finish cleanly', error)
+      } finally {
+        store.close()
+      }
+    }
+  }, 'dsh-security: lifetime')
 
   const handlers = createHandlers({
     store,
@@ -94,6 +110,7 @@ export function apply(ctx: HostContext, input?: Partial<Config>): void {
     pluginVersion: __PLUGIN_VERSION__,
     now,
     dataDir,
+    lifetime: lifetime.signal,
   })
 
   ctx.inject(['connection'], scoped => {
@@ -106,6 +123,24 @@ export function apply(ctx: HostContext, input?: Partial<Config>): void {
     scoped.effect(() => registerRpcRoutes(connection, handlers, { logger, maskPaths }), 'dsh-security: rpc routes')
   })
   logger.info(`dsh-security ${__PLUGIN_VERSION__}: data in ${dataDir}`)
+}
+
+async function settleWithin(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      work.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>(resolve => {
+        timer = setTimeout(resolve, ms)
+        timer.unref?.()
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 function resolveDataDir(config: Config): string {

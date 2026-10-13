@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConnectionFetchRoute, LoggerPort, WorkspaceRegistryPort } from '../../../src/host/dsh/ports.ts'
 import { apply, Config, type HostContext, name } from '../../../src/host/index.ts'
 import { rpcRoutePath } from '../../../src/host/rpc/server.ts'
@@ -10,12 +10,23 @@ import { RPC_METHOD_NAMES, type RpcMethodName } from '../../../src/shared/contra
 import { envelope, fakeConnection, type LogEntry, readEnvelope, rpcRequest } from '../rpc/helpers.ts'
 import { AI_SETTINGS, copyFixture, gatedLlm, oracleLlm, registryOf, roleOf, type TempWorkspace } from './helpers.ts'
 
+// The shipped lock pins no hashes yet, so installs would stop before downloading.
+// Pin a test asset for this platform so an install reaches the (stubbed) network.
+vi.mock('../../../toolkit.lock.json', async () => {
+  const { testLock } = await import('./toolkit-helpers.ts')
+  return { default: testLock() }
+})
+
 interface FakeHost {
   readonly ctx: HostContext
   readonly connection: ReturnType<typeof fakeConnection>
   readonly logs: LogEntry[]
   readonly labels: string[]
-  /** Run every collected disposer in reverse order, awaiting async ones (as Cordis does). */
+  /**
+   * Run every collected disposer as Cordis's `Fiber#_unload` does: all at once
+   * (each after a microtask), awaiting them together, so no disposer can rely on
+   * another having finished first.
+   */
   dispose(): Promise<void>
 }
 
@@ -64,7 +75,15 @@ function fakeHost(
     logs,
     labels,
     async dispose() {
-      for (const dispose of disposers.splice(0).reverse()) await dispose()
+      await Promise.all(
+        disposers
+          .splice(0)
+          .reverse()
+          .map(async dispose => {
+            await Promise.resolve()
+            await dispose()
+          }),
+      )
     },
   }
 }
@@ -130,11 +149,7 @@ describe('plugin entry', () => {
     for (const route of host.connection.routes.values()) {
       expect(route).toMatchObject({ methods: ['POST'], requestBody: 'buffered' })
     }
-    expect(host.labels).toEqual([
-      'root:dsh-security: store',
-      'root:dsh-security: scans',
-      'scoped:dsh-security: rpc routes',
-    ])
+    expect(host.labels).toEqual(['root:dsh-security: lifetime', 'scoped:dsh-security: rpc routes'])
 
     const body = await post(host.connection.routes.get(rpcRoutePath('getBootstrap')), 'getBootstrap')
     expect(body.type).toBe('server-response')
@@ -218,12 +233,90 @@ describe('plugin entry', () => {
     await next.dispose()
   })
 
+  it('aborts an in-flight toolkit download on unload and closes the store only after it settles', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    // A download that never finishes on its own: it only ends when its signal aborts.
+    let fetchSignal: AbortSignal | undefined
+    let fetchStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      fetchStarted = resolve
+    })
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal ?? undefined
+      fetchStarted()
+      return new Promise<Response>((_resolve, reject) => {
+        fetchSignal?.addEventListener('abort', () => reject(fetchSignal?.reason), { once: true })
+      })
+    })
+    try {
+      const host = fakeHost()
+      apply(host.ctx, { dataDir })
+      const routes = new Map(host.connection.routes)
+      const install = post(routes.get(rpcRoutePath('installTool')), 'installTool', {
+        toolId: 'gitleaks',
+        acceptLicense: true,
+      })
+      await started
+      expect(fetchSignal?.aborted).toBe(false)
+
+      // The browser is still connected (its request signal never aborts); only the unload stops the download.
+      await host.dispose()
+      expect(fetchSignal?.aborted).toBe(true)
+      const response = await install
+      expect(response.result.ok || response.result.error.code).toBe('security/invalid-state')
+      // The aborted install cleaned up its staging directory before the disposer returned.
+      const toolDir = join(dataDir, 'toolkit', 'gitleaks')
+      expect(existsSync(toolDir) ? readdirSync(toolDir) : []).toEqual([])
+      // Nothing failed on the way down, and the store is closed now.
+      expect(host.logs.filter(e => e.level === 'error')).toEqual([])
+      const after = await post(routes.get(rpcRoutePath('getBootstrap')), 'getBootstrap')
+      expect(after.result.ok).toBe(false)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(unhandled).toEqual([])
+    } finally {
+      vi.unstubAllGlobals()
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  it('records a running scan as interrupted before the store closes, even with concurrent disposers', async () => {
+    shop = await copyFixture('express-shop')
+    const registry = registryOf([{ id: 'ws', path: shop.root, title: 'shop' }])
+    const llm = gatedLlm(await oracleLlm(), options => roleOf(options) === 'hunter')
+    const host = fakeHost({ workspaceRegistry: registry, llm })
+    apply(host.ctx, { dataDir })
+    const routes = new Map(host.connection.routes)
+    await post(routes.get(rpcRoutePath('updateSettings')), 'updateSettings', {
+      patch: AI_SETTINGS,
+      expectedRevision: 0,
+    })
+    const created = await post(routes.get(rpcRoutePath('createScan')), 'createScan', {
+      workspaceId: 'ws',
+      mode: 'deep',
+    })
+    if (!created.result.ok) throw new Error(created.result.error.message)
+    const { scanId } = created.result.value as { scanId: string }
+    await llm.waitForHeld(1)
+
+    await host.dispose()
+    // No scan wrote into a closed database during shutdown.
+    expect(host.logs.filter(e => e.level === 'error' || e.level === 'warn')).toEqual([])
+
+    const next = fakeHost({ workspaceRegistry: registry })
+    apply(next.ctx, { dataDir })
+    expect(await statusOf(next.connection.routes, scanId)).toBe('interrupted')
+    await next.dispose()
+    llm.open()
+  })
+
   it('works without exact-route support and with a logger that has no named children', async () => {
     const host = fakeHost({ connection: { fetch: {} } }, { namedLogger: 'throws' })
     apply(host.ctx, { dataDir })
     expect(host.connection.routes.size).toBe(0)
     expect(host.logs.some(e => e.level === 'warn' && String(e.args[0]).includes('no exact-route support'))).toBe(true)
-    expect(host.labels).toEqual(['root:dsh-security: store', 'root:dsh-security: scans'])
+    expect(host.labels).toEqual(['root:dsh-security: lifetime'])
     await host.dispose()
   })
 

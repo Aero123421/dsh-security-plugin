@@ -212,6 +212,11 @@ export class Toolkit {
     return promise
   }
 
+  /** Settles once every install in progress has finished or failed (for unload). */
+  async settled(): Promise<void> {
+    await Promise.allSettled([...this.#installs.values()])
+  }
+
   // -------------------------------------------------------------------------
 
   async #install(id: ToolId, signal: AbortSignal | undefined): Promise<ToolkitEntry> {

@@ -47,9 +47,13 @@ jobs:
             node scripts/pin-toolkit.mjs --check
           fi
 
-      # Needs Settings → Actions → "Allow GitHub Actions to create and approve pull requests".
+      # Pushes the branch chore/toolkit-pin, then opens a pull request. Opening the pull request needs
+      # Settings → Actions → "Allow GitHub Actions to create and approve pull requests"; without it the branch
+      # is still pushed, so open the pull request from that branch by hand.
       # Pull requests opened with GITHUB_TOKEN do not trigger CI; close and reopen the PR to run it.
-      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+      - id: pr
+        continue-on-error: true
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: chore/toolkit-pin
           delete-branch: true
@@ -65,3 +69,7 @@ jobs:
             - [ ] Versions and URLs are the intended upstream releases.
             - [ ] Every asset that should be installable has a non-null `sha256`.
             - [ ] Spot-check at least one hash against the upstream release page.
+
+      - if: steps.pr.outcome == 'failure'
+        run: |
+          echo "::warning title=Pull request not opened::The branch chore/toolkit-pin was pushed (if there were changes), but GitHub Actions may not open pull requests in this repository. Open one from that branch by hand."

@@ -55,15 +55,13 @@ const tokens = /* css */ `
   --dshsec-shadow: 0 16px 40px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
   --dshsec-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
   color: var(--dshsec-text);
+  /* Use DSH's text font (and whatever the user or a locale plugin such as
+     dsh-japanese set on it); only code-like text uses --dshsec-mono. */
+  font-family: inherit;
   font-size: 14px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   text-size-adjust: 100%;
-}
-/* DSH's stack lists Chinese fonts first; Japanese kanji should use Japanese glyph forms. */
-.dshsec-root:lang(ja) {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN',
-    'BIZ UDPGothic', 'Yu Gothic UI', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP', sans-serif;
 }
 .dshsec-root *, .dshsec-root *::before, .dshsec-root *::after { box-sizing: border-box; }
 .dshsec-root :focus { outline: none; }
@@ -762,6 +760,19 @@ const settings = /* css */ `
 .dshsec-tool-meta { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 12.5px; }
 .dshsec-tool-install { display: grid; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--dshsec-fill); }
 .dshsec-install-hint { white-space: pre-wrap; overflow-wrap: anywhere; }
+.dshsec-facts { margin: 0; display: flex; flex-wrap: wrap; gap: 8px 32px; }
+.dshsec-facts > div { display: grid; gap: 2px; min-width: 0; }
+.dshsec-facts dt { font-size: 12.5px; color: var(--dshsec-text3); }
+.dshsec-facts dd { margin: 0; overflow-wrap: anywhere; }
+.dshsec-link-icon { display: inline-flex; align-items: center; gap: 4px; }
+.dshsec-copyline { display: grid; gap: 4px; min-width: 0; }
+.dshsec-copyline-label { font-size: 12.5px; color: var(--dshsec-text2); }
+.dshsec-copyline-row {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 6px 6px 6px 12px; border-radius: 8px; background: var(--dshsec-code-bg); border: 1px solid var(--dshsec-line);
+}
+.dshsec-copyline-code { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; user-select: all; }
+.dshsec-copyline-row .dshsec-btn { flex: none; }
 .dshsec-savebar {
   position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between;
   gap: 8px 12px; flex-wrap: wrap; padding: 12px 0; margin-top: 8px;

@@ -74,7 +74,8 @@
     "bench": "node --experimental-strip-types --no-warnings bench/run.ts",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build && node scripts/verify-package.mjs",
     "toolkit:pin": "node scripts/pin-toolkit.mjs",
-    "prepack": "npm run build && node scripts/verify-package.mjs"
+    "check:lib": "node scripts/check-lib.mjs",
+    "release:pack": "node scripts/release-pack.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.2.1-alpha.2 <0.3.0-0"

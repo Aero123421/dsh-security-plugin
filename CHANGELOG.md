@@ -67,6 +67,9 @@ First public release.
   DSH credentials.
 - **Local storage** in `$DSH_HOME/security/security.db` (`node:sqlite`, owner-only permissions on POSIX), with
   retention and optional AI transcripts.
+- **Distribution through GitHub:** install with `github:Aero123421/dsh-security-plugin#vX.Y.Z` (the built `lib/` is
+  committed and checked against a fresh build in CI) or the release tarball with `SHA256SUMS`. The Settings tab
+  shows the running version and how to update; the plugin makes no update checks of its own.
 - **Fixtures and tests:** four intentionally vulnerable fixture apps with ground truth, a benchmark harness
   (`pnpm bench`, `bench/score.ts` for real-model runs), and a deterministic scripted model for end-to-end tests
   without API keys.

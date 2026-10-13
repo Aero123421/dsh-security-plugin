@@ -14,6 +14,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary.tsx'
 import { Field, Select, type SelectGroup, type SelectOption, Toggle } from '../components/Field.tsx'
 import { ControllerProvider, useController, useSecurity, useT } from '../context.tsx'
 import type { SecurityController } from '../controller.ts'
+import { copyText } from '../download.ts'
 import { formatNumber, text } from '../format.ts'
 import { errorText, LANGUAGE_NAMES, type Translator } from '../i18n.ts'
 import { IconExternal } from '../icons.tsx'
@@ -34,6 +35,15 @@ import {
   validateDraft,
 } from '../settingsForm.ts'
 import { LoadError, Loading, RenderFailure } from './shared.tsx'
+
+/** Where releases are published. The page links here; it never fetches it. */
+export const RELEASES_URL = 'https://github.com/Aero123421/dsh-security-plugin/releases'
+/** DSH versions this plugin build supports (keep in step with package.json `peerDependencies`). */
+export const SUPPORTED_DSH_RANGE = '0.2.1-alpha.2 – 0.2.x'
+/** What to paste into DSH's plugin screen; X.Y.Z is the release tag the user picks. */
+export const MANUAL_UPDATE_SPEC = 'github:Aero123421/dsh-security-plugin#vX.Y.Z'
+export const MANUAL_UPDATE_CLI = `dsh plugin --profile web add -w ${MANUAL_UPDATE_SPEC}`
+const COPIED_MS = 2000
 
 const NO_PROVIDERS: readonly ProviderOption[] = []
 const NO_ANALYZERS: readonly AnalyzerStatus[] = []
@@ -83,7 +93,7 @@ export function SettingsPanel() {
   }, [controller])
 
   if (!form && bootstrap.status === 'error' && bootstrap.error) {
-    return <LoadError error={bootstrap.error} onRetry={() => void controller.reloadBootstrap()} />
+    return <LoadError error={bootstrap.error} onRetry={() => void controller.reloadBootstrap({ force: true })} />
   }
   if (!form || !bootstrap.value) return <Loading />
   return <SettingsForm />
@@ -256,6 +266,8 @@ function SettingsForm() {
       </SettingsGroup>
 
       <ToolkitSection />
+
+      <VersionSection />
 
       {result && !dirty ? (
         <Callout tone={result.tone}>{'key' in result ? tr.t(result.key) : errorText(tr, result.error)}</Callout>
@@ -649,6 +661,76 @@ function ToolkitSection() {
         )}
       </div>
     </SettingsGroup>
+  )
+}
+
+/**
+ * Running version and how to update by hand. Deliberately offline: no update
+ * check, no request to GitHub; the user picks a release and installs it.
+ */
+function VersionSection() {
+  const tr = useT()
+  const version = useSecurity(s => s.bootstrap.value?.pluginVersion)
+  return (
+    <SettingsGroup title={tr.t('settings.version')} description={tr.t('settings.versionDesc')}>
+      <dl className="dshsec-facts">
+        <div>
+          <dt>{tr.t('version.running')}</dt>
+          <dd className="dshsec-mono" data-testid="dshsec-plugin-version">
+            {text(version)}
+          </dd>
+        </div>
+        <div>
+          <dt>{tr.t('version.supported')}</dt>
+          <dd className="dshsec-num">{SUPPORTED_DSH_RANGE}</dd>
+        </div>
+      </dl>
+      <p>
+        <a className="dshsec-link dshsec-link-icon" href={RELEASES_URL} target="_blank" rel="noopener noreferrer">
+          {tr.t('version.releases')}
+          <IconExternal size={12} />
+        </a>
+      </p>
+      <div className="dshsec-stack-sm">
+        <h3 className="dshsec-h4">{tr.t('version.manual')}</h3>
+        <CopyLine label={tr.t('version.ui')} value={MANUAL_UPDATE_SPEC} />
+        <CopyLine label={tr.t('version.cli')} value={MANUAL_UPDATE_CLI} />
+        <p className="dshsec-hint">{tr.t('version.replace')}</p>
+      </div>
+    </SettingsGroup>
+  )
+}
+
+function CopyLine(props: { readonly label: string; readonly value: string }) {
+  const tr = useT()
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  useEffect(() => {
+    if (state !== 'copied') return
+    const timer = setTimeout(() => setState('idle'), COPIED_MS)
+    return () => clearTimeout(timer)
+  }, [state])
+  const copy = async () => {
+    setState((await copyText(props.value)) ? 'copied' : 'failed')
+  }
+  return (
+    <div className="dshsec-copyline">
+      <span className="dshsec-copyline-label">{props.label}</span>
+      <div className="dshsec-copyline-row">
+        <code className="dshsec-copyline-code dshsec-mono">{props.value}</code>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={tr.t('version.copyLabel', { what: props.value })}
+          onClick={() => void copy()}
+        >
+          {state === 'copied' ? tr.t('common.copied') : tr.t('version.copy')}
+        </Button>
+      </div>
+      <span className="dshsec-visually-hidden" role="status" aria-live="polite">
+        {state === 'copied' ? tr.t('common.copied') : ''}
+      </span>
+      {state === 'failed' ? <p className="dshsec-hint">{tr.t('version.copyFailed')}</p> : null}
+    </div>
   )
 }
 

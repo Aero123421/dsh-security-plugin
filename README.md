@@ -47,14 +47,25 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
 
 ## Quick start
 
-1. **Install** the plugin into a DSH profile (the `web` profile here):
+1. **Install** the plugin. In the DSH Web UI, open **Plugins → Add plugin** and enter:
 
-   ```sh
-   dsh plugin --profile web add dsh-security-plugin
+   ```text
+   github:Aero123421/dsh-security-plugin#v0.1.0
    ```
 
-   You can also install it from the Plugins page of the DSH Web UI. Then start (or restart) `dsh web`. To confirm
-   the plugin is loaded, run `dsh --profile web --dump-config` and look for a `# == dsh-security-plugin` layer.
+   Or from a terminal (the `web` profile here):
+
+   ```sh
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.1.0
+   ```
+
+   Use the tag of the [release](https://github.com/Aero123421/dsh-security-plugin/releases) you want; without
+   `#tag` you get the unreleased `main` branch. Each release also has a prebuilt
+   `dsh-security-plugin-X.Y.Z.tgz` with `SHA256SUMS`, and its download URL works in the same places. The plugin is
+   not published to npm. Enable it and restart DSH if asked. To confirm it is loaded, run
+   `dsh --profile web --dump-config` and look for a `# == dsh-security-plugin` layer.
+
+   To update, add the newer tag the same way. The *Settings* tab shows the running version.
 2. **Open Security** in the DSH sidebar and choose a project. Scans run on projects that DSH already knows about.
 3. **Pick models** under the page's *Settings* tab → *Models*. A *Default* model is enough; each role (Planner,
    Hunter, Skeptic, Chain analyst) can override it. A scan needs at least a Hunter model, either its own or the

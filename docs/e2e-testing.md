@@ -31,7 +31,7 @@ cd /path/to/dsh-security-plugin
 pnpm install && pnpm build
 
 cd /tmp/dsh-e2e
-npx dsh plugin --profile web add /path/to/dsh-security-plugin    # pnpm link: rebuilds are picked up on restart
+npx dsh plugin --profile web add -w /path/to/dsh-security-plugin    # pnpm link: rebuilds are picked up on restart
 npx dsh --profile web --dump-config | grep -A4 '# == dsh-security-plugin'
 ```
 

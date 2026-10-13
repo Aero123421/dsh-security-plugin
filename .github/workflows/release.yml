@@ -1,7 +1,11 @@
 name: Release
 
-# Publishes to npm with provenance when a version tag (v1.2.3, v1.2.3-rc.1) is pushed.
-# See docs/releasing.md.
+# On a version tag (v1.2.3, v1.2.3-rc.1):
+#   build   — tests the tagged commit, checks that the committed lib/ matches a fresh build, packs the release
+#             tarball with SHA256SUMS, and installs that tarball into a real DSH profile (smoke test).
+#   release — receives exactly those files, re-checks the checksums, and creates a DRAFT GitHub Release.
+#             Publish the draft by hand after reviewing it. See docs/releasing.md.
+#   npm     — optional: publishes the same tarball to npm when the NPM_TOKEN secret is set.
 
 on:
   push:
@@ -14,12 +18,15 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  DSH_VERSION: 0.2.1-alpha.2
+
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # pnpm version comes from "packageManager" in package.json (pnpm@10.28.0).
@@ -28,14 +35,6 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          registry-url: https://registry.npmjs.org
-
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm build
-      - run: node scripts/verify-package.mjs
 
       - name: Check that the tag matches package.json
         id: version
@@ -46,13 +45,21 @@ jobs:
             echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
             exit 1
           fi
-          if [[ "${version}" == *-* ]]; then tag=next; else tag=latest; fi
-          echo "dist-tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [[ "${version}" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Committed lib/ matches a fresh build
+        run: node scripts/check-lib.mjs
+      - run: node scripts/verify-package.mjs
 
       - name: Require pinned toolkit assets
         shell: bash
         env:
-          # Set the repository variable ALLOW_UNPINNED_TOOLKIT=true to publish anyway (managed installs of
+          # Set the repository variable ALLOW_UNPINNED_TOOLKIT=true to release anyway (managed installs of
           # unpinned assets are then refused at runtime).
           ALLOW_UNPINNED_TOOLKIT: ${{ vars.ALLOW_UNPINNED_TOOLKIT }}
         run: |
@@ -65,12 +72,101 @@ jobs:
             } else if (process.env.ALLOW_UNPINNED_TOOLKIT === "true") {
               console.log(`::warning title=Unpinned toolkit assets::${missing.length} asset(s) have no SHA-256 (${missing.join(", ")}). Managed installs of these will be refused.`)
             } else {
-              console.log(`::error title=Unpinned toolkit assets::${missing.length} asset(s) have no SHA-256 (${missing.join(", ")}). Run the Toolkit pin workflow (or pnpm toolkit:pin) and merge its pull request before tagging a release.`)
+              console.log(`::error title=Unpinned toolkit assets::${missing.length} asset(s) have no SHA-256 (${missing.join(", ")}). Run the Toolkit pin workflow (or pnpm toolkit:pin) and merge the result before tagging a release.`)
               process.exit(1)
             }
           '
 
-      # prepack (build + verify-package) runs again inside npm publish.
-      - run: npm publish --provenance --access public --tag ${{ steps.version.outputs.dist-tag }}
+      - name: Pack release asset and checksums
+        run: node scripts/release-pack.mjs --tag "${GITHUB_REF_NAME}"
+
+      - name: Write release notes
+        run: |
+          mkdir -p notes
+          node scripts/release-notes.mjs "${{ steps.version.outputs.version }}" > notes/release-notes.md
+
+      - name: Smoke test — install the tarball into a fresh DSH profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="$PWD/release/dsh-security-plugin-${{ steps.version.outputs.version }}.tgz"
+          smoke="$RUNNER_TEMP/dsh-smoke"
+          mkdir -p "$smoke/home"
+          cd "$smoke"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "@deepseek-ai/dsh@${DSH_VERSION}"
+          export DSH_HOME="$smoke/home"
+          npx dsh plugin --profile smoke add -w "$asset"
+          npx dsh --profile smoke --dump-config > config.yml
+          grep -q '# == dsh-security-plugin' config.yml
+          grep -q 'name: dsh-security-plugin' config.yml
+          echo "The release tarball installs into DSH ${DSH_VERSION}."
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            release/
+            notes/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist-artifact
+
+      - name: Verify checksums
+        working-directory: dist-artifact/release
+        run: sha256sum -c SHA256SUMS
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=(--repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file dist-artifact/notes/release-notes.md)
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" \
+            "dist-artifact/release/dsh-security-plugin-${VERSION}.tgz" \
+            dist-artifact/release/SHA256SUMS \
+            "${flags[@]}"
+
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist-artifact
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish the same tarball to npm (only when NPM_TOKEN is set)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "NPM_TOKEN is not set; skipping npm (GitHub Release only)."
+            exit 0
+          fi
+          (cd dist-artifact/release && sha256sum -c SHA256SUMS)
+          tag=latest; if [ "$PRERELEASE" = "true" ]; then tag=next; fi
+          npm publish "dist-artifact/release/dsh-security-plugin-${VERSION}.tgz" --provenance --access public --tag "$tag"

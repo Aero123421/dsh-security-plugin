@@ -17,7 +17,11 @@ pnpm install
 pnpm build          # lib/index.js + lib/client.js
 pnpm test           # or: pnpm test:watch
 pnpm check          # lint + typecheck + test + build + package verification (what CI runs)
+pnpm check:lib      # committed lib/ matches a fresh build
 ```
+
+`lib/` is committed so users can install with `github:Aero123421/dsh-security-plugin#vX.Y.Z` without a build step.
+Run `pnpm build` and commit the changed `lib/` files together with your source change; CI fails if they differ.
 
 To try your change in DSH, see the Development section of the [README](README.md#development) and
 [docs/e2e-testing.md](docs/e2e-testing.md). Read [docs/architecture.md](docs/architecture.md) before changing the

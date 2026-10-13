@@ -1,17 +1,23 @@
 # Releasing
 
-Releases are published to npm as `dsh-security-plugin` by GitHub Actions (`.github/workflows/release.yml`) when a
-`v*` tag is pushed. The workflow publishes with **npm provenance**. Maintainers do not publish from their own
-machines.
+Releases are distributed through **GitHub**: users install a tag with `github:Aero123421/dsh-security-plugin#vX.Y.Z`
+or the release tarball attached to the GitHub Release. The package is not published to npm unless the optional
+`NPM_TOKEN` secret is set (see below); do not document an npm package name before it exists.
+
+Because a `github:` install runs no build, the built `lib/` is **committed to git**. CI rebuilds it and fails if the
+committed files differ (`scripts/check-lib.mjs`), and the package has no `prepare`/`prepack` script, so pnpm never
+tries to build it on the user's machine.
 
 ## Checklist
 
 1. **Decide the version.** The project follows semantic versioning. Before 1.0, a minor bump (0.x.0) may contain
    breaking changes; call them out in the changelog. Also bump the minor version when you change:
    - `CONTRACT_VERSION` in `src/shared/contracts.ts` (the browser and Host halves must match);
-   - a store migration in `src/host/store/schema.ts` (older plugin versions refuse the newer database);
+   - a store migration in `src/host/store/schema.ts` (older plugin versions refuse the newer database, so tell users
+     to back up `$DSH_HOME/security/security.db` before updating if they may want to go back);
    - the supported DSH peer range.
-2. **Update the toolkit pins** (needs network):
+2. **Update the toolkit pins.** Run the **Toolkit pin** workflow (Actions → *Toolkit pin* → *Run workflow*), or
+   locally with network access:
 
    ```sh
    pnpm toolkit:pin           # downloads every asset in toolkit.lock.json, writes sha256 + size
@@ -20,33 +26,39 @@ machines.
    ```
 
    The script cross-checks every hash against the upstream checksums file (`checksumsUrl`) and fails on a missing
-   or mismatching entry. To move to a new tool version, edit `version`, `checksumsUrl` and the asset URLs first,
-   then pin. You can also run the **Toolkit pin** workflow (Actions → *Toolkit pin* → *Run workflow*), which opens a
-   pull request with the updated lock. Review it like code: the hashes decide which binaries users execute.
+   or mismatching entry. The workflow pushes the branch `chore/toolkit-pin` and opens a pull request (if Actions may
+   open pull requests in this repository; otherwise open it from the branch). Review it like code: the hashes
+   decide which binaries users execute. To move to a new tool version, edit `version`, `checksumsUrl` and the asset
+   URLs first, then pin.
 3. **Bump the version** in `package.json` (`pnpm version <x.y.z> --no-git-tag-version`). `__PLUGIN_VERSION__` in
    both bundles comes from it at build time.
 4. **Update `CHANGELOG.md`.** Move items from *Unreleased* to a new `## [x.y.z] - YYYY-MM-DD` section and update the
-   compare links at the bottom.
-5. **Run the full check locally:**
+   compare links at the bottom. The release notes are generated from this section (`scripts/release-notes.mjs`).
+5. **Rebuild, commit `lib/`, and run the full check:**
 
    ```sh
    pnpm install --frozen-lockfile
-   pnpm check      # lint, typecheck, test, build, verify-package
+   pnpm build
+   pnpm check       # lint, typecheck, test, build, verify-package
+   pnpm check:lib   # committed lib/ == fresh build (commit lib/ first)
    ```
 
    `scripts/verify-package.mjs` runs `npm pack --dry-run` and fails if the tarball has a missing or unexpected
    file, if `lib/client.js` is not in DSH's module-loader format or is 300 KB or larger, or if a `package.json`
-   field DSH needs is wrong. It prints a warning (not an error) for any unpinned toolkit asset.
+   field DSH needs is wrong.
 6. **Verify in DSH by hand.** Follow [e2e-testing.md](e2e-testing.md) with the lowest supported DSH
    (`@deepseek-ai/dsh@0.2.1-alpha.2`) and, if one exists, the newest 0.2.x:
-   - the plugin loads and `--dump-config` shows the `# == dsh-security-plugin` layer;
+   - install the release candidate the way users will: `pnpm release:pack`, then
+     `dsh plugin --profile web add -w /absolute/path/to/release/dsh-security-plugin-x.y.z.tgz` in a fresh profile;
+   - the plugin loads, `--dump-config` shows the `# == dsh-security-plugin` layer, and Settings shows version x.y.z;
+   - disable, re-enable and remove the plugin in the Plugins page: the sidebar entry and Settings section disappear
+     and come back, and nothing keeps running after removal;
+   - update from the previous release in a profile that has settings and scan history: settings, consent, triage and
+     history are kept, and after the restart DSH asks for, the running version is the new one;
    - a Deep scan with the scripted model completes; one scan with a real model if available;
    - pause/resume, interrupted → resume, and export of all three formats work;
    - a remote page with `allowRemoteHighRiskSettings: false` cannot turn on code upload;
    - on at least one platform with pinned assets, *Install* for Gitleaks and OSV-Scanner succeeds.
-
-   Also install the packed tarball the way users will (`npm pack`, then `dsh plugin --profile web add
-   /path/to/dsh-security-plugin-x.y.z.tgz`) to catch anything that only works from a linked checkout.
 7. **Commit, tag and push:**
 
    ```sh
@@ -55,40 +67,47 @@ machines.
    git push origin main vX.Y.Z
    ```
 
+   Never move a published tag to another commit. Fix problems in a new version.
+
 ## What the release workflow does
 
-On a `v*` tag, on `ubuntu-latest` with Node 24 and pnpm from `packageManager`:
+`.github/workflows/release.yml` runs on a `v*` tag:
 
-1. `pnpm install --frozen-lockfile`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`,
-   `node scripts/verify-package.mjs`.
-2. Checks that the tag matches `package.json` (`vX.Y.Z` ↔ `X.Y.Z`) and stops if it does not.
-3. Stops if `toolkit.lock.json` still has `null` hashes, so a release never ships with a dead *Install* button.
-   Run the *Toolkit pin* workflow (or `pnpm toolkit:pin`) and merge its pull request first. To publish anyway, set
-   the repository variable `ALLOW_UNPINNED_TOOLKIT=true`; the step then only warns, and managed installs of the
-   unpinned assets are refused at runtime (users can still install the tools on `PATH`). Mention any gap in the
-   release notes.
-4. `npm publish --provenance --access public`. Tags with a pre-release suffix (`-alpha`, `-beta`, `-rc`) publish
-   under the `next` dist-tag; others under `latest`.
+1. **build** (read-only): checks that the tag matches `package.json`; runs `pnpm lint`, `pnpm typecheck`,
+   `pnpm test`, `scripts/check-lib.mjs` and `scripts/verify-package.mjs`; stops if `toolkit.lock.json` still has
+   `null` hashes (set the repository variable `ALLOW_UNPINNED_TOOLKIT=true` to release anyway; managed installs of
+   unpinned assets are then refused at runtime); packs `release/dsh-security-plugin-X.Y.Z.tgz` and
+   `release/SHA256SUMS` (`scripts/release-pack.mjs`); writes the release notes; and installs that tarball into a
+   fresh DSH `0.2.1-alpha.2` profile with `dsh plugin --profile smoke add -w` as a smoke test.
+2. **release** (`contents: write` only here): downloads exactly those files, re-checks `SHA256SUMS`, and creates a
+   **draft** GitHub Release with `gh release create --verify-tag --draft`, attaching only the tarball and
+   `SHA256SUMS`. Tags with a pre-release suffix (`-alpha`, `-beta`, `-rc`) are marked as pre-releases.
+3. **npm** (optional): if the `NPM_TOKEN` secret is set, publishes the same tarball with provenance; otherwise it
+   does nothing.
 
-Required repository configuration:
+Repository configuration:
 
-- Secret `NPM_TOKEN`: an npm automation (or granular publish) token for the `dsh-security-plugin` package.
-- The workflow requests `id-token: write` for provenance and `contents: read` otherwise.
 - Protect `v*` tags so only maintainers can create them.
-- For the *Toolkit pin* workflow: enable Settings → Actions → General → *Allow GitHub Actions to create and approve
-  pull requests*. Pull requests opened by that workflow do not trigger CI on their own; close and reopen the pull
-  request to run it.
-- `repository.url` in `package.json` must point to the GitHub repository that runs the workflow, or npm rejects
-  the provenance statement.
+- Optional: Settings → Actions → General → *Allow GitHub Actions to create and approve pull requests*, so the
+  *Toolkit pin* workflow can open its pull request. Pull requests opened by that workflow do not trigger CI on their
+  own; close and reopen the pull request to run it.
+- Optional: secret `NPM_TOKEN` (npm automation or granular publish token) to also publish to npm. `repository.url`
+  in `package.json` must then point to this repository, or npm rejects the provenance statement.
 
-## After publishing
+## After the workflow
 
-- Check the package page on npm: the provenance badge links to the workflow run, and the file list matches
-  `verify-package` output.
-- Install from the registry into a scratch profile: `dsh plugin --profile web add dsh-security-plugin@X.Y.Z`.
-- Create a GitHub release from the tag and paste the changelog section into it.
-- If something is wrong, `npm deprecate dsh-security-plugin@X.Y.Z "<reason>"` and release a fix. Avoid
-  `npm unpublish`.
+1. Open the draft release: check the title, the notes, and that the only assets are the tarball and `SHA256SUMS`.
+2. Publish it.
+3. Install from the published tag and from the asset URL into a scratch profile:
+
+   ```sh
+   dsh plugin --profile scratch add -w github:Aero123421/dsh-security-plugin#vX.Y.Z
+   dsh plugin --profile scratch add -w https://github.com/Aero123421/dsh-security-plugin/releases/download/vX.Y.Z/dsh-security-plugin-X.Y.Z.tgz
+   ```
+
+   and check that the downloaded asset matches `SHA256SUMS`.
+4. If something is wrong, say so in the release notes and release a fix as a new version. Keep old releases
+   available so users can go back.
 
 ## Changing the supported DSH range
 

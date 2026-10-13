@@ -420,7 +420,7 @@ describe('Settings high-risk toggles', () => {
     await flush(10)
     await click(byText(mounted.container, 'button', 'Open Security page'))
     expect(close).toHaveBeenCalledTimes(1)
-    expect(selectPanel).toHaveBeenCalledWith('security')
+    expect(selectPanel).toHaveBeenCalledWith('dsh-security')
   })
 })
 
@@ -756,5 +756,78 @@ describe('settings models', () => {
     await click(byText(mounted.container, 'button', 'Save changes'))
     expect(api.callsOf('updateSettings')).toHaveLength(0)
     expect(mounted.container.querySelector('.dshsec-savebar')?.textContent).toContain('Fix the highlighted fields')
+  })
+})
+
+describe('settings version & updates', () => {
+  const SPEC = 'github:Aero123421/dsh-security-plugin#vX.Y.Z'
+  const CLI = `dsh plugin --profile web add -w ${SPEC}`
+
+  function versionSection(root: ParentNode): HTMLElement {
+    const heading = byText<HTMLElement>(root, 'h2', 'Version & updates')
+    return heading.closest('section') as HTMLElement
+  }
+
+  it('shows the running version, the supported DSH range, the releases link and both commands, offline', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    try {
+      const api = fakeApi(baseHandlers({ getBootstrap: () => ok(makeBootstrap({ pluginVersion: '1.4.2' })) }))
+      controller = createController({ api, storage: null })
+      mounted = mount(<SettingsSection controller={controller} />)
+      await flush(10)
+      const section = versionSection(mounted.container)
+      expect(section.querySelector('[data-testid="dshsec-plugin-version"]')?.textContent).toBe('1.4.2')
+      expect(section.textContent).toContain('0.2.1-alpha.2 – 0.2.x')
+      const link = byText<HTMLAnchorElement>(section, 'a', 'Releases on GitHub')
+      expect(link.href).toBe('https://github.com/Aero123421/dsh-security-plugin/releases')
+      expect(link.target).toBe('_blank')
+      expect(link.rel.split(' ')).toContain('noopener')
+      const codes = [...section.querySelectorAll('code')].map(c => c.textContent)
+      expect(codes).toEqual([SPEC, CLI])
+      expect(section.textContent).toContain('Replace X.Y.Z with the release you want')
+      // No update check: nothing beyond the page's usual RPCs, and no direct network access.
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(new Set(api.calls.map(c => c.method))).toEqual(
+        new Set(['getBootstrap', 'listWorkspaces', 'listScans', 'listModels', 'listToolkit']),
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('copies a command and says so', async () => {
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    try {
+      controller = createController({ api: fakeApi(baseHandlers()), storage: null })
+      mounted = mount(<SettingsSection controller={controller} />)
+      await flush(10)
+      const section = versionSection(mounted.container)
+      const button = section.querySelector<HTMLButtonElement>(`button[aria-label="Copy: ${CLI}"]`)!
+      expect(button.type).toBe('button')
+      await click(button)
+      await flush(3)
+      expect(writeText).toHaveBeenCalledWith(CLI)
+      expect(button.textContent).toBe('Copied')
+      // Copying never submits the settings form.
+      expect(mounted.container.textContent).not.toContain('You have unsaved changes.')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('appears in the Security page Settings tab too, in Japanese when chosen', async () => {
+    const settings = makeSettings({ ui: { language: 'ja' } })
+    const api = fakeApi(baseHandlers({ getBootstrap: () => ok(makeBootstrap({ settings })) }))
+    controller = createController({ api, storage: null, dshLocale: 'en' })
+    controller.setTab('settings')
+    mounted = mount(<SecurityPage controller={controller} />)
+    await flush(10)
+    const heading = byText<HTMLElement>(mounted.container, 'h2', 'バージョンと更新')
+    const section = heading.closest('section') as HTMLElement
+    expect(section.querySelector('[data-testid="dshsec-plugin-version"]')?.textContent).toBe('0.1.0')
+    expect(section.textContent).toContain('手動で更新する')
+    expect([...section.querySelectorAll('code')].map(c => c.textContent)).toEqual([SPEC, CLI])
   })
 })

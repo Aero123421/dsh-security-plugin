@@ -7,6 +7,13 @@
 
 import type { ComponentType } from 'react'
 
+/**
+ * The id this plugin registers under in DSH's shared slots (sidebar panel,
+ * main view key, settings section). Namespaced so it cannot collide with DSH
+ * or another plugin; `layout.selectPanel()` must use the same value.
+ */
+export const SECURITY_SLOT_ID = 'dsh-security'
+
 export type DshRpcOutcome =
   | { readonly ok: true; readonly value: unknown }
   | {

@@ -22,9 +22,9 @@ import {
 } from '../shared/contracts.ts'
 import type { ScanMode, TriageState } from '../shared/domain.ts'
 import type { ModelRef, SecuritySettings, SettingsPatch } from '../shared/settings.ts'
-import { failure, type SecurityApi } from './api.ts'
+import { ABORTED_ERROR, failure, type SecurityApi } from './api.ts'
 import { copyText, downloadFile } from './download.ts'
-import type { DshLayout, DshUiWorkspace } from './dsh.ts'
+import { type DshLayout, type DshUiWorkspace, SECURITY_SLOT_ID } from './dsh.ts'
 import { DEFAULT_FINDINGS_FILTER, type FindingsFilter } from './findings.ts'
 import { type Language, type MessageKey, resolveLanguage } from './i18n.ts'
 import { isPollableStatus, mergeSummary, sortScans } from './selectors.ts'
@@ -167,13 +167,20 @@ export interface SecurityController {
 
   /** Load bootstrap and workspaces once (idempotent). */
   ensureLoaded(): void
-  /** Re-fetch everything visible (after a reconnect or on Retry). */
+  /**
+   * Re-fetch everything visible (after a reconnect or on Retry). Starts a new
+   * request generation: responses to requests issued before it are discarded.
+   */
   reload(): Promise<void>
   /** Refresh workspaces and scans when the page is shown again (throttled). */
   revalidate(): void
-  reloadBootstrap(): Promise<RpcResult<Bootstrap>>
-  refreshWorkspaces(): Promise<void>
-  refreshScans(workspaceId?: string): Promise<void>
+  /**
+   * Fetch the bootstrap. Plain calls join an in-flight request; `force` starts
+   * a new one that supersedes it (use after a reconnect, conflict or change).
+   */
+  reloadBootstrap(options?: { readonly force?: boolean }): Promise<RpcResult<Bootstrap>>
+  refreshWorkspaces(force?: boolean): Promise<void>
+  refreshScans(workspaceId?: string, force?: boolean): Promise<void>
   setDshLocale(locale: string): void
   contractMismatch(): boolean
 
@@ -267,14 +274,30 @@ export function createController(options: ControllerOptions): SecurityController
   let flashTimer: ReturnType<typeof setTimeout> | undefined
   const watchers = new Map<string, Watcher>()
   const estimateCache = new Map<string, ScanEstimate>()
-  const inflight = new Map<string, Promise<unknown>>()
+  const inflight = new Map<string, { readonly gen: number; readonly promise: Promise<unknown> }>()
+  const generations = new Map<string, number>()
+  /**
+   * Highest settings revision this page has applied. Bootstraps and save
+   * results carrying an older revision never replace newer settings.
+   */
+  let knownRevision = Number.NEGATIVE_INFINITY
 
-  /** Coalesce identical concurrent loads. */
-  function once<T>(key: string, run: () => Promise<T>): Promise<T> {
+  /**
+   * Coalesce identical concurrent loads. `force` starts a new generation for
+   * `key` instead of joining the in-flight request; `run` checks `isCurrent()`
+   * after every await and drops its result once a newer generation (or
+   * dispose) has superseded it.
+   */
+  function once<T>(key: string, run: (isCurrent: () => boolean) => Promise<T>, force = false): Promise<T> {
     const pending = inflight.get(key)
-    if (pending) return pending as Promise<T>
-    const promise = run().finally(() => inflight.delete(key))
-    inflight.set(key, promise)
+    if (pending && !force) return pending.promise as Promise<T>
+    const gen = (generations.get(key) ?? 0) + 1
+    generations.set(key, gen)
+    const isCurrent = () => !disposed && generations.get(key) === gen
+    const promise = run(isCurrent).finally(() => {
+      if (inflight.get(key)?.gen === gen) inflight.delete(key)
+    })
+    inflight.set(key, { gen, promise })
     return promise
   }
 
@@ -282,10 +305,21 @@ export function createController(options: ControllerOptions): SecurityController
   // Bootstrap, settings form, language
   // -------------------------------------------------------------------------
 
-  function applyBootstrap(bootstrap: Bootstrap): void {
+  function revisionOf(value: unknown): number {
+    return typeof value === 'number' && Number.isFinite(value) ? value : 0
+  }
+
+  function applyBootstrap(incoming: Bootstrap): void {
+    let bootstrap = incoming
+    const current = get().bootstrap.value
+    if (current && revisionOf(incoming.settingsRevision) < knownRevision) {
+      // A response read before a newer save: keep its other fields, not its settings.
+      bootstrap = { ...incoming, settings: current.settings, settingsRevision: current.settingsRevision }
+    }
+    knownRevision = Math.max(knownRevision, revisionOf(bootstrap.settingsRevision))
     set(s => {
       const settings = bootstrap.settings
-      const revision = typeof bootstrap.settingsRevision === 'number' ? bootstrap.settingsRevision : 0
+      const revision = revisionOf(bootstrap.settingsRevision)
       const base = draftFromSettings(settings)
       let form: SettingsFormState
       if (!s.form) form = { base, draft: base, revision, saving: false }
@@ -306,54 +340,87 @@ export function createController(options: ControllerOptions): SecurityController
     applyBootstrap({ ...current, settings, settingsRevision: revision })
   }
 
-  async function reloadBootstrap(): Promise<RpcResult<Bootstrap>> {
-    return once('bootstrap', async () => {
-      set(s => ({ ...s, bootstrap: loading(s.bootstrap) }))
-      const result = await api.call('getBootstrap', {})
-      if (result.ok && isBootstrap(result.value)) applyBootstrap(result.value)
-      else {
-        const error = result.ok ? failure('security/internal', 'Malformed bootstrap.') : result.error
-        set(s => ({ ...s, bootstrap: errored(s.bootstrap, error) }))
-        return { ok: false, error } as const
-      }
-      return result
-    })
+  /**
+   * A conflict reports the server's revision. One below ours means the Host's
+   * store was reset (not that our copy is newer), so accept it from now on.
+   */
+  function noteServerRevision(error: RpcFailure): void {
+    const revision = error.details?.revision
+    if (typeof revision === 'number' && Number.isFinite(revision) && revision < knownRevision) knownRevision = revision
   }
 
-  async function refreshWorkspaces(): Promise<void> {
-    await once('workspaces', async () => {
-      set(s => ({ ...s, workspaces: loading(s.workspaces) }))
-      const result = await api.call('listWorkspaces', {})
-      const list = result.ok ? asList<WorkspaceSummary>(result.value).filter(w => w && typeof w.id === 'string') : []
-      set(s => {
-        const workspaces: Loadable<readonly WorkspaceSummary[]> = result.ok
-          ? { status: 'ready', value: list }
-          : errored(s.workspaces, result.error)
-        const known = workspaces.value ?? []
-        let workspaceId = s.workspaceId
-        if (!workspaceId || (result.ok && !known.some(w => w.id === workspaceId))) workspaceId = pickWorkspace(known)
-        return { ...s, workspaces, workspaceId }
-      })
-      const workspaceId = get().workspaceId
-      if (workspaceId) await refreshScans(workspaceId)
-    })
+  /** What a superseded bootstrap request resolves to: the newer request's outcome. */
+  function supersededBootstrap(): Promise<RpcResult<Bootstrap>> | RpcResult<Bootstrap> {
+    const pending = inflight.get('bootstrap')
+    if (!disposed && pending) return pending.promise as Promise<RpcResult<Bootstrap>>
+    const value = get().bootstrap.value
+    if (!disposed && value) return { ok: true, value }
+    return { ok: false, error: failure(ABORTED_ERROR, 'The request was superseded.') }
   }
 
-  async function refreshScans(workspaceId = get().workspaceId): Promise<void> {
+  async function reloadBootstrap(options: { readonly force?: boolean } = {}): Promise<RpcResult<Bootstrap>> {
+    return once(
+      'bootstrap',
+      async isCurrent => {
+        set(s => ({ ...s, bootstrap: loading(s.bootstrap) }))
+        const result = await api.call('getBootstrap', {})
+        if (!isCurrent()) return supersededBootstrap()
+        if (result.ok && isBootstrap(result.value)) applyBootstrap(result.value)
+        else {
+          const error = result.ok ? failure('security/internal', 'Malformed bootstrap.') : result.error
+          set(s => ({ ...s, bootstrap: errored(s.bootstrap, error) }))
+          return { ok: false, error } as const
+        }
+        return { ok: true, value: get().bootstrap.value ?? result.value }
+      },
+      options.force === true,
+    )
+  }
+
+  async function refreshWorkspaces(force = false): Promise<void> {
+    await once(
+      'workspaces',
+      async isCurrent => {
+        set(s => ({ ...s, workspaces: loading(s.workspaces) }))
+        const result = await api.call('listWorkspaces', {})
+        if (!isCurrent()) return
+        const list = result.ok ? asList<WorkspaceSummary>(result.value).filter(w => w && typeof w.id === 'string') : []
+        set(s => {
+          const workspaces: Loadable<readonly WorkspaceSummary[]> = result.ok
+            ? { status: 'ready', value: list }
+            : errored(s.workspaces, result.error)
+          const known = workspaces.value ?? []
+          let workspaceId = s.workspaceId
+          if (!workspaceId || (result.ok && !known.some(w => w.id === workspaceId))) workspaceId = pickWorkspace(known)
+          return { ...s, workspaces, workspaceId }
+        })
+        const workspaceId = get().workspaceId
+        if (workspaceId) await refreshScans(workspaceId, force)
+      },
+      force,
+    )
+  }
+
+  async function refreshScans(workspaceId = get().workspaceId, force = false): Promise<void> {
     if (!workspaceId) return
-    await once(`scans:${workspaceId}`, async () => {
-      set(s => ({ ...s, scans: { ...s.scans, [workspaceId]: loading(s.scans[workspaceId]) } }))
-      const result = await api.call('listScans', { workspaceId })
-      set(s => {
-        const prev = s.scans[workspaceId]
-        const entry: Loadable<readonly ScanSummary[]> = result.ok
-          ? { status: 'ready', value: sortScans(asList<ScanSummary>(result.value)) }
-          : errored(prev, result.error)
-        const viewScanId =
-          s.viewScanId && result.ok && !entry.value?.some(scan => scan.id === s.viewScanId) ? undefined : s.viewScanId
-        return { ...s, scans: { ...s.scans, [workspaceId]: entry }, viewScanId }
-      })
-    })
+    await once(
+      `scans:${workspaceId}`,
+      async isCurrent => {
+        set(s => ({ ...s, scans: { ...s.scans, [workspaceId]: loading(s.scans[workspaceId]) } }))
+        const result = await api.call('listScans', { workspaceId })
+        if (!isCurrent()) return
+        set(s => {
+          const prev = s.scans[workspaceId]
+          const entry: Loadable<readonly ScanSummary[]> = result.ok
+            ? { status: 'ready', value: sortScans(asList<ScanSummary>(result.value)) }
+            : errored(prev, result.error)
+          const viewScanId =
+            s.viewScanId && result.ok && !entry.value?.some(scan => scan.id === s.viewScanId) ? undefined : s.viewScanId
+          return { ...s, scans: { ...s.scans, [workspaceId]: entry }, viewScanId }
+        })
+      },
+      force,
+    )
   }
 
   function ensureLoaded(): void {
@@ -378,7 +445,7 @@ export function createController(options: ControllerOptions): SecurityController
 
   async function reload(): Promise<void> {
     loaded = true
-    const tasks: Promise<unknown>[] = [reloadBootstrap(), refreshWorkspaces()]
+    const tasks: Promise<unknown>[] = [reloadBootstrap({ force: true }), refreshWorkspaces(true)]
     const s = get()
     if (s.models.status !== 'idle') tasks.push(loadModels(true))
     if (s.toolkit.status !== 'idle') tasks.push(loadToolkit(true))
@@ -474,7 +541,8 @@ export function createController(options: ControllerOptions): SecurityController
     if (done()) return { ok: true, value: undefined }
     let result: RpcResult<unknown> = await updateSettings(patch)
     if (!result.ok && result.error.code === 'security/conflict') {
-      const reloaded = await reloadBootstrap()
+      noteServerRevision(result.error)
+      const reloaded = await reloadBootstrap({ force: true })
       if (!reloaded.ok) return reloaded
       if (done()) return { ok: true, value: undefined }
       result = await updateSettings(patch)
@@ -851,32 +919,42 @@ export function createController(options: ControllerOptions): SecurityController
 
   async function loadModels(force = false): Promise<void> {
     if (!force && get().models.status !== 'idle' && get().models.status !== 'error') return
-    await once('models', async () => {
-      set(s => ({ ...s, models: loading(s.models) }))
-      const result = await api.call('listModels', {})
-      set(s => ({
-        ...s,
-        models: settleLoadable(
-          s.models,
-          result.ok ? { ok: true, value: asList<ProviderOption>(result.value) } : result,
-        ),
-      }))
-    })
+    await once(
+      'models',
+      async isCurrent => {
+        set(s => ({ ...s, models: loading(s.models) }))
+        const result = await api.call('listModels', {})
+        if (!isCurrent()) return
+        set(s => ({
+          ...s,
+          models: settleLoadable(
+            s.models,
+            result.ok ? { ok: true, value: asList<ProviderOption>(result.value) } : result,
+          ),
+        }))
+      },
+      force,
+    )
   }
 
   async function loadToolkit(force = false): Promise<void> {
     if (!force && get().toolkit.status !== 'idle' && get().toolkit.status !== 'error') return
-    await once('toolkit', async () => {
-      set(s => ({ ...s, toolkit: loading(s.toolkit) }))
-      const result = await api.call('listToolkit', {})
-      set(s => ({
-        ...s,
-        toolkit: settleLoadable(
-          s.toolkit,
-          result.ok ? { ok: true, value: asList<ToolkitEntry>(result.value) } : result,
-        ),
-      }))
-    })
+    await once(
+      'toolkit',
+      async isCurrent => {
+        set(s => ({ ...s, toolkit: loading(s.toolkit) }))
+        const result = await api.call('listToolkit', {})
+        if (!isCurrent()) return
+        set(s => ({
+          ...s,
+          toolkit: settleLoadable(
+            s.toolkit,
+            result.ok ? { ok: true, value: asList<ToolkitEntry>(result.value) } : result,
+          ),
+        }))
+      },
+      force,
+    )
   }
 
   async function installTool(toolId: ToolkitEntry['id']) {
@@ -889,7 +967,8 @@ export function createController(options: ControllerOptions): SecurityController
           ? { ...s.toolkit, value: s.toolkit.value.map(t => (t.id === entry.id ? entry : t)) }
           : s.toolkit,
       }))
-      void reloadBootstrap()
+      // The install changed the Host's analyzer list; a bootstrap already in flight predates it.
+      void reloadBootstrap({ force: true })
     }
     return result
   }
@@ -932,9 +1011,25 @@ export function createController(options: ControllerOptions): SecurityController
     set(st => (st.form ? { ...st, form: { ...st.form, saving: true } } : st))
     const result = await api.call('updateSettings', { patch, expectedRevision: form.revision })
     if (result.ok) {
+      const fresh = result.value.revision >= knownRevision
+      if (fresh) knownRevision = result.value.revision
       set(st => {
         const current = st.bootstrap.value
         if (!current) return st
+        if (!fresh) {
+          // A newer revision arrived while saving; show it rather than our older write.
+          const base = draftFromSettings(current.settings)
+          return {
+            ...st,
+            form: {
+              base,
+              draft: base,
+              revision: current.settingsRevision,
+              saving: false,
+              result: { tone: 'success', key: 'settings.saved' },
+            },
+          }
+        }
         const base = draftFromSettings(result.value.settings)
         return {
           ...st,
@@ -957,7 +1052,8 @@ export function createController(options: ControllerOptions): SecurityController
     }
     if (result.error.code === 'security/conflict') {
       setFormResult(undefined, true)
-      await reloadBootstrap()
+      noteServerRevision(result.error)
+      await reloadBootstrap({ force: true })
       setFormResult({ tone: 'warn', key: 'settings.conflict' })
       return result
     }
@@ -975,7 +1071,7 @@ export function createController(options: ControllerOptions): SecurityController
 
   function openSecurityPage(close?: () => void): void {
     close?.()
-    host.layout()?.selectPanel('security')
+    host.layout()?.selectPanel(SECURITY_SLOT_ID)
   }
 
   function flash(message: { tone: Tone; key: MessageKey } | { tone: Tone; error: RpcFailure }): void {

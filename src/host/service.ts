@@ -57,6 +57,8 @@ export interface ServiceDeps {
   readonly now: () => Date
   /** Plugin data directory (database, managed toolkit), masked as `<data>` in browser-bound text. */
   readonly dataDir?: string
+  /** Aborted when the plugin unloads; long-running handler work stops with it. */
+  readonly lifetime?: AbortSignal
 }
 
 const ESTIMATE_TOKENS_PER_TASK = { min: 15_000, max: 90_000 } as const
@@ -66,6 +68,9 @@ const MODEL_INFO_TIMEOUT_MS = 5_000
 export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const { store, settings, controller } = deps
   const maskPaths = (): PathMasker => hostPathMasker(deps)
+  /** The request's signal, also aborted when the plugin unloads. */
+  const workSignal = (call: { readonly signal: AbortSignal }): AbortSignal =>
+    deps.lifetime ? AbortSignal.any([call.signal, deps.lifetime]) : call.signal
 
   /** Masker for text about one scan: its own root as well as every registered project. */
   const scanMask = (scan: ScanRecord): PathMasker => hostPathMasker(deps, [scan.workspaceRoot])
@@ -261,6 +266,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     async listModels(_payload, call) {
       const llm = deps.llm()
       if (!llm) return []
+      const signal = workSignal(call)
       const providers = llm.listProviders()
       return await Promise.all(
         providers.map(async (provider): Promise<ProviderOption> => {
@@ -269,7 +275,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
             const detailed = await Promise.all(
               models.map(async model => {
                 const info = await withTimeout(
-                  llm.resolveModelInfo(provider.id, model.id, call.signal),
+                  llm.resolveModelInfo(provider.id, model.id, signal),
                   MODEL_INFO_TIMEOUT_MS,
                 ).catch(() => undefined)
                 return {
@@ -309,13 +315,14 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
       const workspace = registry?.get(payload.workspaceId)
       if (!workspace) throw new RpcError('security/not-found', 'That project is no longer registered in DSH.', {})
       const { settings: current } = settings.get()
-      const snapshot = await snapshotWorkspace(workspace.path, current, deps.config, call.signal).catch(error => {
+      const signal = workSignal(call)
+      const snapshot = await snapshotWorkspace(workspace.path, current, deps.config, signal).catch(error => {
         deps.logger.warn('dsh-security: estimate failed', error)
         throw new RpcError('security/workspace-unavailable', 'The project folder cannot be read.', {})
       })
       const inventory = buildInventory(snapshot)
       const astGrep = await deps.astGrep()
-      const { endpoints } = await extractRoutes(snapshot, { ...(astGrep ? { astGrep } : {}), signal: call.signal })
+      const { endpoints } = await extractRoutes(snapshot, { ...(astGrep ? { astGrep } : {}), signal })
       const includeTests = current.scan.includeTests
       const inScope = endpoints.filter(e => includeTests || snapshot.files.get(endpointPath(e))?.isTest !== true)
       const budget = current.budgets[payload.mode]
@@ -457,9 +464,15 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
           {},
         )
       }
+      if (deps.lifetime?.aborted) {
+        throw new RpcError('security/invalid-state', 'The security plugin is shutting down.', {})
+      }
       try {
-        return maskDeep(await deps.toolkit.install(payload.toolId, { signal: call.signal }), maskPaths())
+        return maskDeep(await deps.toolkit.install(payload.toolId, { signal: workSignal(call) }), maskPaths())
       } catch (error) {
+        if (deps.lifetime?.aborted) {
+          throw new RpcError('security/invalid-state', 'The security plugin is shutting down.', {})
+        }
         if (error instanceof ToolkitError) {
           // Download, tar and file-system errors quote the toolkit directory.
           throw new RpcError('security/toolkit-unavailable', maskPaths()(error.message), { reason: error.code })
