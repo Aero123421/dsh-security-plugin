@@ -79,7 +79,12 @@ export interface LlmAssistantMessage {
   readonly id: string
   readonly role: 'assistant'
   readonly content: readonly LlmContentBlock[]
-  readonly source: { readonly kind: 'model'; readonly provider: string; readonly model: string; readonly replayState?: unknown }
+  readonly source: {
+    readonly kind: 'model'
+    readonly provider: string
+    readonly model: string
+    readonly replayState?: unknown
+  }
 }
 export interface LlmToolResultMessage {
   readonly id: string
