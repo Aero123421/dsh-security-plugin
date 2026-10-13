@@ -160,6 +160,8 @@ levels), declaring file and line, handler range, middleware, **auth hints** and 
 
 Auth hints are middleware, guard, decorator or dependency names that match
 `auth|login|session|jwt|token|passport|guard|protect|require(User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin|role|current_user|signed_in|logged_in|api_key|passes_test|staff|superuser`.
+Names that also say rate limiting, throttling or logging (`limit`, `throttl`, `slowdown`, `logger`, `logging`, as in
+`loginLimiter` or `authRateLimit`) are never auth hints.
 They are hints for ranking and for the model, not proof of protection. Mounts or includes that cannot be resolved
 in the snapshot produce warnings, and a scan that finds no endpoints records a coverage gap.
 
@@ -174,6 +176,11 @@ in the snapshot produce warnings, and a scan that finds no endpoints records a c
 
 Parsers are tolerant: a malformed file yields a warning and whatever could be read. Lock files win over manifests.
 Names are normalized (PEP 503 for PyPI). Direct, transitive and dev dependencies are tracked.
+
+The files in this table are exempt from `maxFileBytes` up to 32 MiB each (they still count toward `maxTotalBytes`),
+because real lock files often exceed 1 MiB. A larger one is left out of the snapshot with a scan warning naming it.
+Parsing is linear in file size and yields to the event loop: pnpm and Yarn Berry locks are read by a reader for
+the block-YAML subset lock files use, which falls back to the full YAML parser for anything else.
 
 ### OSV lookup (`src/host/analysis/osv.ts`)
 

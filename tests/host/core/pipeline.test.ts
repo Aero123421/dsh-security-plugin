@@ -449,7 +449,7 @@ describe('pause, resume, cancel, and shutdown', () => {
     expect(await rpcCode(Promise.resolve().then(() => h.controller.cancel(id)))).toBe('security/invalid-state')
   })
 
-  it('does not finish stopping while a worker is still busy, so nothing is written afterwards', async () => {
+  it('abandons a provider that ignores the abort, and writes nothing afterwards', async () => {
     const oracle = await oracleLlm()
     let release: () => void = () => {}
     const released = new Promise<void>(resolve => {
@@ -480,20 +480,21 @@ describe('pause, resume, cancel, and shutdown', () => {
     const scan = await h.controller.create({ workspaceId: WS_ID, mode: 'deep' })
     await until(() => waiting === 2)
     h.controller.cancel(scan.id)
-    await until(() => waiting === 1)
-    await new Promise(resolve => setTimeout(resolve, 20))
-    // Still stopping: the second worker has not returned yet.
-    expect(h.controller.isRunning(scan.id)).toBe(true)
-    release()
+    // The second provider has not noticed the abort, but its request is abandoned at once.
     expect(await h.settle(scan.id)).toBe('cancelled')
+    expect(waiting).toBe(1)
+    const eventsAtStop = h.events(scan.id).length
+    release()
+    await until(() => waiting === 0)
     await new Promise(resolve => setTimeout(resolve, 20))
 
     const events = h.events(scan.id)
+    expect(events).toHaveLength(eventsAtStop)
     expect(events.at(-1)?.type).toBe('run-cancelled')
     expect(h.store.listAgentRuns(scan.id).filter(r => r.status === 'running')).toEqual([])
     expect(h.store.listTasks(scan.id, ['pending', 'running'])).toEqual([])
-    // The late answer was accepted before the scan stopped; the rest was skipped.
-    expect(h.store.listTasks(scan.id).filter(t => t.role === 'hunter' && t.status === 'done')).toHaveLength(1)
+    // The late answer came after its request was abandoned and was not used.
+    expect(h.store.listTasks(scan.id).filter(t => t.role === 'hunter' && t.status === 'done')).toHaveLength(0)
     expect(h.controller.liveWorkers(scan.id)).toEqual([])
   })
 

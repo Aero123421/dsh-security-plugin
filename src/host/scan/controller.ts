@@ -37,8 +37,15 @@ export class ScanController {
   private readonly jobs = new Map<string, { job: ScanJob; done: Promise<void> }>()
   private readonly workers = new Map<string, Map<string, WorkerView>>()
   private disposed = false
+  private readonly unsubscribe: () => void
 
-  constructor(private readonly deps: ControllerDeps) {}
+  constructor(private readonly deps: ControllerDeps) {
+    // Withdrawing consent applies to scans that are already running, not only to new ones.
+    this.unsubscribe = deps.settings.onChange(settings => {
+      if (settings.privacy.sendCodeToModel) return
+      for (const { job } of this.jobs.values()) job.revokeConsent()
+    })
+  }
 
   /** Recover from an unclean stop, apply retention, and start queued scans. */
   start(): void {
@@ -193,6 +200,7 @@ export class ScanController {
   /** Stop everything for plugin unload; running scans become `interrupted`. */
   async dispose(): Promise<void> {
     this.disposed = true
+    this.unsubscribe()
     const pending = [...this.jobs.values()]
     for (const { job } of pending) job.stop('shutdown')
     await Promise.race([
@@ -216,6 +224,7 @@ export class ScanController {
     const live = this.workers
     const job = new ScanJob(id, {
       ...this.deps,
+      currentSettings: () => this.deps.settings.get().settings,
       live: {
         set: (scanId, view) => {
           let views = live.get(scanId)

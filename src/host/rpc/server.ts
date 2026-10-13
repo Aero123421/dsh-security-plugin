@@ -27,7 +27,10 @@ import { requestSchemaFor } from './schemas.ts'
 /** Per-call facts a handler may use (e.g. loopback gating for high-risk settings). */
 export interface RpcCallContext {
   readonly request: Request
-  /** Whether the page is on the Host's own machine (see `isLoopbackRequest`). */
+  /**
+   * Whether the page appears to be on the Host's own machine, from its `Host` header (see
+   * `isLoopbackRequest`). A policy for browser pages, not an authentication result.
+   */
   readonly loopback: boolean
   /** Aborted when the browser goes away. */
   readonly signal: AbortSignal

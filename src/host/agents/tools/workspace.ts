@@ -553,8 +553,9 @@ function searchCodeTool(ws: Workspace) {
       }
       if (timedOut) {
         out.push(
-          '[Search stopped: the regular expression took too long (it may backtrack heavily). ' +
-            'Results are incomplete; simplify the pattern or use a literal search.]',
+          '[Search stopped early: the regular expression took too long (it may backtrack heavily). ' +
+            `${results.length > 0 ? 'Only the matches found before it stopped are listed; ' : ''}` +
+            'results are incomplete. Simplify the pattern or use a literal search.]',
         )
       }
       if (byteCapHit) {

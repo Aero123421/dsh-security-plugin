@@ -60,6 +60,11 @@ describe('isLoopbackRequest', () => {
     expect(isLoopbackRequest(request('https://example.com/api/x'))).toBe(false)
   })
 
+  it('trusts the Host header, which only browsers cannot forge (a page policy, not a security boundary)', () => {
+    // A non-browser client that passed DSH authentication is the operator, and may claim any Host.
+    expect(isLoopbackRequest(request('http://192.168.1.10:3080/api/x', { host: 'localhost:3080' }))).toBe(true)
+  })
+
   it('treats non-HTTP carriers (DSH Desktop in-process) as loopback', () => {
     expect(isLoopbackRequest(request('app://dsh/api/dsh-security/getBootstrap'))).toBe(true)
     expect(isLoopbackRequest(request('app://dsh/api/dsh-security/getBootstrap', { host: 'example.com' }))).toBe(true)

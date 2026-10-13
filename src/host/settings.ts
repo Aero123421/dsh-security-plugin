@@ -154,7 +154,12 @@ export function roleRoute(settings: SecuritySettings, role: RoleName): ModelRef 
   return settings.models[role] ?? settings.models.default
 }
 
+/** Called with the new settings after every successful {@link SettingsService.update}. */
+export type SettingsListener = (settings: SecuritySettings) => void
+
 export class SettingsService {
+  private readonly listeners = new Set<SettingsListener>()
+
   constructor(
     private readonly store: SecurityStore,
     private readonly limits: OperatorLimits,
@@ -173,6 +178,18 @@ export class SettingsService {
       settings = DEFAULT_SETTINGS
     }
     return { settings: clampSettings(settings, this.limits), revision }
+  }
+
+  /**
+   * Subscribe to saved changes (for example, consent being withdrawn while scans run).
+   * Listeners run synchronously after the write; a throwing listener is logged and ignored.
+   * @returns a function that removes the listener.
+   */
+  onChange(listener: SettingsListener): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
   }
 
   /** Whether a page with this loopback status may turn high-risk switches on. */
@@ -210,6 +227,13 @@ export class SettingsService {
       throw new RpcError('security/conflict', 'Settings were changed elsewhere. Reload and try again.', {
         revision: this.store.readSettings().revision,
       })
+    }
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(next)
+      } catch (error) {
+        this.logger.warn('dsh-security: settings listener failed', error)
+      }
     }
     return { settings: next, revision }
   }

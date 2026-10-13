@@ -105,7 +105,10 @@ authorization. If the built-in rules find nothing, Quick runs no AI tasks.
 
 When any budget limit is reached, the scan stops starting new work, finishes, and lists what was skipped. Budgets
 are editable per mode in Settings and are capped by the operator limits (see
-[docs/configuration.md](docs/configuration.md)). Each scan keeps the settings, models and budget it started with.
+[docs/configuration.md](docs/configuration.md)). Each scan keeps the settings, models and budget it started with,
+except two privacy settings: turning off *Send code to the AI model* also stops the AI review of scans that are queued,
+paused or running (they finish with the built-in analyzers' results), and new *Never send these files* patterns apply
+when a scan starts or resumes. The time limit is a deadline: requests still running when it passes are stopped.
 
 ## Privacy and data flow
 
@@ -122,12 +125,15 @@ Before anything reaches a model, it goes through these safeguards:
   re-checks all tool output. Secret values are never stored; findings keep only a masked preview.
 - **Withheld files** are never returned by the workers' tools (listing, reading, searching, quoting). Built in:
   `.env` and `.env.*` (except `.example`/`.sample`/`.template`), private keys and certificates, `.npmrc`, `.pypirc`,
-  `.netrc`, `.git-credentials`, service-account JSON, `secrets.y(a)ml`, Terraform state and `*.tfvars`. You can add
+  `.netrc`, `.git-credentials`, `.pgpass`, `.htpasswd`, AWS, Docker and Kubernetes client credentials
+  (`.aws/credentials`, `.aws/config`, `.docker/config.json`, `.kube/config`, `kubeconfig`), service-account JSON,
+  `secrets.y(a)ml`, Terraform state and `*.tfvars`. You can add
   your own patterns under *Never send these files*. Short, redacted rule-hit excerpts from such files can still appear in
   task descriptions (see [docs/security-model.md](docs/security-model.md#residual-risks)).
 - The absolute project path is masked in every tool output.
 - External analyzers run locally. OSV-Scanner runs offline unless OSV lookups are on. Semgrep runs only with local
-  rules and with metrics off.
+  rules and with metrics off. The scanned project's own ignore settings for these tools (`.gitleaks.toml`,
+  `osv-scanner.toml`, `nosemgrep` comments) are not honoured.
 
 Redaction is pattern-based. A credential in a format the rules do not know can still reach the model, so add
 withheld patterns for files that hold such values.
@@ -140,9 +146,10 @@ startup; this is configurable.
 ## Configuration
 
 Users change preferences in the Security page's *Settings* tab (also available in DSH Settings → Security).
-Operators can set ceilings and paths in the profile's `cordis.patch.yml`, for example to forbid remote pages from
-enabling code upload, or to point OSV lookups at a mirror. Every key, default and example is in
-[docs/configuration.md](docs/configuration.md).
+Operators can set ceilings and paths in the profile's `cordis.patch.yml`, for example to forbid pages opened on
+other machines from enabling code upload, or to point OSV lookups at a mirror. That rule is a policy for browser
+pages, not an access control: anyone with the DSH credentials is the DSH operator. Every key, default and example is
+in [docs/configuration.md](docs/configuration.md).
 
 ## Requirements and compatibility
 

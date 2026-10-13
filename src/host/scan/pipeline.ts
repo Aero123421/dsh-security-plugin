@@ -6,12 +6,19 @@
  * A run can be interrupted at any point (pause, cancel, shutdown, budget).
  * Deterministic phases are recomputed on resume; AI tasks have stable keys,
  * so completed work is never repeated and nothing is duplicated.
+ *
+ * A scan runs on the settings frozen when it was created, with two privacy
+ * exceptions that always follow the user's current settings: withdrawing
+ * consent to send code stops the scan's AI work (at start, on resume, and
+ * promptly while it runs), and withheld-file patterns added since creation
+ * apply from the next start or resume. The time budget is a deadline: when
+ * it passes, in-flight model requests are aborted.
  */
 
 import { homedir, tmpdir } from 'node:os'
 import type { AnalyzerStatus, Coverage, WorkerView } from '../../shared/contracts.ts'
 import { type RoleName, SCAN_PHASES, type ScanPhase } from '../../shared/domain.ts'
-import type { ModelRef } from '../../shared/settings.ts'
+import type { ModelRef, SecuritySettings } from '../../shared/settings.ts'
 import { chainSubmitTool, chainSystem, chainTask } from '../agents/roles/chain.ts'
 import {
   type HunterOutput,
@@ -67,6 +74,11 @@ export interface PipelineDeps {
   readonly live: LiveWorkers
   /** Plugin data directory, masked as `<data>` in recorded messages. */
   readonly dataDir?: string
+  /**
+   * The user's current settings. Consent to send code and withheld-file
+   * patterns are re-read from here; without it the frozen settings apply.
+   */
+  readonly currentSettings?: () => SecuritySettings
 }
 
 const HUNT_KINDS = new Set<TaskRecord['kind']>([
@@ -78,6 +90,9 @@ const HUNT_KINDS = new Set<TaskRecord['kind']>([
 ])
 const MAX_HYPOTHESES = { quick: 0, deep: 8, research: 16 } as const
 const MAX_SHORT_ROLE_TURNS = 16
+const AI_PHASES = ['threat-model', 'hunt', 'review', 'chain'] as const satisfies readonly ScanPhase[]
+/** Longest delay `setTimeout` accepts; a later deadline is left to the budget checks. */
+const MAX_TIMER_MS = 2_147_483_647
 
 interface AgentOutcome<T> {
   readonly result: WorkerResult<T>
@@ -96,9 +111,22 @@ class Stopped extends Error {
   }
 }
 
+/** Consent to send code to models was withdrawn: the AI phases end and the scan completes without them. */
+class ConsentRevoked extends Error {
+  constructor() {
+    super('consent to send code to models was withdrawn')
+  }
+}
+
 /** Runs one scan until it completes, fails, or is asked to stop. */
 export class ScanJob {
   private readonly controller = new AbortController()
+  /** Aborts model work only (consent withdrawn, time budget passed); the run itself continues. */
+  private readonly aiController = new AbortController()
+  private readonly aiSignal = AbortSignal.any([this.controller.signal, this.aiController.signal])
+  private consentRevoked = false
+  private deadlineReached = false
+  private deadlineTimer: ReturnType<typeof setTimeout> | undefined
   private stopRequest: StopRequest | undefined
   private budget!: ScanBudgetGate
   private analysis!: AnalysisContext
@@ -130,6 +158,17 @@ export class ScanJob {
     return this.controller.signal
   }
 
+  /**
+   * Consent to send code to models was withdrawn. In-flight model requests of
+   * an AI scan are aborted, its remaining AI tasks are skipped, and the scan
+   * completes with its deterministic results and a `consent-revoked` notice.
+   */
+  revokeConsent(): void {
+    if (this.scan.models.hunter === undefined || this.consentRevoked) return
+    this.consentRevoked = true
+    this.aiController.abort(new ConsentRevoked())
+  }
+
   async run(): Promise<void> {
     const { store } = this.deps
     const resumed = this.scan.startedAt !== undefined
@@ -141,13 +180,9 @@ export class ScanJob {
     this.budget = new ScanBudgetGate(this.scan.budget, this.scan.usage, this.signal, () => this.deps.now().getTime())
     this.event('info', 'run-start', `Scan ${resumed ? 'resumed' : 'started'}`)
     try {
+      this.armDeadline()
       await this.analyze()
-      if (this.aiEnabled()) {
-        await this.threatModel()
-        await this.hunt()
-        await this.review()
-        await this.chain()
-      }
+      if (this.aiEnabled()) await this.aiPhases()
       this.phase('reconcile')
       this.reconcile()
       this.phase('report')
@@ -156,9 +191,77 @@ export class ScanJob {
     } catch (error) {
       this.handleStop(error)
     } finally {
+      clearTimeout(this.deadlineTimer)
       this.persistUsage()
       this.deps.live.clear(this.scan.id)
     }
+  }
+
+  /** The AI phases; a withdrawn consent ends them early and the scan carries on without them. */
+  private async aiPhases(): Promise<void> {
+    try {
+      this.checkConsent(true)
+      await this.threatModel()
+      await this.hunt()
+      await this.review()
+      await this.chain()
+    } catch (error) {
+      if (!(error instanceof ConsentRevoked) || this.signal.aborted) throw error
+      const { store } = this.deps
+      for (const task of store.listTasks(this.scan.id, ['pending', 'running'])) {
+        store.updateTask(task.id, {
+          status: 'skipped',
+          finishedAt: this.iso(),
+          error: { code: 'consent-revoked', message: 'Skipped because sending code to models was turned off.' },
+        })
+      }
+      this.skipPhases(...AI_PHASES.filter(p => this.scan.phases.find(x => x.phase === p)?.state !== 'done'))
+      this.notice(
+        'warn',
+        'consent-revoked',
+        'Sending code to AI models was turned off, so this scan skipped the rest of its AI review. Built-in analyzer results are complete; AI results recorded before that are kept.',
+      )
+    }
+  }
+
+  /**
+   * Throws {@link ConsentRevoked} once consent is withdrawn. With `reread`, the
+   * user's current settings are read again (job start, resume, each worker start).
+   */
+  private checkConsent(reread = false): void {
+    if (!this.consentRevoked && reread && this.deps.currentSettings?.().privacy.sendCodeToModel === false) {
+      this.revokeConsent()
+    }
+    if (this.consentRevoked) throw new ConsentRevoked()
+  }
+
+  /** Abort in-flight model requests when the time budget runs out; the scan then completes as over budget. */
+  private armDeadline(): void {
+    if (this.scan.models.hunter === undefined) return
+    const remaining = this.budget.remainingMs()
+    if (remaining > MAX_TIMER_MS) return
+    this.deadlineTimer = setTimeout(
+      () => {
+        this.deadlineReached = true
+        this.aiController.abort(new Error('the time budget was used up'))
+      },
+      Math.max(0, remaining),
+    )
+    this.deadlineTimer.unref?.()
+  }
+
+  /** Frozen settings, with withheld-file patterns added since the scan was created. */
+  private analysisSettings(): SecuritySettings {
+    const frozen = this.scan.settings
+    let current: SecuritySettings | undefined
+    try {
+      current = this.deps.currentSettings?.()
+    } catch (error) {
+      this.deps.logger.warn('dsh-security: could not read current settings; using the scan settings', error)
+    }
+    if (!current) return frozen
+    const withheldGlobs = [...new Set([...frozen.privacy.withheldGlobs, ...current.privacy.withheldGlobs])]
+    return { ...frozen, privacy: { ...frozen.privacy, withheldGlobs } }
   }
 
   // -------------------------------------------------------------------------
@@ -178,7 +281,7 @@ export class ScanJob {
     const astGrep = await this.deps.astGrep()
     this.analysis = await analyzeWorkspace({
       root: this.scan.workspaceRoot,
-      settings: this.scan.settings,
+      settings: this.analysisSettings(),
       config: this.deps.config,
       toolkit: this.deps.toolkit,
       fetch: this.deps.fetch,
@@ -524,7 +627,7 @@ export class ScanJob {
       merged: outcome.merged,
       discarded: outcome.discarded,
       assessed: outcome.assessed,
-      ruledOut: outcome.ruledOut,
+      disputed: outcome.disputed,
     })
   }
 
@@ -572,6 +675,7 @@ export class ScanJob {
       try {
         while (next < queue.length && !halted) {
           this.checkStopped()
+          this.checkConsent()
           if (this.budget.exhausted()) return
           const task = queue[next++]
           if (!task) return
@@ -616,6 +720,7 @@ export class ScanJob {
   ): Promise<AgentOutcome<T>> {
     const llm = this.deps.llm()
     if (!llm) throw new Error('The DSH model registry is not available.')
+    this.checkConsent(true)
     const { store } = this.deps
     const started = this.iso()
     store.updateTask(task.id, { status: 'running', attempts: task.attempts + 1, startedAt: started })
@@ -664,7 +769,7 @@ export class ScanJob {
       ),
       spec.submit,
     ]
-    const result = await runWorker<T>({
+    const outcome = await runWorker<T>({
       id: run.id,
       role: task.role,
       llm,
@@ -680,7 +785,8 @@ export class ScanJob {
       tools,
       maxTurns: spec.maxTurns,
       budget: this.budget,
-      signal: this.signal,
+      signal: this.aiSignal,
+      idleTimeoutMs: this.deps.config.llmIdleTimeoutMs,
       onEvent: event => {
         if (event.type === 'request' && event.attempt === 1) turns = event.turn
         if (event.type === 'tool') toolCalls++
@@ -690,6 +796,11 @@ export class ScanJob {
         this.deps.live.set(this.scan.id, { ...view, turns, toolCalls })
       },
     })
+    // Cut off by the scan deadline: the work was not done because the time budget ran out.
+    const result: WorkerResult<T> =
+      outcome.status === 'cancelled' && this.deadlineReached && !this.signal.aborted && !this.consentRevoked
+        ? { ...outcome, status: 'budget_exhausted', stopReason: 'time' }
+        : outcome
     this.budget.addToolCalls(result.toolCalls)
     const finished = this.iso()
     store.updateAgentRun(run.id, {
@@ -725,7 +836,10 @@ export class ScanJob {
         `The model provider refused some review requests (${result.error?.code ?? 'policy'}). They were recorded as not reviewed; no other model was tried.`,
       )
     }
-    if (result.status === 'cancelled') this.checkStopped()
+    if (result.status === 'cancelled') {
+      this.checkStopped()
+      this.checkConsent()
+    }
     return {
       result,
       ctx: {
@@ -817,6 +931,7 @@ export class ScanJob {
       gaps.push('AI review was not used; logic flaws such as broken authorization are not covered.')
     if (skipped > 0) gaps.push(`${skipped} review task(s) did not run (budget or task limit).`)
     if (failed > 0) gaps.push(`${failed} review task(s) failed; see the activity log.`)
+    if (this.consentRevoked) gaps.push('AI review stopped early because sending code to models was turned off.')
     if (this.analysis.snapshot.truncated)
       gaps.push('Some files were not analyzed because the workspace exceeded the size limits.')
     const unreviewed = endpoints.length - endpoints.filter(e => reviewedEndpoints.has(e.id)).length

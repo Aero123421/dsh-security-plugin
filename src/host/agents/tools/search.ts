@@ -31,8 +31,9 @@ export interface LineHit {
 
 /** Result of one {@link LineMatcher.scan}. */
 export interface ScanOutcome {
+  /** Hits in scan order. After a timeout, the hits found before the budget ran out (possibly none). */
   readonly hits: LineHit[]
-  /** The regex time budget ran out; `hits` holds what was found before that. */
+  /** The regex time budget ran out and the scan stopped early; `hits` holds what was found before that. */
   readonly timedOut: boolean
 }
 
@@ -125,13 +126,14 @@ class LiteralMatcher implements LineMatcher {
 
 /**
  * Runs inside the sandbox context. Reads `source`, `flags`, `texts`, `limit`
- * from the context's globals and returns a flat `[text, line, column, …]`.
+ * from the context's globals and appends a flat `[text, line, column, …]` to
+ * the context's `out` array as it goes, so the hits found before a timeout
+ * interrupts the script are still there afterwards.
  */
 const SCAN_SCRIPT = new vm.Script(
   `(function () {
   'use strict'
   var re = new RegExp(source, flags)
-  var out = []
   for (var t = 0; t < texts.length; t++) {
     var lines = texts[t].split('\\n')
     var count = lines.length > 1 && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length
@@ -141,20 +143,22 @@ const SCAN_SCRIPT = new vm.Script(
       var m = re.exec(line)
       if (m !== null) {
         out.push(t, i, m.index)
-        if (out.length >= limit * 3) return out
+        if (out.length >= limit * 3) return
       }
     }
   }
-  return out
 })()`,
   { filename: 'search-code-regex.vm.js' },
 )
+const OUT_RESET = new vm.Script('out = []', { filename: 'search-code-reset.vm.js' })
 
 interface Sandbox {
   source: string
   flags: string
   texts: readonly string[]
   limit: number
+  /** Created by the sandbox realm before each run; read by index only. */
+  out: ArrayLike<number>
 }
 
 class RegexMatcher implements LineMatcher {
@@ -164,7 +168,7 @@ class RegexMatcher implements LineMatcher {
   #remainingMs: number
 
   constructor(source: string, flags: string, budgetMs: number) {
-    this.#sandbox = { source, flags, texts: [], limit: 0 }
+    this.#sandbox = { source, flags, texts: [], limit: 0, out: [] }
     this.#context = vm.createContext(this.#sandbox)
     this.#remainingMs = Math.max(1, budgetMs)
   }
@@ -174,26 +178,28 @@ class RegexMatcher implements LineMatcher {
     if (this.#remainingMs <= 0) return { hits: [], timedOut: true }
     this.#sandbox.texts = texts
     this.#sandbox.limit = maxHits
+    OUT_RESET.runInContext(this.#context)
     const started = performance.now()
-    let raw: unknown
+    let timedOut = false
     try {
-      raw = SCAN_SCRIPT.runInContext(this.#context, { timeout: Math.max(1, Math.ceil(this.#remainingMs)) })
+      SCAN_SCRIPT.runInContext(this.#context, { timeout: Math.max(1, Math.ceil(this.#remainingMs)) })
     } catch (error) {
-      if ((error as { code?: unknown } | null)?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
-        this.#remainingMs = 0
-        return { hits: [], timedOut: true }
-      }
-      throw error
+      if ((error as { code?: unknown } | null)?.code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw error
+      this.#remainingMs = 0
+      timedOut = true
     } finally {
       this.#remainingMs -= performance.now() - started
       this.#sandbox.texts = []
     }
-    // The array comes from the sandbox realm: read it by index only.
-    const flat = raw as ArrayLike<number>
+    // Partial on timeout: whatever was appended before the interrupt. The array comes from the
+    // sandbox realm: read it by index only, and only whole `[text, line, column]` triples.
+    const flat = this.#sandbox.out
+    this.#sandbox.out = []
     const hits: LineHit[] = []
-    for (let k = 0; k + 2 < flat.length; k += 3) {
+    const length = Math.min(Number(flat.length) || 0, maxHits * 3)
+    for (let k = 0; k + 2 < length; k += 3) {
       hits.push({ text: Number(flat[k]), line: Number(flat[k + 1]), column: Number(flat[k + 2]) })
     }
-    return { hits, timedOut: false }
+    return { hits, timedOut }
   }
 }

@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { LlmStreamChunk, LlmToolResultMessage } from '../../../../src/host/dsh/ports.ts'
 import { defineTool, type WorkerTool } from '../../../../src/host/agents/runtime/tool.ts'
-import { backoffDelayMs, runWorker, truncateText } from '../../../../src/host/agents/runtime/worker.ts'
+import {
+  backoffDelayMs,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  MAX_TOOL_CALLS_PER_TURN,
+  runWorker,
+  truncateText,
+} from '../../../../src/host/agents/runtime/worker.ts'
 import {
   callBlock,
   callReply,
@@ -69,7 +75,9 @@ describe('runWorker: happy path', () => {
     expect(first.system).toBe('You are a security reviewer.')
     expect(first.provider).toBe('deepseek')
     expect(first.model).toBe('deepseek-reasoner')
-    expect(first.signal).toBe(spec.signal)
+    // Each request gets its own signal (for the idle timeout), linked to the worker's.
+    expect(first.signal).toBeInstanceOf(AbortSignal)
+    expect(first.signal).not.toBe(spec.signal)
     expect(first.tools?.map(t => t.name)).toEqual(['read_file', 'submit_report'])
     expect(first.tools?.[0]?.parameters).toMatchObject({ type: 'object', required: ['path'] })
     expect(first.tools?.[0]?.parameters).not.toHaveProperty('$schema')
@@ -936,5 +944,137 @@ describe('helpers', () => {
     expect(() =>
       defineTool({ name: 'not_object', description: 'd', input: z.string(), execute: async () => ({ text: '' }) }),
     ).toThrow(/object schema/)
+  })
+})
+
+describe('runWorker: per-reply tool limits', () => {
+  it(`runs at most ${MAX_TOOL_CALLS_PER_TURN} tool calls per reply and answers the rest with an error`, async () => {
+    const executed: string[] = []
+    const reader = defineTool({
+      name: 'read_file',
+      description: 'Read a file.',
+      input: z.object({ path: z.string() }),
+      execute: async ({ path }) => {
+        executed.push(path)
+        return { text: `contents of ${path}` }
+      },
+    })
+    const many = Array.from({ length: 20 }, (_, i) => callBlock(i, `c${i}`, 'read_file', { path: `f${i}.ts` }))
+    const llm = new FakeLlm([reply(many), callReply('s', 'submit_report', SUBMISSION)])
+    const result = await runWorker(makeSpec(llm, { tools: [reader, submitReport] }).spec)
+    expect(result.status).toBe('submitted')
+    expect(executed).toHaveLength(MAX_TOOL_CALLS_PER_TURN)
+    expect(executed.at(-1)).toBe(`f${MAX_TOOL_CALLS_PER_TURN - 1}.ts`)
+    const results = toolMessages(llm.messages(1))
+    // Every call is answered, in order; the skipped ones say why.
+    expect(results.map(m => m.toolCallId)).toEqual(many.map((_, i) => `c${i}`))
+    const skipped = results.slice(MAX_TOOL_CALLS_PER_TURN)
+    expect(skipped).toHaveLength(4)
+    for (const message of skipped) {
+      expect(message.isError).toBe(true)
+      expect((message.content[0] as { text: string }).text).toContain(
+        `only the first ${MAX_TOOL_CALLS_PER_TURN} are run per reply`,
+      )
+    }
+    expect(result.toolCalls).toBe(21)
+  })
+
+  it('still accepts a valid submission placed after too many other calls', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => callBlock(i, `c${i}`, 'read_file', { path: 'a.ts' }))
+    const llm = new FakeLlm([reply([...many, callBlock(30, 's', 'submit_report', SUBMISSION)])])
+    const result = await runWorker(makeSpec(llm).spec)
+    expect(result.status).toBe('submitted')
+  })
+
+  it('yields to the event loop between tool executions', async () => {
+    const order: string[] = []
+    const tool = (name: string, schedule: boolean) =>
+      defineTool({
+        name,
+        description: name,
+        input: z.object({}),
+        // Synchronous work, like a regex search: nothing else could run until the worker yields.
+        execute: async () => {
+          order.push(name)
+          if (schedule) setImmediate(() => order.push('event-loop'))
+          return { text: name }
+        },
+      })
+    const llm = new FakeLlm([
+      reply([callBlock(0, 'c1', 'first', {}), callBlock(1, 'c2', 'second', {})]),
+      callReply('s', 'submit_report', SUBMISSION),
+    ])
+    await runWorker(makeSpec(llm, { tools: [tool('first', true), tool('second', false), submitReport] }).spec)
+    expect(order).toEqual(['first', 'event-loop', 'second'])
+  })
+})
+
+describe('runWorker: stalled streams', () => {
+  /** A stream that sends `chunks` and then never sends anything again, ignoring its signal. */
+  function stalled(chunks: readonly LlmStreamChunk[] = []): () => AsyncIterable<LlmStreamChunk> {
+    return () =>
+      (async function* (): AsyncGenerator<LlmStreamChunk> {
+        yield* chunks
+        await new Promise(() => {})
+      })()
+  }
+
+  it('abandons a request with no chunk for idleTimeoutMs and retries it as TIMEOUT', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const llm = new FakeLlm([
+      stalled([{ type: 'block-start', index: 0, blockType: 'text' }]),
+      callReply('c1', 'submit_report', SUBMISSION),
+    ])
+    const { spec, events } = makeSpec(llm)
+    const pending = runWorker(spec)
+    await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_TIMEOUT_MS - 1)
+    expect(llm.calls).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    const result = await pending
+    expect(result.status).toBe('submitted')
+    expect(llm.calls).toHaveLength(2)
+    expect(llm.calls[0]?.signal?.aborted).toBe(true)
+    expect(events).toContainEqual(expect.objectContaining({ type: 'retry', code: 'TIMEOUT' }))
+    expect(result.transcript).toContainEqual(expect.objectContaining({ kind: 'error', code: 'TIMEOUT' }))
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('resets the idle timer on every chunk and honours a custom timeout', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const slow = () =>
+      (async function* (): AsyncGenerator<LlmStreamChunk> {
+        for (const chunk of callReply('c1', 'submit_report', SUBMISSION)) {
+          await new Promise(resolve => setTimeout(resolve, 4_000))
+          yield chunk
+        }
+      })()
+    const llm = new FakeLlm([slow, stalled(), stalled(), stalled(), stalled()])
+    const pending = runWorker(makeSpec(llm, { idleTimeoutMs: 5_000 }).spec)
+    await vi.advanceTimersByTimeAsync(60_000)
+    const result = await pending
+    expect(result.status).toBe('submitted')
+    expect(llm.calls).toHaveLength(1)
+
+    const stuck = new FakeLlm([stalled(), stalled(), stalled(), stalled()])
+    const failing = runWorker(makeSpec(stuck, { idleTimeoutMs: 5_000 }).spec)
+    await vi.advanceTimersByTimeAsync(20_000)
+    const failed = await failing
+    expect(failed).toMatchObject({ status: 'failed', stopReason: 'retries-exhausted', error: { code: 'TIMEOUT' } })
+    expect(stuck.calls).toHaveLength(4)
+  })
+
+  it('stops waiting for a stream that ignores its signal once the worker is aborted', async () => {
+    const controller = new AbortController()
+    const llm = new FakeLlm([stalled()])
+    const pending = runWorker(makeSpec(llm, { signal: controller.signal }).spec)
+    await new Promise(resolve => setTimeout(resolve, 5))
+    controller.abort()
+    const result = await pending
+    expect(result.status).toBe('cancelled')
+    expect(llm.calls[0]?.signal?.aborted).toBe(true)
+  })
+
+  it('rejects a non-positive idle timeout', async () => {
+    await expect(runWorker(makeSpec(new FakeLlm([]), { idleTimeoutMs: 0 }).spec)).rejects.toThrow(/idleTimeoutMs/)
   })
 })

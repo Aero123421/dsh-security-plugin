@@ -90,6 +90,17 @@ describe('compileLineMatcher', () => {
     expect(matcher.scan(['aaa'], 10)).toEqual({ hits: [], timedOut: true })
   })
 
+  it('keeps the hits found before a timeout', () => {
+    const matcher = compile('(a+)+$', { regex: true, timeBudgetMs: 150 })
+    const evil = `${'a'.repeat(40)}!`
+    const outcome = matcher.scan(['x\naaa', `aa\n${evil}`, 'aaa'], 10)
+    expect(outcome.timedOut).toBe(true)
+    expect(outcome.hits).toEqual([
+      { text: 0, line: 1, column: 0 },
+      { text: 1, line: 0, column: 0 },
+    ])
+  })
+
   it('does not let the pattern escape the sandbox as code', () => {
     const pattern = "'\\); globalThis.pwned = 1; \\('"
     const matcher = compile(pattern, { regex: true })

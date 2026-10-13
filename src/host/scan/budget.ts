@@ -60,6 +60,11 @@ export class ScanBudgetGate implements BudgetGate {
     this.toolCalls += safe(count)
   }
 
+  /** Running time left before the time budget is used up (negative once it is). */
+  remainingMs(): number {
+    return this.limits.maxMinutes * 60_000 - this.elapsedMs()
+  }
+
   elapsedMs(): number {
     return this.baseElapsedMs + Math.max(0, this.now() - this.segmentStart)
   }

@@ -5,9 +5,14 @@
  * analysis runs `build.rs` scripts. Transitive resolution is disabled so no
  * package registry is contacted. Unless `offline` is set, osv-scanner sends
  * package names and versions to osv.dev, like `queryOsv`.
+ *
+ * The repository's own `osv-scanner.toml` files are never used: an empty,
+ * plugin-written config is passed with `--config`, which overrides the
+ * per-directory lookup for every scanned file, so `[[IgnoredVulns]]` and
+ * `[[PackageOverrides]]` in the scanned project cannot hide advisories.
  */
 
-import { readdir, stat } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -40,6 +45,8 @@ export interface OsvScannerRunOptions extends ExternalRunOptions {
 
 const V2 = '2.0.0'
 const MAX_PACKAGES = 20_000
+/** Written to a private temp file and passed with `--config` (same flag in v1 and v2). */
+const PLUGIN_CONFIG = '# Written by dsh-security: no ignored vulnerabilities or package overrides.\n'
 
 const packageSchema = z.object({
   package: z.object({ name: z.string(), version: z.string().default(''), ecosystem: z.string().default('') }),
@@ -68,25 +75,31 @@ export async function runOsvScanner(options: OsvScannerRunOptions): Promise<Anal
   }
 
   const v2 = tool.version === undefined || compareVersions(tool.version, V2) >= 0
-  const flags = ['--format', 'json', '--recursive']
-  if (options.offline) flags.push('--offline')
-  if (v2) flags.push('--no-resolve', '--no-call-analysis=all')
-  const args = v2
-    ? ['scan', 'source', ...flags, options.root]
-    : ['--format', 'json', '-r', ...offlineV1(options), options.root]
-
+  const work = await mkdtemp(join(tmpdir(), 'dsh-osv-scanner-'))
   let result: Awaited<ReturnType<typeof runTool>>
   try {
-    result = await runTool(tool.path, args, {
-      cwd: tmpdir(),
-      timeoutMs: options.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS,
-      maxOutputBytes: options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.localDbDir ? { env: { OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY: options.localDbDir } } : {}),
-    })
-  } catch (error) {
-    if (options.signal?.aborted) throw error
-    return failedRun('osv-scanner', tool, `could not start osv-scanner: ${errorMessage(error)}`, started)
+    const configPath = join(work, 'osv-scanner.toml')
+    await writeFile(configPath, PLUGIN_CONFIG, { mode: 0o600 })
+    const flags = ['--format', 'json', '--recursive', '--config', configPath]
+    if (options.offline) flags.push('--offline')
+    if (v2) flags.push('--no-resolve', '--no-call-analysis=all')
+    const args = v2
+      ? ['scan', 'source', ...flags, options.root]
+      : ['--format', 'json', '-r', '--config', configPath, ...offlineV1(options), options.root]
+    try {
+      result = await runTool(tool.path, args, {
+        cwd: work,
+        timeoutMs: options.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS,
+        maxOutputBytes: options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.localDbDir ? { env: { OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY: options.localDbDir } } : {}),
+      })
+    } catch (error) {
+      if (options.signal?.aborted) throw error
+      return failedRun('osv-scanner', tool, `could not start osv-scanner: ${errorMessage(error)}`, started)
+    }
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => undefined)
   }
   if (result.timedOut) return failedRun('osv-scanner', tool, 'osv-scanner timed out', started)
   // 0: clean, 1: vulnerabilities found, 128: no lock files found.

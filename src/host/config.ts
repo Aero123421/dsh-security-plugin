@@ -46,6 +46,17 @@ export const Config = z.object({
   semgrepConfig: z.string().min(1).optional(),
   /** Timeout for one external analyzer run, in milliseconds. */
   externalTimeoutMs: positiveInt(24 * 60 * 60 * 1000).default(10 * 60 * 1000),
+  /**
+   * Abandon a model request when its stream sends nothing for this long, in
+   * milliseconds (the wait for the first chunk included). The request is
+   * retried with backoff like any other transient `TIMEOUT`.
+   */
+  llmIdleTimeoutMs: z
+    .number()
+    .int()
+    .min(1_000)
+    .max(60 * 60 * 1000)
+    .default(120_000),
   /** Disable the native ast-grep engine (fall back to the built-in lexer). */
   disableAstGrep: z.boolean().default(false),
 })

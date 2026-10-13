@@ -507,6 +507,17 @@ describe('search_code', () => {
     expect(result.text).toContain('big.ts:2000:')
   })
 
+  it('lists the matches found before a regex search stopped early', async () => {
+    const evil = `${'a'.repeat(36)}!`
+    const h = await harness({ 'a.txt': `aaa\n${evil}\n`, 'b.txt': 'aaa\n' }, { regexTimeBudgetMs: 200 })
+    const { text, isError } = await h.call('search_code', { pattern: '(a+)+$', regex: true })
+    expect(isError).toBeUndefined()
+    expect(text).toContain('a.txt:1: aaa')
+    expect(text).not.toContain('b.txt')
+    expect(text).toContain('[Search stopped early: the regular expression took too long')
+    expect(text).toContain('Only the matches found before it stopped are listed')
+  })
+
   it('stops scanning at the byte cap', async () => {
     const files = Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`f${i}.txt`, `${'x'.repeat(100)}\n`]))
     const h = await harness(files, { maxSearchScanBytes: 250 })

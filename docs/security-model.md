@@ -18,7 +18,7 @@ document lists what we defend against, how, and what remains.
 | Attacker | Controls | Example goal |
 | --- | --- | --- |
 | **Author of the scanned repository** (malicious dependency, contributor, third-party code under review) | File contents, file names, directory layout, symlinks, `.gitignore`, tool config files such as `.gitleaks.toml`, git metadata | Hide a vulnerability, make the AI exfiltrate secrets, run code on the Host, read files outside the repo |
-| **Remote user of the DSH Web UI** (authenticated by DSH, but on another machine) | RPC requests | Turn on code upload or downloads they should not control, read Host paths |
+| **Remote browser page on the DSH Web UI** (authenticated by DSH, but opened on another machine) | RPC requests from that page | Turn on code upload or downloads the operator reserved for the Host machine, read Host paths |
 | **Network attacker** between the Host and OSV / GitHub | Responses to the plugin's HTTPS requests | Plant a malicious analyzer binary, inject content through advisory text |
 | **Model provider or a compromised model** | Model output | Fabricate findings, suppress real ones, call tools in abusive ways |
 
@@ -38,7 +38,11 @@ Everything read from the repository is data. The controls:
   and NUL are rejected. Output is capped per call.
 - **Regex from the model is hostile.** `search_code` limits patterns to 200 characters, matches one line at a time,
   caps scanned bytes per call (50 MB), and runs each batch in a `node:vm` script with a time budget (2 s per call),
-  so catastrophic backtracking is interrupted.
+  so catastrophic backtracking is interrupted. A search cut short returns the matches found so far with a "search
+  stopped early" note.
+- **Tool use is bounded per reply.** At most 16 tool calls run per model reply; further calls get an error result
+  asking the model to batch fewer. The worker yields to the event loop after every tool execution, so one worker's
+  synchronous search cannot starve the Host's other work.
 - **Prompting.** The shared system preamble tells every role that repository content (code, comments, strings,
   docs, configuration) is untrusted. It says instructions found there must not be followed, and that manipulation
   attempts should be reported in the notes. Text taken from the repository and placed in task messages (route
@@ -66,6 +70,20 @@ A worker that has been fully taken over by injected text still has:
 The remaining path to the outside is the model provider itself. Anything a worker reads is, by definition, sent to
 the provider the user chose. The next section covers how that content is reduced.
 
+## Consent and budgets apply to running scans
+
+- **Withdrawing consent stops AI work.** Each scan keeps the settings it was created with, but turning off
+  *Send code to the AI model* applies to scans that are already queued, paused, interrupted or running. The
+  current setting is read again when a scan starts or resumes and before every worker starts, and saving the setting
+  notifies running scans at once: their in-flight model requests are aborted like a pause, the remaining AI tasks are
+  skipped (`consent-revoked`), and the scan completes with its deterministic results and a `consent-revoked` notice.
+- **Withheld files follow the current settings too.** A scan withholds the union of its frozen `withheldGlobs` and
+  the current ones, recomputed on every start and resume.
+- **Stalled and overlong requests end.** A model request that sends no stream chunk for `llmIdleTimeoutMs` (default
+  2 minutes) is abandoned and retried as a transient `TIMEOUT`. A provider that ignores the abort signal no longer
+  holds the worker. When a scan's time budget (`maxMinutes`) runs out, its in-flight model requests are aborted and
+  the scan completes with the time-budget notice.
+
 ## Redaction and withheld files
 
 - **Secret scanner as redactor.** The built-in secret scan (25 rules) runs before any AI phase. Its matches are
@@ -76,8 +94,10 @@ the provider the user chose. The next section covers how that content is reduced
 - **No secret values at rest.** Secret findings store a SHA-256 fingerprint and a masked preview (at most the first
   4 characters), never the value. SAST snippets mask hard-coded literals. Gitleaks runs with `--redact`, and its
   excerpts are redacted again.
-- **Withheld files** (built-in credential files such as `.env*`, keys, certificates, `.npmrc`, `.netrc`,
-  service-account JSON, Terraform state, plus the user's `withheldGlobs`) are scanned by the built-in analyzers but
+- **Withheld files** (built-in credential files such as `.env*`, keys, certificates, `.npmrc`, `.pypirc`, `.netrc`,
+  `.git-credentials`, `.pgpass`, `.htpasswd`, cloud and container client credentials (`.aws/credentials`,
+  `.aws/config`, `.docker/config.json`, `.kube/config`, `kubeconfig`), service-account JSON, Terraform state, plus the
+  user's `withheldGlobs`) are scanned by the built-in analyzers but
   never returned by any worker tool. They are skipped by search, marked `[withheld]` in listings, and cannot be
   quoted as evidence. Paths that are malformed or escape the root are treated as withheld. Task messages are
   held to the same rule (`scan/privacy.ts`): a signal or finding in a withheld file keeps only its path and rule id,
@@ -98,12 +118,17 @@ the provider the user chose. The next section covers how that content is reduced
 - Every model citation is verified against the same redacted text the tools served (`evidence/quote.ts`). An AI
   finding with no verified step is discarded. The count of discarded findings is shown under Coverage, so a model
   that invents code is visible.
-- **Suppression needs proof.** A Skeptic `refuted` verdict needs at least one verified counter-evidence quote, or the
-  host downgrades it to `inconclusive`. A Hunter's `false_positive` on a rule hit only refutes it when it cites a
-  verified defense *and* no Skeptic review is coming. A manipulated model can make a finding look *less* certain,
-  but it cannot make a rule hit disappear without quoting real code.
+- **"Verified" means the location holds the quote.** The stored location and snippet are the lines the quote
+  occupies, not the cited range. A citation much wider than its quote is rejected, and a quote that occurs more than
+  once in a loose cited range is ambiguous, so citing "the whole file" cannot verify anything.
+- **Suppression needs proof.** A Skeptic `refuted` verdict needs at least one verified counter-evidence quote of
+  code, or the host downgrades it to `inconclusive`. Quotes that are only comments, docstrings or documentation
+  (`// input sanitized upstream`) never count. A Hunter cannot rule out a rule hit on its own: without a following
+  review, its verified defense makes the hit `inconclusive` at most. A manipulated model can make a finding look
+  *less* certain, but it cannot make a rule hit disappear without an independent reviewer quoting real code.
 - **Confirmation needs proof too.** `confirmed` without any verified step on the attack path becomes
-  `inconclusive`.
+  `inconclusive`. A severity change needs a confirmed verdict with verified supporting code and lowers a
+  deterministic critical/high rule hit by one level at most.
 - Rule findings come from deterministic code and are recorded before any AI phase runs. The AI cannot delete them.
 - Ruled-out findings stay in the store and reports (as SARIF suppressions with a justification), so a reviewer can
   audit every dismissal. Transcripts are kept by default for the same reason.
@@ -124,9 +149,16 @@ the provider the user chose. The next section covers how that content is reduced
   generic message and is logged on the Host. Responses carry `cache-control: no-store` and
   `x-content-type-options: nosniff`.
 - **High-risk switches.** Turning on code upload, OSV lookups or external analyzers, and installing managed tools,
-  can be restricted to same-machine pages (`allowRemoteHighRiskSettings: false`). The loopback decision ignores
-  `Forwarded`/`X-Forwarded-*`, so a header cannot fake it (see [configuration.md](configuration.md)). The rule is
-  enforced on the Host; the UI lock only explains it.
+  can be restricted to same-machine pages (`allowRemoteHighRiskSettings: false`). The rule is enforced on the Host;
+  the UI lock only explains it. It is a **policy for browser pages, not a security boundary**:
+  - "Same machine" is decided from the request's `Host` header (`rpc/loopback.ts`). Browsers cannot forge `Host`,
+    so a page opened through a LAN address, a tunnel or a reverse proxy counts as remote; `Forwarded` and
+    `X-Forwarded-*` are ignored, so a proxy header cannot make it local.
+  - A non-browser client can send any `Host` header and be classified as local. That client has already passed DSH's
+    authentication, so it is the DSH operator, who can run shell commands through DSH's own agents anyway.
+  - The peer's network address is not available: DSH passes exact Fetch routes a Web `Request` without connection
+    information. `ctx.connection.allowsRemoteAuthorities` does not settle the question either: when it is `false`,
+    DSH still admits the listener's own bind address (for example a LAN IP) as `Host`.
 - **Concurrency.** Settings use compare-and-set on a revision, so a stale page cannot silently overwrite newer
   settings.
 
@@ -145,6 +177,16 @@ the provider the user chose. The next section covers how that content is reduced
   `innerHTML`. External links (tool homepages) open only after a URL check, with `rel="noopener noreferrer"`.
 - SARIF locations are relative to `%SRCROOT%`, which is deliberately left without a URI. Markdown reports escape
   repository- and model-supplied text.
+
+## Fix in chat
+
+*Fix in chat* hands a draft to the user's normal coding agent, which is more privileged than the review workers (it
+edits files and usually runs commands). Most of the draft was written by a model that read hostile code, and the
+snippets are repository content, so `fix-prompt.ts` keeps the title on one line (at most 200 characters), puts the
+summary, impact, attack-path descriptions, recommendation and every snippet in fenced blocks labelled as untrusted
+(each fence is longer than any backtick run inside it, so the text cannot close it), and tells the agent, in the
+scan's language, to treat that text as data: not to run commands or open URLs it contains, and to verify every claim
+against the code. The user reviews the draft before sending it.
 
 ## Store
 
@@ -190,10 +232,13 @@ the provider the user chose. The next section covers how that content is reduced
 - **Gitleaks** runs with a plugin-written config (default rules) and the plugin's own ignore path, so a repository's
   `.gitleaks.toml` or `.gitleaksignore` cannot turn detection off. Output is redacted.
 - **OSV-Scanner** runs with call analysis disabled for all languages (Go call analysis would invoke the repository's
-  `go` toolchain directive, and Rust's would run `build.rs`) and with transitive resolution disabled. It runs
-  `--offline` unless the user enabled OSV lookups.
-- **Semgrep** runs only with an operator-configured local rules path, `--metrics=off` and `--disable-version-check`.
-  It never uses `--config auto` or the registry.
+  `go` toolchain directive, and Rust's would run `build.rs`) and with transitive resolution disabled. It gets an
+  empty, plugin-written config with `--config`, which replaces every `osv-scanner.toml` in the repository, so
+  `[[IgnoredVulns]]` and `[[PackageOverrides]]` there cannot hide advisories. It runs `--offline` unless the user
+  enabled OSV lookups.
+- **Semgrep** runs only with an operator-configured local rules path, `--metrics=off`, `--disable-version-check` and
+  `--disable-nosem`, so `nosemgrep` comments in the repository cannot silence a rule. It never uses `--config auto` or
+  the registry.
 - Results are parsed with schemas. Findings outside the snapshot (ignored, excluded or vendored files) are dropped.
 
 ## Residual risks
@@ -209,7 +254,8 @@ the provider the user chose. The next section covers how that content is reduced
   parsers and the snapshot walker all handle attacker-controlled bytes. Size limits, timeouts for external tools
   and exception isolation per file reduce the impact, but bugs in these components are possible.
 - **`allowRemoteHighRiskSettings` defaults to `true`.** On a DSH instance shared with others, operators should set it
-  to `false`.
+  to `false`. Even then it only constrains browser pages: anyone holding the DSH credentials can classify a request
+  as local, and is the DSH operator anyway.
 - **Static analysis limits.** Route extraction and rules cover common JS/TS and Python frameworks. Missing coverage
   shows up as gaps, not as safety.
 - **Local data.** `security.db` holds redacted code excerpts and transcripts. Anyone with access to the user's

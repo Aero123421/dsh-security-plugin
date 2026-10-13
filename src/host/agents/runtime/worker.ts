@@ -6,6 +6,12 @@
  * user's chats. One `stream()` call is one provider attempt; this loop owns
  * retries, context compaction, nudging, budgets, and cancellation, and always
  * terminates (at most `maxTurns × 4` model requests).
+ *
+ * Hostile or confused models are bounded per reply as well: at most
+ * {@link MAX_TOOL_CALLS_PER_TURN} tool calls run per model reply (the rest get
+ * an error result), the worker yields to the event loop after every tool
+ * execution, and a request that produces no stream chunk for
+ * `idleTimeoutMs` is abandoned and retried as a `TIMEOUT`.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -17,6 +23,7 @@ import type {
   LlmGenerateOptions,
   LlmPort,
   LlmRequestMessage,
+  LlmStreamChunk,
   LlmTokenUsage,
   LlmToolCallBlock,
   LlmToolResultMessage,
@@ -62,6 +69,12 @@ export interface WorkerSpec<T> {
   readonly onEvent?: (event: WorkerEvent) => void
   /** Abortable sleep used for retry backoff; injectable for tests. Defaults to a timer. */
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>
+  /**
+   * Abandon a request when no stream chunk arrives for this long (the wait for
+   * the first chunk included); the attempt fails as a retryable `TIMEOUT`.
+   * Default {@link DEFAULT_IDLE_TIMEOUT_MS}.
+   */
+  readonly idleTimeoutMs?: number
 }
 
 /** Progress notifications emitted while a worker runs. */
@@ -125,6 +138,10 @@ export const DEFAULT_MAX_TOOL_RESULT_CHARS = 24_000
 export const MAX_ATTEMPTS_PER_TURN = 4
 /** Plain-text replies tolerated (each answered with a nudge) before `no_submission`. */
 export const MAX_NUDGES = 2
+/** Tool calls run per model reply; further calls in the same reply get an error result instead. */
+export const MAX_TOOL_CALLS_PER_TURN = 16
+/** Default for {@link WorkerSpec.idleTimeoutMs}: two minutes without a stream chunk. */
+export const DEFAULT_IDLE_TIMEOUT_MS = 120_000
 
 const BACKOFF_BASE_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
@@ -172,6 +189,9 @@ function validateSpec<T>(spec: WorkerSpec<T>): void {
     (!Number.isInteger(spec.maxToolResultChars) || spec.maxToolResultChars < 1)
   ) {
     throw new TypeError(`Worker ${spec.id}: maxToolResultChars must be a positive integer`)
+  }
+  if (spec.idleTimeoutMs !== undefined && (!Number.isFinite(spec.idleTimeoutMs) || spec.idleTimeoutMs <= 0)) {
+    throw new TypeError(`Worker ${spec.id}: idleTimeoutMs must be a positive number`)
   }
   const names = new Set<string>()
   for (const tool of spec.tools) {
@@ -283,7 +303,12 @@ class WorkerRun<T> {
       this.emit({ type: 'request', turn, attempt })
       this.llmCalls++
 
-      const outcome = await consumeStream(spec.llm, this.options(tools), spec.signal)
+      const outcome = await consumeStream(
+        spec.llm,
+        this.options(tools),
+        spec.signal,
+        spec.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+      )
       const usage: LlmTokenUsage = outcome.usage ? { ...outcome.usage } : { inputTokens: 0, outputTokens: 0 }
       this.recordUsage(usage)
       this.transcript.push({ kind: 'usage', at: now(), turn, usage, finish: outcome.finish })
@@ -434,11 +459,26 @@ class WorkerRun<T> {
     }
 
     const available = new Map(offered.map(tool => [tool.name, tool]))
+    // At most MAX_TOOL_CALLS_PER_TURN calls run (terminal evaluations included); every call still gets a result.
+    let remaining = MAX_TOOL_CALLS_PER_TURN
+    const overLimit = (call: LlmToolCallBlock): ToolResult => {
+      this.emit({ type: 'tool', turn, name: call.name, ok: false, ms: 0 })
+      return errorResult(
+        `Not run: this reply contained ${calls.length} tool calls and only the first ${MAX_TOOL_CALLS_PER_TURN} are run per reply. ` +
+          `Call at most ${MAX_TOOL_CALLS_PER_TURN} tools per reply, batch related lookups (for example one broader search_code pattern), ` +
+          'and call this tool again if you still need it.',
+      )
+    }
     // Terminal calls first: the first valid one ends the worker and the rest are ignored.
     const rejected = new Map<number, ToolResult>()
     for (const [index, call] of calls.entries()) {
       const tool = available.get(call.name)
       if (!tool?.terminal) continue
+      if (remaining <= 0) {
+        rejected.set(index, overLimit(call))
+        continue
+      }
+      remaining--
       const started = performance.now()
       const verdict = await this.evaluateTerminal(tool, call, truncated)
       this.emit({ type: 'tool', turn, name: call.name, ok: verdict.ok, ms: elapsed(started) })
@@ -447,11 +487,19 @@ class WorkerRun<T> {
         return this.stop('submitted', { output: verdict.output, terminalTool: tool.name })
       }
       rejected.set(index, verdict.result)
+      await yieldToEventLoop()
     }
 
     for (const [index, call] of calls.entries()) {
       if (spec.signal.aborted) return this.stop('cancelled', { stopReason: 'aborted' })
-      const result = rejected.get(index) ?? (await this.execute(turn, call, available, truncated))
+      let result = rejected.get(index)
+      if (!result && remaining > 0) {
+        remaining--
+        result = await this.execute(turn, call, available, truncated)
+        // A tool may have run synchronously for a while (regex search): let timers, I/O and other workers run.
+        await yieldToEventLoop()
+      }
+      result ??= overLimit(call)
       this.toolCalls++
       this.pushMessage(toolResultMessage(call.id, truncateText(result.text, this.maxChars), result.isError === true))
     }
@@ -608,18 +656,43 @@ class WorkerRun<T> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Drains one provider attempt. Never throws. */
+/** What {@link nextChunk} resolves with when no chunk came in time, or the request was aborted. */
+const IDLE = Symbol('idle')
+const ABORTED = Symbol('aborted')
+
+/**
+ * Drains one provider attempt. Never throws.
+ *
+ * The request gets its own signal, linked to `signal`. When no chunk arrives
+ * for `idleMs`, or `signal` aborts while the provider ignores it, the request
+ * is aborted and the stream abandoned without waiting for it to settle.
+ */
 async function consumeStream(
   llm: Pick<LlmPort, 'stream'>,
   options: LlmGenerateOptions,
   signal: AbortSignal,
+  idleMs: number,
 ): Promise<AttemptOutcome> {
   const blocks = new Map<number, LlmContentBlock>()
   let usage: LlmTokenUsage | undefined
   let reason: LlmFinishReason | undefined
   let replayState: unknown
+  const request = new AbortController()
+  const forward = (): void => request.abort(signal.reason)
+  if (signal.aborted) forward()
+  else signal.addEventListener('abort', forward, { once: true })
+  let iterator: AsyncIterator<LlmStreamChunk> | undefined
+  let abandoned: typeof IDLE | typeof ABORTED | undefined
   try {
-    for await (const chunk of llm.stream(options)) {
+    iterator = llm.stream({ ...options, signal: request.signal })[Symbol.asyncIterator]()
+    for (;;) {
+      const next = await nextChunk(iterator, idleMs, request.signal)
+      if (next === IDLE || next === ABORTED) {
+        abandoned = next
+        break
+      }
+      if (next.done) break
+      const chunk = next.value
       if (chunk.type === 'block-end') {
         blocks.set(chunk.index, chunk.block)
       } else if (chunk.type === 'usage') {
@@ -627,6 +700,8 @@ async function consumeStream(
       } else if (chunk.type === 'finish') {
         reason = chunk.reason
         replayState = chunk.replayState
+        // Like `break` in `for await`: let the provider clean up.
+        await iterator.return?.()
         break
       }
     }
@@ -636,6 +711,24 @@ async function consumeStream(
       const code = signal.aborted ? 'ABORTED' : 'INTERNAL'
       return { ok: false, usage, finish: 'error', failure: { code, message: errorText(error) } }
     }
+  } finally {
+    signal.removeEventListener('abort', forward)
+    if (abandoned) {
+      request.abort(abandoned === IDLE ? new Error('idle timeout') : signal.reason)
+      abandon(iterator)
+    }
+  }
+  if (abandoned === IDLE) {
+    const seconds = Math.max(1, Math.round(idleMs / 1000))
+    return {
+      ok: false,
+      usage,
+      finish: 'error',
+      failure: { code: 'TIMEOUT', message: `The model sent no data for ${seconds} s; the request was abandoned` },
+    }
+  }
+  if (abandoned === ABORTED) {
+    return { ok: false, usage, finish: 'aborted', failure: { code: 'ABORTED', message: 'The request was aborted' } }
   }
   if (!reason) {
     return {
@@ -649,6 +742,63 @@ async function consumeStream(
   if (failure) return { ok: false, usage, finish: reason.kind, failure }
   const ordered = [...blocks.entries()].sort((a, b) => a[0] - b[0]).map(([, block]) => block)
   return { ok: true, blocks: ordered, usage, finish: reason.kind, replayState }
+}
+
+/** The next chunk, or {@link IDLE} after `idleMs` without one, or {@link ABORTED} once `signal` aborts. */
+function nextChunk(
+  iterator: AsyncIterator<LlmStreamChunk>,
+  idleMs: number,
+  signal: AbortSignal,
+): Promise<IteratorResult<LlmStreamChunk> | typeof IDLE | typeof ABORTED> {
+  if (signal.aborted) return Promise.resolve(ABORTED)
+  return new Promise((resolve, reject) => {
+    const settle = (): void => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+    }
+    const onAbort = (): void => {
+      settle()
+      resolve(ABORTED)
+    }
+    const timer = setTimeout(() => {
+      settle()
+      resolve(IDLE)
+    }, idleMs)
+    signal.addEventListener('abort', onAbort, { once: true })
+    let pending: Promise<IteratorResult<LlmStreamChunk>>
+    try {
+      pending = iterator.next()
+    } catch (error) {
+      settle()
+      reject(error)
+      return
+    }
+    pending.then(
+      value => {
+        settle()
+        resolve(value)
+      },
+      (error: unknown) => {
+        settle()
+        reject(error)
+      },
+    )
+  })
+}
+
+/** Ask an abandoned stream to close without waiting: a stalled generator would never answer. */
+function abandon(iterator: AsyncIterator<LlmStreamChunk> | undefined): void {
+  try {
+    const closing = iterator?.return?.()
+    if (closing) Promise.resolve(closing).catch(() => {})
+  } catch {
+    // Nothing more to do for a stream that cannot close.
+  }
+}
+
+/** Let timers, I/O callbacks and other workers run before continuing. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
 }
 
 function failureOf(reason: LlmFinishReason): LlmFailure | undefined {

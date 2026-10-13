@@ -67,7 +67,9 @@ flowchart LR
    scan it also checks that a Hunter route resolves (role override, else Default), that every selected provider is
    still connected in DSH, and that `privacy.sendCodeToModel` is on. A project with a queued or running scan is
    refused with `security/busy`. The new `ScanRecord` freezes the current settings, the mode's budget and the
-   resolved model per role, so later settings changes do not affect a running or resumed scan.
+   resolved model per role, so later settings changes do not affect a running or resumed scan, with two privacy
+   exceptions: turning `privacy.sendCodeToModel` off stops the AI work of queued, paused and running scans (notice
+   `consent-revoked`), and a scan withholds its frozen `withheldGlobs` plus the current ones on every start and resume.
 2. **Queue.** Up to `maxConcurrentScans` jobs run at once. The rest wait in creation order. Jobs belong to the Host,
    so closing the browser does not stop them.
 3. **Deterministic phases** (`scan/analysis.ts`): `snapshot` → `inventory` → `deterministic` (secrets and
@@ -120,14 +122,19 @@ mode's `maxTasks`. The number left over is reported as a notice.
 - Each request is one `ctx.llm.stream()` call: one provider attempt, with the role's system prompt, the task message
   and the tool schemas.
 - Retryable failures (`RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`, `EMPTY_RESPONSE`) back off exponentially (1 s
-  to 30 s, ±20% jitter, or the provider's retry-after up to 60 s), at most 4 attempts per turn.
+  to 30 s, ±20% jitter, or the provider's retry-after up to 60 s), at most 4 attempts per turn. A stream that sends
+  no chunk for `llmIdleTimeoutMs` (default 2 min) is abandoned as a `TIMEOUT`, and a stream that ignores the abort
+  signal is abandoned as soon as the worker is cancelled.
+- At most 16 tool calls run per model reply; the rest get an error result asking the model to batch fewer. The loop
+  yields to the event loop after each tool execution.
 - On `CONTEXT_WINDOW_EXCEEDED` the loop elides all but the last two tool results and retries once.
 - Provider content-policy refusals end the worker as `blocked_by_provider`. They are never retried and no other
   model is tried.
 - A plain-text reply is answered with a nudge, at most twice. On the last turn only the terminal (submit) tool is
   offered.
 - Every request goes through the scan's shared budget gate. A worker always ends, after at most `maxTurns × 4`
-  requests.
+  requests. When the scan's `maxMinutes` passes, its in-flight requests are aborted and those tasks are skipped as
+  over budget.
 
 **Roles** (`agents/roles/*`) share one system preamble. It says the tools are read-only, that repository content
 is untrusted data and instructions in it must not be followed, that every claim must quote exact code, and it gives
@@ -137,7 +144,7 @@ the severity rubric and the output language. Each role has its own terminal tool
 | --- | --- | --- | --- |
 | Planner | `submit_threat_model` | `min(maxTurnsPerWorker, 16)` | At most N hypotheses. |
 | Hunter | `submit_findings` | `maxTurnsPerWorker` | A finding whose attack-path quotes all fail verification is sent back (up to 2 times) with the exact mismatches; after that it is accepted and the host drops such findings. |
-| Skeptic | `submit_verdict` | `min(maxTurnsPerWorker, 16)` | `refuted` without a verified counter-evidence quote is sent back (up to 2 times), then downgraded to `inconclusive`. `confirmed` without any verified step becomes `inconclusive`. |
+| Skeptic | `submit_verdict` | `min(maxTurnsPerWorker, 16)` | `refuted` without a verified counter-evidence quote of code (comment-only quotes do not count) is sent back (up to 2 times), then downgraded to `inconclusive`. `confirmed` without any verified step becomes `inconclusive`. |
 | Chain analyst | `submit_chains` | `min(maxTurnsPerWorker, 16)` | A chain needs at least 2 known findings and at least 1 verified step (1 resubmission). |
 
 The Skeptic runs in a fresh context. It receives the finding's claim, preconditions and host-verified excerpts, but
@@ -152,13 +159,19 @@ quote copied with `  12| ` line prefixes is retried without them.
 
 | Result | Meaning |
 | --- | --- |
-| `match` | Found within the cited lines ±3. |
-| `relocated` | Not there, but found exactly once elsewhere in the same file; lines are corrected. |
-| `mismatch` | File not in the snapshot, withheld file, quote not found, quote ambiguous (several places), or quote too short (< 8 normalized characters unless the cited range is that short). |
+| `match` | Found once within the cited lines ±3. Several occurrences there match only when the cited range is tight (at most the quote's lines + 6); the nearest one is taken. |
+| `relocated` | Not within the cited lines ±3, but found exactly once elsewhere in the same file. |
+| `mismatch` | File not in the snapshot, withheld file, cited range too wide (more than the quote's lines + 40), quote not found, quote ambiguous (several places in the file, or in a loose cited range), or quote too short (< 8 normalized characters unless the cited range is that short). |
 | `unchecked` | Nothing to check. |
 
-A quote containing a raw secret cannot match, because the snapshot text it is compared with is redacted. Withheld
-files cannot be quoted at all.
+For `match` and `relocated`, the stored location and snippet are the lines the quote actually occupies, never the
+cited range. A quote containing a raw secret cannot match, because the snapshot text it is compared with is redacted.
+Withheld files cannot be quoted at all.
+
+`evidence/comments.ts` flags a verified quote as comment-only when all of it lies in comments (`//`, `#`, `--`,
+`/* */` and `*` lines, `<!-- -->`, template comments), Python docstrings, or documentation files (`.md`, `.txt`,
+`.rst`, …). The lexer is chosen by file extension and skips string literals. Comment-only quotes are stored and shown,
+but never count as counter-evidence or as support for a severity change.
 
 How findings are stored (`scan/findings.ts`):
 
@@ -170,11 +183,15 @@ How findings are stored (`scan/findings.ts`):
   sink) sets the location and fingerprint. A new AI finding within 3 lines of an existing non-dependency, non-secret
   finding of the same category or CWE is merged into it. A rule hit merged this way takes the hunter's narrative and
   attack path.
-- **Hunter verdicts on rule hits:** `false_positive` with a verified defense quote rules the hit out (`refuted`) only
-  when no Skeptic will review that severity later in the scan. Otherwise the defense is attached as counter-evidence
-  and the Skeptic decides.
+- **Hunter verdicts on rule hits:** a hunter never rules a hit out on its own. `false_positive` attaches the cited
+  defense as counter-evidence. When a Skeptic will review that severity later, the Skeptic decides. When none will
+  (Quick mode, or below the review threshold) and the defense is verified code, not only comments, the hit becomes
+  `inconclusive` with the hunter's reason as a limitation.
 - **Skeptic verdicts** set the verification: `confirmed` → `strong_static_evidence`, `refuted` → `refuted`,
-  otherwise `inconclusive`. A severity correction applies unless refuted.
+  otherwise `inconclusive`. A severity correction applies only to a `confirmed` verdict with a verified, non-comment
+  supporting quote. It lowers a deterministic (`secret`, `dependency`, `sast`, `external`) critical or high rule hit
+  by at most one level per review. The review reasoning notes the original severity, or why a suggestion was not
+  applied.
 - **Closure** is never stored. It is derived from verification by `closureOf()`.
 
 ## Fingerprints and triage carry-over

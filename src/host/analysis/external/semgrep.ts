@@ -1,7 +1,9 @@
 /**
  * Semgrep runner. Runs only with a local rules path supplied by the user or
  * the plugin: never `--config auto` or registry rules, metrics off, no
- * version check, so no code or telemetry leaves the machine.
+ * version check, so no code or telemetry leaves the machine. `--disable-nosem`
+ * makes `nosemgrep` comments in the scanned repository ineffective, so its
+ * author cannot silence a rule hit inline.
  */
 
 import { stat } from 'node:fs/promises'
@@ -69,6 +71,7 @@ export async function runSemgrep(options: SemgrepRunOptions): Promise<AnalyzerRu
     '--json',
     '--metrics=off',
     '--disable-version-check',
+    '--disable-nosem',
     '--quiet',
     '--config',
     configPath,

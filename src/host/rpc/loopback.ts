@@ -1,10 +1,29 @@
 /**
- * Same-machine classification for RPC requests. DSH has already applied its
- * Host/Origin trust fence and browser authentication before a route runs;
- * this only decides whether the page is on the Host's own machine, which
- * gates high-risk settings. It deliberately ignores `Forwarded` and
- * `X-Forwarded-*` headers: a request that arrives through a reverse proxy or
- * names a LAN address is remote.
+ * Same-machine classification for RPC requests, used only to gate high-risk
+ * settings (`allowRemoteHighRiskSettings: false`).
+ *
+ * What this is, and what it is not:
+ *
+ * - It is a **policy for browser pages**, not a security boundary. DSH has
+ *   already applied its Host/Origin trust fence and browser authentication
+ *   before a route runs, and every admitted request speaks for the one DSH
+ *   operator, who can already run shell commands through DSH's own agents.
+ * - The decision rests on the `Host` header. A browser cannot forge `Host`
+ *   (that is what DSH's DNS-rebinding fence relies on), so a page opened from
+ *   another machine through a LAN address, a tunnel or a reverse proxy is
+ *   classified as remote. A non-browser client that holds the DSH
+ *   credentials can send any `Host` it likes and be classified as local; it
+ *   is the authenticated operator anyway.
+ * - The peer's socket address is not available: DSH hands exact Fetch routes
+ *   a Web `Request` without connection information
+ *   (`ConnectionFetchRoute.fetch(request)` in `@deepseek-ai/dsh-client-connection`).
+ * - `ctx.connection.allowsRemoteAuthorities` is not used. When it is `false`
+ *   DSH still admits the listener's own bind address as `Host` (for example a
+ *   LAN IP), so it does not imply that every admitted page is local, and when
+ *   it is `true` the `Host` header already tells the authorities apart.
+ *
+ * `Forwarded` and `X-Forwarded-*` headers are ignored on purpose: a request
+ * that arrives through a reverse proxy, even one on the same machine, is remote.
  */
 
 /** Hostname (lowercase, no port, IPv6 without brackets) from a `host` header value. */

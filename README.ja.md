@@ -70,7 +70,7 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 
 クイックでは、AI はルールの検出箇所が本物かどうかを確かめるだけで、認可漏れのようなロジックの欠陥は探しません。組み込みルールが何も見つけなければ、AI の作業は 1 つも行われません。
 
-予算のどれか 1 つに達すると、スキャンは新しい作業を始めずに終了し、調べきれなかった部分を一覧にします。予算はモードごとに設定で変更でき、管理者が決めた上限で頭打ちになります（[docs/configuration.md](docs/configuration.md)）。各スキャンは、開始時点の設定・モデル・予算をそのまま使い続けます。
+予算のどれか 1 つに達すると、スキャンは新しい作業を始めずに終了し、調べきれなかった部分を一覧にします。予算はモードごとに設定で変更でき、管理者が決めた上限で頭打ちになります（[docs/configuration.md](docs/configuration.md)）。各スキャンは、開始時点の設定・モデル・予算をそのまま使い続けます。ただしプライバシーの設定 2 つは例外です。「コードを AI モデルに送る」をオフにすると、待機中・一時停止中・実行中のスキャンも AI レビューをやめ、組み込みの解析ツールの結果で完了します。「送信しないファイル」に追加したパターンは、スキャンの開始時と再開時に反映されます。時間の上限は締め切りとして働き、過ぎた時点で実行中のリクエストも止めます。
 
 ## プライバシーとデータの流れ
 
@@ -84,9 +84,9 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 モデルに届く前に、次の処理が入ります。
 
 - スキャナーが見つけた秘密情報は、すべての抜粋で `[REDACTED:<ルールID>]` に置き換えられます。ツールの出力全体にも、もう一度パターンによる伏せ字処理をかけます。秘密情報の値そのものは保存せず、検出結果には先頭数文字だけを残した伏せ字表示を記録します。
-- **送信しないファイル** は、AI のツール（一覧・読み取り・検索・引用）では一切返しません。組み込みのリスト: `.env` と `.env.*`（`.example`・`.sample`・`.template` は除く）、秘密鍵と証明書、`.npmrc`、`.pypirc`、`.netrc`、`.git-credentials`、サービスアカウントの JSON、`secrets.y(a)ml`、Terraform の state と `*.tfvars`。設定の「送信しないファイル」で追加できます。ただし、こうしたファイルでルールが検出した箇所の短い抜粋（伏せ字処理済み）は、作業の指示文に含まれることがあります（[docs/security-model.md](docs/security-model.md#residual-risks)）。
+- **送信しないファイル** は、AI のツール（一覧・読み取り・検索・引用）では一切返しません。組み込みのリスト: `.env` と `.env.*`（`.example`・`.sample`・`.template` は除く）、秘密鍵と証明書、`.npmrc`、`.pypirc`、`.netrc`、`.git-credentials`、`.pgpass`、`.htpasswd`、AWS・Docker・Kubernetes のクライアント認証情報（`.aws/credentials`、`.aws/config`、`.docker/config.json`、`.kube/config`、`kubeconfig`）、サービスアカウントの JSON、`secrets.y(a)ml`、Terraform の state と `*.tfvars`。設定の「送信しないファイル」で追加できます。ただし、こうしたファイルでルールが検出した箇所の短い抜粋（伏せ字処理済み）は、作業の指示文に含まれることがあります（[docs/security-model.md](docs/security-model.md#residual-risks)）。
 - プロジェクトの絶対パスは、すべてのツール出力で伏せられます。
-- 外部の解析ツールはこのコンピューター上で動きます。OSV-Scanner は、OSV 照会がオフならオフラインで動きます。Semgrep はローカルのルールだけを使い、利用統計の送信はオフにして実行します。
+- 外部の解析ツールはこのコンピューター上で動きます。OSV-Scanner は、OSV 照会がオフならオフラインで動きます。Semgrep はローカルのルールだけを使い、利用統計の送信はオフにして実行します。スキャン対象のプロジェクト側にあるこれらのツールの除外設定（`.gitleaks.toml`、`osv-scanner.toml`、`nosemgrep` コメント）は使いません。
 
 伏せ字処理はパターンに基づきます。ルールが知らない形式の認証情報はモデルに届く可能性があるので、そうした値を含むファイルは「送信しないファイル」に追加してください。
 
@@ -94,7 +94,7 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 
 ## 設定
 
-利用者の設定は、セキュリティページの「設定」タブ（DSH の設定 → セキュリティ からも開けます）で変更します。管理者は、プロファイルの `cordis.patch.yml` で上限やパスを決められます。たとえば、別の端末から開いたページではコード送信をオンにできないようにする、OSV の照会先をミラーにする、といった設定です。すべての項目・標準値・記述例は [docs/configuration.md](docs/configuration.md) にあります。
+利用者の設定は、セキュリティページの「設定」タブ（DSH の設定 → セキュリティ からも開けます）で変更します。管理者は、プロファイルの `cordis.patch.yml` で上限やパスを決められます。たとえば、別の端末から開いたページではコード送信をオンにできないようにする、OSV の照会先をミラーにする、といった設定です。前者はブラウザーで開いたページに対する方針で、アクセス制御ではありません（DSH の認証情報を持つ人は DSH の管理者そのものです）。すべての項目・標準値・記述例は [docs/configuration.md](docs/configuration.md) にあります。
 
 ## 動作要件と互換性
 

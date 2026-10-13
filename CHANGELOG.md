@@ -21,6 +21,22 @@ changes; they are called out explicitly.
   secret value the secret scan found.
 - Absolute Host paths (project root, data, temp and home directories) are masked in scan errors, analyzer and toolkit
   failure reasons, warnings, activity-log messages and RPC error details.
+- Turning off *Send code to the AI model* now stops AI work in queued, paused, interrupted and running scans: in-flight
+  requests are aborted, remaining AI tasks are skipped, and the scan completes with a `consent-revoked` notice.
+  `withheldGlobs` added after a scan was created apply when it starts or resumes.
+- OSV-Scanner gets an empty plugin-written `--config`, so a repository's `osv-scanner.toml` (`[[IgnoredVulns]]`)
+  cannot hide advisories; Semgrep runs with `--disable-nosem`, so `nosemgrep` comments cannot silence rules.
+- "Fix in chat" drafts keep the title on one line and put model-written text and code snippets in fenced blocks
+  labelled as untrusted, with an instruction (en/ja/zh) to treat them as data and verify independently.
+- Workers run at most 16 tool calls per model reply and yield to the event loop between tool executions;
+  `search_code` returns the matches found before a regex timeout, with a "search stopped early" note.
+- Model requests with no stream data for `llmIdleTimeoutMs` (new operator setting, default 2 min) are abandoned and
+  retried as `TIMEOUT`; when `maxMinutes` passes, in-flight requests are aborted and the scan completes over budget.
+- More credential files are withheld from models by default: `.aws/credentials`, `.aws/config`,
+  `.docker/config.json`, `.kube/config`, `kubeconfig`, `.pgpass`, `.htpasswd`, `.dockercfg`, `.s3cfg`,
+  `credentials.tfrc.json`.
+- Documentation now states that the same-machine rule for high-risk settings is a policy for browser pages based on
+  the `Host` header, not a security boundary against clients holding the DSH credentials.
 
 ## [0.1.0] - 2026-10-13
 
@@ -56,6 +72,12 @@ First public release.
   verified step are discarded and counted in Coverage.
 - **Independent skeptic review** in a fresh context. A refutation needs a verified counter-evidence quote, and a
   confirmation needs verified code on the attack path.
+- Evidence locations are the quoted lines themselves: a citation wider than the quote + 40 lines is rejected, and a
+  quote found more than once in a loose cited range is ambiguous instead of matching the top of the range.
+- Without a following review, a hunter's `false_positive` on a rule hit leaves it `inconclusive`, never `refuted`, and
+  quotes that are only comments, docstrings or documentation never count as counter-evidence.
+- A reviewer's severity change applies only to a confirmed verdict with verified supporting code, and lowers a
+  deterministic critical/high rule hit by at most one level; the original severity is noted in the review.
 - **Separate severity and verification ratings** (Confirmed in code, Possible, Undecided, Ruled out), with closure
   derived from verification.
 - **Triage** (Open, Accepted risk, False positive, Fixed) stored per project and line-independent fingerprint, and
@@ -71,6 +93,16 @@ First public release.
   retention and optional AI transcripts.
 - **Fixtures and tests:** four intentionally vulnerable fixture apps with ground truth, a benchmark harness, and a
   deterministic scripted model for end-to-end tests without API keys.
+
+### Fixed
+
+- Lock-file line lookups are indexed in one pass (a 16k-package `pnpm-lock.yaml` or `package-lock.json` parses in
+  well under a second instead of 7–10 s), pnpm and Yarn Berry locks use a fast block-YAML reader with a fallback to
+  the full parser, and dependency parsing yields to the event loop.
+- Dependency manifests and lock files are exempt from `maxFileBytes` up to 32 MiB (still counted toward
+  `maxTotalBytes`); a lock file left out for size is named in a scan warning instead of being skipped silently.
+- Rate limiters, throttles and loggers (`loginLimiter`, `authRateLimit`, `loginThrottle`) no longer count as route
+  auth hints, so a route guarded only by them is not reported to reviewers as protected.
 
 ### Known limitations
 

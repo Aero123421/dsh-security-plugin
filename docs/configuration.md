@@ -18,7 +18,7 @@ from starting, and the reason is written to the DSH log.
 | `maxParallelWorkers` | integer | `4` | 1–32 | Ceiling for AI workers running at once in one scan. The user's *Reviewers working at once* is clamped to it. |
 | `maxConcurrentScans` | integer | `1` | 1–8 | Scans running at once across all projects. Others wait in a FIFO queue. |
 | `maxFiles` | integer | `20000` | 1–1,000,000 | Files read into one snapshot. Beyond this the snapshot is truncated, and both a notice and a coverage gap say so. |
-| `maxFileBytes` | integer (bytes) | `1048576` (1 MiB) | 1–64 MiB | Largest single file read. Larger files are excluded as `too-large`. |
+| `maxFileBytes` | integer (bytes) | `1048576` (1 MiB) | 1–64 MiB | Largest single file read. Larger files are excluded as `too-large`, except dependency manifests and lock files, which may be up to 32 MiB (an oversized one is named in a scan warning). |
 | `maxTotalBytes` | integer (bytes) | `209715200` (200 MiB) | 1 B–4 GiB | Total bytes read into one snapshot. |
 | `maxTokensPerScan` | integer | `20000000` | 1–1,000,000,000 | Ceiling for every mode's *Tokens* budget. |
 | `maxLlmCallsPerScan` | integer | `2000` | 1–1,000,000 | Ceiling for every mode's *AI requests* budget. |
@@ -27,6 +27,7 @@ from starting, and the reason is written to the DSH log.
 | `osvEndpoint` | URL | `https://api.osv.dev` | valid URL | OSV API base, for example an internal mirror. Requests go to `<osvEndpoint>/v1/querybatch` and `/v1/vulns/<id>`. |
 | `semgrepConfig` | path | unset | absolute path to a file or directory | Local Semgrep rules. Without it Semgrep never runs, even if installed. Registry rules (`--config auto`, `p/…`) are never used. |
 | `externalTimeoutMs` | integer (ms) | `600000` (10 min) | 1 ms–24 h | Timeout for one Gitleaks / OSV-Scanner / Semgrep run. The process tree is killed when it expires. |
+| `llmIdleTimeoutMs` | integer (ms) | `120000` (2 min) | 1 s–1 h | A model request whose stream sends nothing for this long (the wait for the first chunk included) is abandoned and retried with backoff as a transient `TIMEOUT` (at most 4 attempts per turn). Raise it for slow reasoning models that stay silent for long stretches. |
 | `disableAstGrep` | boolean | `false` | | Never load the native `@ast-grep/napi` engine and always use the built-in tokenizer. |
 
 ### Overriding operator config
@@ -112,7 +113,8 @@ Skeptic route, independent review; without a Chain route, attack chains.
 ### Budgets
 
 Per mode (`budgets.quick`, `budgets.deep`, `budgets.research`). A scan stops starting new work as soon as it reaches
-any limit.
+any limit. `maxMinutes` is also a deadline: when it passes, model requests still in flight are aborted, and the scan
+completes with what it has and a time-budget notice.
 
 | Setting | Quick | Deep | Research | Clamp |
 | --- | --- | --- | --- | --- |
@@ -123,14 +125,24 @@ any limit.
 | `maxTasks` (review tasks) | 6 | 40 | 150 | UI: 1–1,000. The review phase may schedule up to `max(maxTasks, 10)`. |
 
 Clamping happens when settings are read and written. A stored value above a lowered operator ceiling is reduced the
-next time settings load. Each scan copies its budget when it is created.
+next time settings load. Each scan copies its settings and budget when it is created, with two exceptions (next
+section).
 
 ### Privacy
 
 | Setting | Default | High-risk | Meaning |
 | --- | --- | --- | --- |
-| `privacy.sendCodeToModel` | `false` | yes | Consent to send redacted code excerpts to the selected providers. Required for AI scans. The New scan dialog asks for it and saves it here. |
-| `privacy.withheldGlobs` | `[]` | | Extra gitignore-style patterns for files the workers' tools never return, on top of the built-in credential files. |
+| `privacy.sendCodeToModel` | `false` | yes | Consent to send redacted code excerpts to the selected providers. Required for AI scans. The New scan dialog asks for it and saves it here. Turning it off also applies to scans already queued, paused or running (see below). |
+| `privacy.withheldGlobs` | `[]` | | Extra gitignore-style patterns for files the workers' tools never return, on top of the built-in credential files. A scan uses the patterns it was created with plus the current ones, read again whenever it starts or resumes. |
+
+These two settings are not frozen into a scan:
+
+- **Turning off `sendCodeToModel`** stops AI work in every scan that uses it. A running scan aborts its in-flight
+  model requests at once and skips its remaining AI tasks. A queued, paused or interrupted scan checks the setting
+  when it starts or resumes. Either way the scan completes with its built-in analyzer results, keeps AI results
+  recorded before that, and shows the notice `consent-revoked`. Turning the setting on again does not restart that
+  work; start a new scan.
+- **`withheldGlobs`** added after a scan was created take effect when it next starts or resumes.
 | `privacy.allowDependencyLookup` | `false` | yes | Send ecosystem, package name and exact version (never code or paths) to `osvEndpoint`. Also lets OSV-Scanner go online. |
 | `privacy.useExternalAnalyzers` | `true` | yes | Run Gitleaks, OSV-Scanner and Semgrep when they are available (managed install or `PATH`). They run locally. |
 
@@ -150,8 +162,12 @@ machine or what runs on it. When `allowRemoteHighRiskSettings` is `false`, these
 `security/forbidden-remote`, and the UI shows the switch as locked with an explanation. Turning a switch off is
 always allowed.
 
-The Host decides "same machine" for each request (`src/host/rpc/loopback.ts`), after DSH has already authenticated
-it:
+This rule is a **policy for browser pages, not an access control**. Every request that reaches the plugin has
+already passed DSH's Host/Origin fence and browser authentication, so it speaks for the one DSH operator, who can
+also run shell commands through DSH's own agents. The rule keeps a page opened on another machine from widening
+what leaves this one; it does not stop someone who holds the DSH credentials.
+
+The Host decides "same machine" for each request (`src/host/rpc/loopback.ts`):
 
 - If DSH Desktop's in-process carrier delivers the request (any URL scheme other than `http:`/`https:`), it is
   loopback.
@@ -160,8 +176,19 @@ it:
 - `Forwarded` and `X-Forwarded-*` are ignored on purpose. A request through a reverse proxy, a tunnel or a LAN
   address counts as remote, even if the proxy runs on the same machine.
 
+Limits of that decision:
+
+- Browsers cannot forge `Host`, so a remote page is classified correctly. A non-browser client (for example `curl`
+  with the DSH credentials) can send `Host: localhost` from anywhere and is classified as local.
+- The peer's network address is not available to the plugin: DSH hands exact Fetch routes a Web `Request` without
+  connection information.
+- DSH's `allowsRemoteAuthorities` (true when `trustedHosts` names a non-loopback host) is not used: even when it is
+  `false`, DSH admits the listener's own bind address (for example a LAN IP) as `Host`, so it does not mean every
+  page is local.
+
 With the default (`true`), any authenticated DSH page may enable these switches, which suits a single-user setup.
-Set it to `false` when people other than the Host's owner can reach the DSH Web UI.
+Set it to `false` when people other than the Host's owner can open the DSH Web UI. Do not rely on it to separate
+people who share the DSH credentials.
 
 ## Excluding files
 
