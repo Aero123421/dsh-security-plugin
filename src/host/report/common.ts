@@ -22,7 +22,7 @@ export interface ReportInput {
 /** Display name of the tool in every report. */
 export const TOOL_NAME = 'DSH Security'
 /** Project homepage used as SARIF `informationUri`. */
-export const TOOL_INFORMATION_URI = 'https://github.com/dsh-security/dsh-security-plugin'
+export const TOOL_INFORMATION_URI = 'https://github.com/Aero123421/dsh-security-plugin'
 
 /** Closure groups in report order. */
 export const CLOSURE_ORDER = ['confirmed', 'open_proof_gap', 'ruled_out'] as const satisfies readonly Closure[]

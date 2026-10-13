@@ -11,7 +11,7 @@ import { FIXTURE_DETECTORS, type FixtureDetector } from './fixtures.ts'
 import { activeDetectorsOf, detectorsOf, type ReportedFinding } from './scoring.ts'
 
 /** `$schema` of the report format this scorer understands. */
-export const SUPPORTED_REPORT_SCHEMA = 'https://dsh-security.dev/schemas/report-v1.json'
+export const SUPPORTED_REPORT_SCHEMA = 'urn:dsh-security-plugin:report:v1'
 /** `schemaVersion` this scorer understands; keep in step with `JSON_REPORT_SCHEMA_VERSION`. */
 export const SUPPORTED_REPORT_VERSION = 1
 

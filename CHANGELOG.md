@@ -112,5 +112,5 @@ First public release.
 - Route extraction and SAST rules cover JavaScript/TypeScript and Python only; other languages get secret,
   dependency and AI review coverage.
 
-[Unreleased]: https://github.com/dsh-security/dsh-security-plugin/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/dsh-security/dsh-security-plugin/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Aero123421/dsh-security-plugin/releases/tag/v0.1.0

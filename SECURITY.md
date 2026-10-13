@@ -9,7 +9,7 @@ vulnerabilities in the plugin itself seriously. The threat model is in
 **Please do not open a public issue, discussion or pull request for a security problem.**
 
 Report it privately through GitHub Security Advisories: go to the repository's **Security** tab and choose
-**Report a vulnerability** (<https://github.com/dsh-security/dsh-security-plugin/security/advisories/new>).
+**Report a vulnerability** (<https://github.com/Aero123421/dsh-security-plugin/security/advisories/new>).
 
 Please include:
 

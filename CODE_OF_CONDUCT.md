@@ -20,7 +20,7 @@ the project in public.
 ## Reporting
 
 Report unacceptable behavior privately to the maintainers. Use GitHub's
-[private vulnerability reporting](https://github.com/dsh-security/dsh-security-plugin/security/advisories/new) form
+[private vulnerability reporting](https://github.com/Aero123421/dsh-security-plugin/security/advisories/new) form
 with a title starting with "Conduct:", or contact a maintainer directly. Reports are handled confidentially.
 Maintainers who are involved in a report will not take part in handling it.
 

@@ -50,7 +50,7 @@ describe('parseJsonReport', () => {
   })
 
   it('rejects other schema versions with a clear message', () => {
-    const v2 = { ...exportedReport(), schemaVersion: 2, $schema: 'https://dsh-security.dev/schemas/report-v2.json' }
+    const v2 = { ...exportedReport(), schemaVersion: 2, $schema: 'urn:dsh-security-plugin:report:v2' }
     expect(() => parseJsonReport(v2)).toThrow(ReportFormatError)
     expect(() => parseJsonReport(v2)).toThrow(/Unsupported report schema: got schemaVersion 2.*reads schemaVersion 1/)
     expect(() => parseJsonReport({ ...exportedReport(), $schema: 'https://example.com/other.json' })).toThrow(

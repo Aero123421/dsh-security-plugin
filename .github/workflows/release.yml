@@ -21,10 +21,10 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # pnpm version comes from "packageManager" in package.json (pnpm@10.28.0).
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: pnpm
@@ -49,17 +49,24 @@ jobs:
           if [[ "${version}" == *-* ]]; then tag=next; else tag=latest; fi
           echo "dist-tag=${tag}" >> "$GITHUB_OUTPUT"
 
-      - name: Warn about unpinned toolkit assets
+      - name: Require pinned toolkit assets
         shell: bash
+        env:
+          # Set the repository variable ALLOW_UNPINNED_TOOLKIT=true to publish anyway (managed installs of
+          # unpinned assets are then refused at runtime).
+          ALLOW_UNPINNED_TOOLKIT: ${{ vars.ALLOW_UNPINNED_TOOLKIT }}
         run: |
           node -e '
             const lock = require("./toolkit.lock.json")
             const missing = Object.entries(lock.tools).flatMap(([id, tool]) =>
               Object.entries(tool.assets).filter(([, a]) => a.sha256 === null).map(([p]) => `${id}/${p}`))
-            if (missing.length > 0) {
-              console.log(`::warning title=Unpinned toolkit assets::${missing.length} asset(s) have no SHA-256 (${missing.join(", ")}). Managed installs of these will be refused. Run pnpm toolkit:pin before the next release.`)
-            } else {
+            if (missing.length === 0) {
               console.log("All toolkit assets are pinned.")
+            } else if (process.env.ALLOW_UNPINNED_TOOLKIT === "true") {
+              console.log(`::warning title=Unpinned toolkit assets::${missing.length} asset(s) have no SHA-256 (${missing.join(", ")}). Managed installs of these will be refused.`)
+            } else {
+              console.log(`::error title=Unpinned toolkit assets::${missing.length} asset(s) have no SHA-256 (${missing.join(", ")}). Run the Toolkit pin workflow (or pnpm toolkit:pin) and merge its pull request before tagging a release.`)
+              process.exit(1)
             }
           '
 

@@ -223,7 +223,7 @@ describe('renderJson', () => {
     const parsed = JSON.parse(text) as JsonReport
     expect(parsed).toEqual(JSON.parse(JSON.stringify(buildJsonReport(input))))
     expect(parsed.$schema).toBe(JSON_REPORT_SCHEMA_ID)
-    expect(parsed.$schema).toBe('https://dsh-security.dev/schemas/report-v1.json')
+    expect(parsed.$schema).toBe('urn:dsh-security-plugin:report:v1')
     expect(parsed.schemaVersion).toBe(1)
     expect(parsed.tool).toMatchObject({ name: 'DSH Security', version: '0.1.0' })
     expect(parsed.scan.summary.id).toBe('scan_01')

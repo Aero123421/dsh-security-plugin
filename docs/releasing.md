@@ -62,9 +62,11 @@ On a `v*` tag, on `ubuntu-latest` with Node 24 and pnpm from `packageManager`:
 1. `pnpm install --frozen-lockfile`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`,
    `node scripts/verify-package.mjs`.
 2. Checks that the tag matches `package.json` (`vX.Y.Z` ↔ `X.Y.Z`) and stops if it does not.
-3. Prints a warning annotation if `toolkit.lock.json` still has `null` hashes. Publishing continues, because an
-   unpinned asset only means managed installs of that tool are refused on that platform (users can still install it
-   on `PATH`). Pin before releasing whenever possible, and mention any gap in the release notes.
+3. Stops if `toolkit.lock.json` still has `null` hashes, so a release never ships with a dead *Install* button.
+   Run the *Toolkit pin* workflow (or `pnpm toolkit:pin`) and merge its pull request first. To publish anyway, set
+   the repository variable `ALLOW_UNPINNED_TOOLKIT=true`; the step then only warns, and managed installs of the
+   unpinned assets are refused at runtime (users can still install the tools on `PATH`). Mention any gap in the
+   release notes.
 4. `npm publish --provenance --access public`. Tags with a pre-release suffix (`-alpha`, `-beta`, `-rc`) publish
    under the `next` dist-tag; others under `latest`.
 

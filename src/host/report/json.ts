@@ -16,7 +16,7 @@ import type { ReportInput } from './common.ts'
 import { countFindings, orderedFindings, TOOL_INFORMATION_URI, TOOL_NAME } from './common.ts'
 
 /** `$schema` of the JSON report. */
-export const JSON_REPORT_SCHEMA_ID = 'https://dsh-security.dev/schemas/report-v1.json'
+export const JSON_REPORT_SCHEMA_ID = 'urn:dsh-security-plugin:report:v1'
 /** Bumped on incompatible changes to {@link JsonReport}. */
 export const JSON_REPORT_SCHEMA_VERSION = 1
 

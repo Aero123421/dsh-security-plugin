@@ -84,14 +84,22 @@ Each run writes `bench/results/<timestamp>.json` (git-ignored). The command exit
 
 ### Scoring real models
 
-The bench does not call real providers. To measure a real model:
+The bench does not call real providers. To measure a real model inside DSH:
 
-1. Copy each fixture app without its answer key (as described above) and add the copies as projects in DSH.
-2. Scan each copy with the mode and model you want to measure.
-3. Export each scan as JSON (Security page → *Export* → JSON).
-4. Score the exported reports against the ground truth with the same scoring code (`bench/report.ts` reads the
-   `report-v1` JSON format, and `bench/scoring.ts` scores it). Because exported reports and in-process runs share
-   this code, both are measured in exactly the same way.
+1. Copy a fixture app without its answer keys:
+   `node --experimental-strip-types bench/prepare.ts express-shop ~/dsh-bench`
+2. Add `~/dsh-bench/express-shop` as a project in DSH, choose the model(s) in Security → Settings and allow
+   sending code to models.
+3. Run a scan with the mode you want to measure, then export it as JSON (Security page → *Export* → JSON).
+4. Score the export:
+   `node --experimental-strip-types bench/score.ts <exported-report.json> express-shop`
+   (the second argument is the app name or a path to its `expected.json`; add `--json` for machine-readable
+   output).
+
+`score.ts` uses the same scoring code as `pnpm bench` (`bench/report.ts` reads the `report-v1` JSON, and
+`bench/scoring.ts` scores it), so in-process runs and real-model runs are measured in exactly the same way.
+`pnpm bench --save-reports` keeps the JSON reports of in-process runs too. See [`bench/README.md`](../bench/README.md)
+for details.
 
 ## What is reported
 
