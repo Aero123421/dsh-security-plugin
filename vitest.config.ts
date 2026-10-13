@@ -12,11 +12,12 @@ const define = {
 }
 
 export default defineConfig({
-  define,
+  define: { ...define },
   test: {
     projects: [
       {
-        define,
+        // Each project needs its own copy: Vitest consumes `define` keys in place.
+        define: { ...define },
         test: {
           name: 'host',
           environment: 'node',
@@ -25,8 +26,7 @@ export default defineConfig({
         },
       },
       {
-        define,
-        esbuild: { jsx: 'automatic' },
+        define: { ...define },
         test: {
           name: 'client',
           environment: 'happy-dom',

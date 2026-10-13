@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { ConnectionFetchRoute, LoggerPort, WorkspaceRegistryPort } from '../../../src/host/dsh/ports.ts'
 import { apply, Config, type HostContext, name } from '../../../src/host/index.ts'
 import { rpcRoutePath } from '../../../src/host/rpc/server.ts'
@@ -99,17 +99,9 @@ async function waitForStatus(routes: Routes, scanId: string, status: string): Pr
 let dataDir: string
 let shop: TempWorkspace | undefined
 
-// `vitest.config.ts` hands the same `define` object to the root config and to each project, and Vitest
-// deletes the keys from the root copy while resolving it, so the projects get no defines at all. Provide
-// the build-time constant as a global so `src/host/index.ts` runs either way.
+// `__PLUGIN_VERSION__` is a build-time constant; vitest.config.ts defines it for every project.
 beforeAll(() => {
-  if ((globalThis as Record<string, unknown>).__PLUGIN_VERSION__ === undefined) {
-    vi.stubGlobal('__PLUGIN_VERSION__', PKG_VERSION)
-  }
-})
-
-afterAll(() => {
-  vi.unstubAllGlobals()
+  expect(__PLUGIN_VERSION__).toBe(PKG_VERSION)
 })
 
 beforeEach(async () => {

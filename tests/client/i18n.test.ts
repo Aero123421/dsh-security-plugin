@@ -99,7 +99,7 @@ describe('translator', () => {
 
   it('localizes known error codes and falls back to the server message', () => {
     const ja = getTranslator('ja')
-    expect(errorText(ja, { code: 'security/busy', message: 'busy' })).toContain('ほかのスキャン')
+    expect(errorText(ja, { code: 'security/busy', message: 'busy' })).toContain('すでに実行中か順番待ち')
     expect(errorText(ja, { code: 'x/unknown', message: 'Server says hi' })).toBe('Server says hi')
     expect(errorText(ja, { code: 'x/unknown', message: '' })).toBe(ja.t('error.generic'))
   })
