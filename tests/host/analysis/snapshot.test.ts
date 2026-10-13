@@ -194,15 +194,16 @@ describe('takeSnapshot', () => {
       'package-lock.json': lock,
       'api/poetry.lock': `[[package]]\nname = "x"\nversion = "1.0.0"\n# ${'x'.repeat(3000)}\n`,
       'requirements-dev.txt': `pytest==8.0.0\n# ${'x'.repeat(3000)}\n`,
-      // Same size, but not a file the dependency parser reads.
+      // Same size, but not a file the dependency parser reads. (Another directory, so the name does not collide
+      // with package-lock.json on case-insensitive file systems.)
       'data.json': lock,
-      'Package-Lock.json': lock,
+      'other/Package-Lock.json': lock,
     })
     const snapshot = await takeSnapshot(dir, { ...LIMITS, maxFileBytes: 1000 })
     expect([...snapshot.files.keys()]).toEqual(['api/poetry.lock', 'package-lock.json', 'requirements-dev.txt'])
     expect(snapshot.totalBytes).toBe([...snapshot.files.values()].reduce((sum, file) => sum + file.size, 0))
     expect(reasonOf(snapshot, 'data.json')).toBe('too-large')
-    expect(reasonOf(snapshot, 'Package-Lock.json')).toBe('too-large')
+    expect(reasonOf(snapshot, 'other/Package-Lock.json')).toBe('too-large')
   })
 
   it('still excludes lock files over the dependency-file ceiling and counts lock files toward maxTotalBytes', async () => {

@@ -1,5 +1,5 @@
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { WorkspaceEntity } from '../../../src/host/dsh/ports.ts'
 import { RpcError } from '../../../src/host/rpc/errors.ts'
@@ -178,11 +178,13 @@ describe('bootstrap, workspaces, and models', () => {
     const list = await invoke('listWorkspaces', {})
     const shopRow = list.find(w => w.id === WS_ID)
     const homeRow = list.find(w => w.id === 'ws-home')
-    expect(homeRow?.displayPath).toBe('~/projects/dshsec-test-home')
-    expect(homeRow?.displayPath.startsWith('~/')).toBe(true)
+    // Home-relative, keeping the platform's own separator (`~\projects\…` on Windows).
+    expect(homeRow?.displayPath).toBe(['~', 'projects', 'dshsec-test-home'].join(sep))
     expect(homeRow?.lastScan).toBeUndefined()
     expect(shopRow?.displayPath).toBe(
-      shop.root.startsWith(`${homedir()}/`) ? `~${shop.root.slice(homedir().length)}` : shop.root,
+      shop.root.toLowerCase().startsWith(`${homedir()}${sep}`.toLowerCase())
+        ? `~${shop.root.slice(homedir().length)}`
+        : shop.root,
     )
     expect(shopRow?.lastScan).toMatchObject({ id: completedScan, status: 'completed', mode: 'deep' })
   })
