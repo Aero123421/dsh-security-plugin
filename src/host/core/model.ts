@@ -33,6 +33,13 @@ export interface ScanError {
 export interface ThreatModelRecord extends ThreatModelView {
   /** Entry points the planner considers most important, with reasons. */
   readonly priorities: readonly { readonly target: string; readonly reason: string }[]
+  /** Planner hypotheses; each becomes a hunter task. */
+  readonly hypotheses: readonly {
+    readonly title: string
+    readonly category: FindingCategory
+    readonly targetPaths: readonly string[]
+    readonly rationale: string
+  }[]
 }
 
 export interface ScanRecord {
@@ -63,6 +70,10 @@ export interface ScanRecord {
   readonly analyzers?: readonly AnalyzerStatus[]
   readonly threatModel?: ThreatModelRecord
   readonly pluginVersion: string
+  /** Language models write human-readable fields in. */
+  readonly language?: 'en' | 'ja' | 'zh'
+  /** SHA-256 over the sorted (path, sha256) list of the snapshot taken when the scan started. */
+  readonly snapshotDigest?: string
 }
 
 export type TaskKind =

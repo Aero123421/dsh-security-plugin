@@ -49,6 +49,7 @@ export type ScanPatch = Partial<
     | 'analyzers'
     | 'threatModel'
     | 'models'
+    | 'snapshotDigest'
   >
 > & { readonly clearError?: boolean; readonly clearProgress?: boolean }
 

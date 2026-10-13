@@ -189,7 +189,10 @@ export const requestSchemas = {
   listModels: emptyRequestSchema,
   updateSettings: z.strictObject({ patch: settingsPatchSchema, expectedRevision: nonNegativeIntSchema }),
   estimateScan: workspaceModeSchema,
-  createScan: workspaceModeSchema,
+  createScan: workspaceModeSchema.extend({
+    language: z.enum(['en', 'ja', 'zh']).optional(),
+    aiReview: z.boolean().optional(),
+  }),
   listScans: z.strictObject({ workspaceId: idSchema.optional(), limit: listLimitSchema.optional() }),
   getScan: scanRefSchema,
   pauseScan: scanRefSchema,

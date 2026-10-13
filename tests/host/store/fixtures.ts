@@ -66,6 +66,14 @@ export function fullScanOf(overrides: Partial<ScanRecord> = {}): ScanRecord {
       actors: ['anonymous user', 'admin'],
       trustBoundaries: ['internet → api'],
       priorities: [{ target: 'src/routes/admin.ts', reason: 'privileged' }],
+      hypotheses: [
+        {
+          title: 'Admin route lacks auth',
+          category: 'authz',
+          targetPaths: ['src/routes/admin.ts'],
+          rationale: 'mounted separately',
+        },
+      ],
     },
     ...overrides,
   })

@@ -335,6 +335,9 @@ export interface FindingFilter {
 
 export type ReportFormat = 'markdown' | 'json' | 'sarif'
 
+/** Languages the Host can ask models to write in. */
+export type ReportLanguage = 'en' | 'ja' | 'zh'
+
 export interface ReportFile {
   readonly filename: string
   readonly mime: string
@@ -386,7 +389,17 @@ export interface RpcMethods {
   }
   estimateScan: { request: { readonly workspaceId: string; readonly mode: ScanMode }; response: ScanEstimate }
   createScan: {
-    request: { readonly workspaceId: string; readonly mode: ScanMode }
+    request: {
+      readonly workspaceId: string
+      readonly mode: ScanMode
+      /** Language for AI-written text (titles, explanations, fixes). Defaults to English. */
+      readonly language?: ReportLanguage
+      /**
+       * Run the AI review (default). `false` runs only the built-in analyzers:
+       * nothing is sent to a model, so no model or consent is needed.
+       */
+      readonly aiReview?: boolean
+    }
     response: { readonly scanId: string }
   }
   listScans: {

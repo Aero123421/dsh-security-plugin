@@ -1,0 +1,288 @@
+/**
+ * Deterministic task planning: turns the attack surface (endpoints), rule
+ * hits, sensitive files, and planner hypotheses into a ranked list of AI
+ * review tasks with stable keys, so re-planning after a resume yields the
+ * same tasks.
+ */
+
+import { createHash } from 'node:crypto'
+import {
+  type FindingCategory,
+  type ScanMode,
+  type Severity,
+  severityAtLeast,
+  severityRank,
+} from '../../shared/domain.ts'
+import type { Endpoint, Signal, Snapshot } from '../analysis/types.ts'
+import type { FindingRecord, TaskInput, TaskKind } from '../core/model.ts'
+import type { RoleName } from '../../shared/domain.ts'
+import { signalFingerprint } from './findings.ts'
+
+export interface PlannedTask {
+  readonly key: string
+  readonly kind: TaskKind
+  readonly role: RoleName
+  readonly title: string
+  readonly priority: number
+  readonly input: TaskInput
+}
+
+export interface Hypothesis {
+  readonly title: string
+  readonly category: FindingCategory
+  readonly targetPaths: readonly string[]
+  readonly rationale: string
+}
+
+export interface HuntPlanInput {
+  readonly mode: ScanMode
+  readonly snapshot: Snapshot
+  readonly endpoints: readonly Endpoint[]
+  readonly signals: readonly Signal[]
+  readonly hypotheses: readonly Hypothesis[]
+  readonly includeTests: boolean
+  readonly maxTasks: number
+}
+
+const ENDPOINTS_PER_TASK = 8
+const SIGNALS_PER_TASK = 12
+const MAX_SENSITIVE_FILE_TASKS = 6
+const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE', 'ANY'])
+const SENSITIVE_NAME =
+  /(?:^|[/_.-])(auth|authn|authz|login|logout|session|sessions|permission|permissions|policy|policies|guard|guards|acl|rbac|role|roles|middleware|tenant|tenants|account|accounts|admin|token|tokens|jwt|oauth|password|billing|payment|payments|invite|invites|upload|uploads)(?:[/_.-]|$)/i
+const SOURCE_LANGUAGES = new Set([
+  'javascript',
+  'typescript',
+  'python',
+  'go',
+  'java',
+  'kotlin',
+  'ruby',
+  'php',
+  'csharp',
+  'rust',
+])
+
+/** Hunt tasks for one scan, best first, cut at `maxTasks`. */
+export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTask[]; readonly overflow: number } {
+  const inScope = (path: string) => input.includeTests || input.snapshot.files.get(path)?.isTest !== true
+  const steering = input.signals.filter(
+    s => (s.kind === 'vulnerability' || s.kind === 'sink') && inScope(s.location.path),
+  )
+  const candidates: PlannedTask[] =
+    input.mode === 'quick'
+      ? planTriage(steering)
+      : [
+          ...planEndpoints(
+            input.endpoints.filter(e => inScope(endpointPath(e))),
+            steering,
+          ),
+          ...planSignals(steering, input.endpoints),
+          ...planHypotheses(input.hypotheses.filter(h => h.targetPaths.some(inScope))),
+        ]
+  if (input.mode !== 'quick') {
+    const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
+    candidates.push(...planSensitiveFiles(input.snapshot, targeted, inScope))
+  }
+  const ranked = candidates.sort((a, b) => b.priority - a.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+  return { tasks: ranked.slice(0, input.maxTasks), overflow: Math.max(0, ranked.length - input.maxTasks) }
+}
+
+/** Findings that deserve an independent review in this mode, most severe first. */
+export function planReviewTasks(
+  findings: readonly FindingRecord[],
+  mode: ScanMode,
+  threshold: Severity,
+  max: number,
+): PlannedTask[] {
+  if (mode === 'quick') return []
+  const effective: Severity = mode === 'research' ? 'low' : threshold
+  return findings
+    .filter(
+      f =>
+        f.verification === 'potential' &&
+        (f.source === 'ai' || f.source === 'sast' || f.source === 'external') &&
+        severityAtLeast(f.severity, effective),
+    )
+    .sort((a, b) => severityRank(a.severity) - severityRank(b.severity) || (a.title < b.title ? -1 : 1))
+    .slice(0, max)
+    .map(f => ({
+      key: `review:${f.id}`,
+      kind: 'review' as const,
+      role: 'skeptic' as const,
+      title: `Review: ${f.title}`,
+      priority: 100 - severityRank(f.severity) * 10,
+      input: {
+        targetPaths: f.location ? [f.location.path] : [],
+        findingId: f.id,
+        focus: [f.category],
+      },
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Task families
+// ---------------------------------------------------------------------------
+
+function planTriage(signals: readonly Signal[]): PlannedTask[] {
+  const relevant = signals.filter(s => s.kind === 'vulnerability' && severityAtLeast(s.severity, 'medium'))
+  return groupByPath(relevant, s => s.location.path).flatMap(([path, group]) =>
+    chunk(sortSignals(group), SIGNALS_PER_TASK).map((part, index) => ({
+      key: `triage:${path}#${index}`,
+      kind: 'triage-signals' as const,
+      role: 'hunter' as const,
+      title: `Verify ${part.length} rule hit${part.length === 1 ? '' : 's'} in ${path}`,
+      priority: 50 + weight(part),
+      input: {
+        targetPaths: [path],
+        signalFingerprints: part.map(signalFingerprint),
+        focus: categoriesOf(part),
+      },
+    })),
+  )
+}
+
+function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[]): PlannedTask[] {
+  return groupByPath(endpoints, endpointPath).flatMap(([path, group]) => {
+    const sorted = [...group].sort((a, b) => a.declaredAt.startLine - b.declaredAt.startLine)
+    const fileSignals = signals.filter(s => s.location.path === path)
+    return chunk(sorted, ENDPOINTS_PER_TASK).map((part, index) => {
+      const unguarded = part.filter(e => e.authHints.length === 0).length
+      const mutating = part.filter(e => MUTATING.has(e.method)).length
+      const params = part.reduce((n, e) => n + e.params.length, 0)
+      const handlerPaths = part.flatMap(e => (e.handler && e.handler.path !== path ? [e.handler.path] : []))
+      return {
+        key: `endpoints:${path}#${index}`,
+        kind: 'hunt-endpoints' as const,
+        role: 'hunter' as const,
+        title: `Review ${part.length} endpoint${part.length === 1 ? '' : 's'} in ${path}`,
+        priority: 50 + unguarded * 4 + mutating * 3 + Math.min(params, 6) * 2 + weight(fileSignals),
+        input: {
+          targetPaths: unique([path, ...handlerPaths]),
+          endpointIds: part.map(e => e.id),
+          ...(index === 0 && fileSignals.length > 0
+            ? { signalFingerprints: sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK).map(signalFingerprint) }
+            : {}),
+          focus: unique<FindingCategory>([
+            'authz',
+            'authn',
+            'injection',
+            'business-logic',
+            ...categoriesOf(fileSignals),
+          ]),
+        },
+      }
+    })
+  })
+}
+
+function planSignals(signals: readonly Signal[], endpoints: readonly Endpoint[]): PlannedTask[] {
+  const endpointFiles = new Set(endpoints.map(endpointPath))
+  const remaining = signals.filter(s => !endpointFiles.has(s.location.path))
+  return groupByPath(remaining, s => s.location.path).flatMap(([path, group]) =>
+    chunk(sortSignals(group), SIGNALS_PER_TASK).map((part, index) => ({
+      key: `signals:${path}#${index}`,
+      kind: 'hunt-signals' as const,
+      role: 'hunter' as const,
+      title: `Trace ${part.length} risky operation${part.length === 1 ? '' : 's'} in ${path}`,
+      priority: 40 + weight(part),
+      input: {
+        targetPaths: [path],
+        signalFingerprints: part.map(signalFingerprint),
+        focus: categoriesOf(part),
+      },
+    })),
+  )
+}
+
+function planHypotheses(hypotheses: readonly Hypothesis[]): PlannedTask[] {
+  return hypotheses.map((h, index) => ({
+    key: `hypothesis:${shortHash(`${h.title}\u0000${h.targetPaths.join('\u0000')}`)}`,
+    kind: 'hunt-hypothesis' as const,
+    role: 'hunter' as const,
+    title: h.title,
+    // Planner order expresses its own ranking.
+    priority: 70 - Math.min(index, 20),
+    input: {
+      targetPaths: unique(h.targetPaths).slice(0, 6),
+      focus: [h.category],
+      hypothesis: `${h.title}\n${h.rationale}`,
+    },
+  }))
+}
+
+function planSensitiveFiles(
+  snapshot: Snapshot,
+  targeted: ReadonlySet<string>,
+  inScope: (path: string) => boolean,
+): PlannedTask[] {
+  const files = [...snapshot.files.values()].filter(
+    f =>
+      SOURCE_LANGUAGES.has(f.language) &&
+      !f.isGenerated &&
+      inScope(f.path) &&
+      !targeted.has(f.path) &&
+      SENSITIVE_NAME.test(f.path),
+  )
+  return files
+    .sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1))
+    .slice(0, MAX_SENSITIVE_FILE_TASKS)
+    .map(f => ({
+      key: `file:${f.path}`,
+      kind: 'hunt-file' as const,
+      role: 'hunter' as const,
+      title: `Review security-sensitive logic in ${f.path}`,
+      priority: 45,
+      input: { targetPaths: [f.path], focus: ['authn', 'authz', 'business-logic', 'crypto'] as FindingCategory[] },
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+export function endpointPath(endpoint: Endpoint): string {
+  return endpoint.handler?.path ?? endpoint.declaredAt.path
+}
+
+function weight(signals: readonly Signal[]): number {
+  return signals.reduce((sum, s) => sum + (5 - severityRank(s.severity)) * (s.kind === 'vulnerability' ? 2 : 1), 0)
+}
+
+function sortSignals(signals: readonly Signal[]): Signal[] {
+  return [...signals].sort(
+    (a, b) =>
+      severityRank(a.severity) - severityRank(b.severity) ||
+      (a.kind === b.kind ? 0 : a.kind === 'vulnerability' ? -1 : 1) ||
+      a.location.startLine - b.location.startLine,
+  )
+}
+
+function categoriesOf(signals: readonly Signal[]): FindingCategory[] {
+  return unique(signals.map(s => s.category))
+}
+
+function groupByPath<T>(items: readonly T[], pathOf: (item: T) => string): [string, T[]][] {
+  const groups = new Map<string, T[]>()
+  for (const item of items) {
+    const path = pathOf(item)
+    const list = groups.get(path)
+    if (list) list.push(item)
+    else groups.set(path, [item])
+  }
+  return [...groups.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
+function unique<T>(items: readonly T[]): T[] {
+  return [...new Set(items)]
+}
+
+function shortHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 16)
+}

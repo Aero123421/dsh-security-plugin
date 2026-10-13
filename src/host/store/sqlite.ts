@@ -116,6 +116,7 @@ const SCAN_PATCH_KEYS: PatchKeys<ScanPatch> = {
   coverage: true,
   analyzers: true,
   threatModel: true,
+  snapshotDigest: true,
   models: true,
 }
 const TASK_PATCH_KEYS: PatchKeys<TaskPatch> = {

@@ -169,7 +169,7 @@ describe('controller new-scan consent flow', () => {
       patch: { privacy: { sendCodeToModel: true } },
       expectedRevision: 1,
     })
-    expect(api.callsOf('createScan')[0]).toEqual({ workspaceId: 'ws-1', mode: 'deep' })
+    expect(api.callsOf('createScan')[0]).toEqual({ workspaceId: 'ws-1', mode: 'deep', language: 'en' })
     expect(controller.store.getState().bootstrap.value?.settingsRevision).toBe(2)
   })
 

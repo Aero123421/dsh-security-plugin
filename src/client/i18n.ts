@@ -1378,12 +1378,30 @@ export type MessageParams = Readonly<Record<string, string | number>>
  * Pick the UI language: the plugin setting wins unless it is `auto`, in which
  * case DSH's active locale decides (`ja*` → ja, `zh*` → zh, otherwise en).
  */
-export function resolveLanguage(setting: UiLanguage | undefined, dshLocale: string | undefined): Language {
+export function resolveLanguage(
+  setting: UiLanguage | undefined,
+  dshLocale: string | undefined,
+  browserLanguages: readonly string[] = navigatorLanguages(),
+): Language {
   if (setting === 'en' || setting === 'ja' || setting === 'zh') return setting
   const active = (dshLocale ?? '').toLowerCase()
   if (active.startsWith('ja')) return 'ja'
   if (active.startsWith('zh')) return 'zh'
+  // DSH ships English and Chinese only, so a Japanese browser lands on English
+  // there; prefer the browser's own first choice between the languages we have.
+  for (const tag of browserLanguages) {
+    const lower = tag.toLowerCase()
+    if (lower.startsWith('ja')) return 'ja'
+    if (lower.startsWith('en') || lower.startsWith('zh')) break
+  }
   return 'en'
+}
+
+function navigatorLanguages(): readonly string[] {
+  const nav = (globalThis as { navigator?: { languages?: readonly string[]; language?: string } }).navigator
+  if (!nav) return []
+  if (Array.isArray(nav.languages) && nav.languages.length > 0) return nav.languages
+  return typeof nav.language === 'string' ? [nav.language] : []
 }
 
 export function interpolate(template: string, params?: MessageParams): string {

@@ -228,6 +228,8 @@ const SCAN_DATA: DataShape = {
     coverage: 'object',
     analyzers: 'array',
     threatModel: 'object',
+    language: 'string',
+    snapshotDigest: 'string',
   },
 }
 

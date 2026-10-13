@@ -456,7 +456,11 @@ export function createController(options: ControllerOptions): SecurityController
       const granted = await grantConsent()
       if (!granted.ok) return granted
     }
-    const result = await api.call('createScan', { workspaceId: input.workspaceId, mode: input.mode })
+    const result = await api.call('createScan', {
+      workspaceId: input.workspaceId,
+      mode: input.mode,
+      language: get().language,
+    })
     if (result.ok || result.error.code === 'security/busy') {
       estimateCache.clear()
       set(s => ({

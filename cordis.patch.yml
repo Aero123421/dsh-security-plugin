@@ -1,0 +1,22 @@
+# DSH Security bundle layer.
+#
+# Inserts one row. Its Host half (lib/index.js) runs the scanner and serves
+# the Security page's API on DSH's authenticated /api channel; its browser
+# half (lib/client.js, declared under `dsh.client` in package.json) adds the
+# Security entry to the sidebar and a Security section to Settings.
+#
+# Override operator limits in your profile's cordis.patch.yml, e.g.:
+#
+#   - id: dsh-security
+#     config:
+#       dataDir: !!js dshHomePath('security')
+#       maxParallelWorkers: 2
+#       allowRemoteHighRiskSettings: false
+#
+# A patch replaces the row's whole `config`, so restate `dataDir` when you
+# override other keys.
+- insert:
+    - id: dsh-security
+      name: dsh-security-plugin
+      config:
+        dataDir: !!js dshHomePath('security')

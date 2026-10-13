@@ -1,0 +1,8 @@
+{
+  "name": "dsh-security-scripted-llm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deterministic test model for DSH Security end-to-end tests (not published).",
+  "type": "module",
+  "main": "index.mjs"
+}
