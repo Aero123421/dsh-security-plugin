@@ -20,7 +20,8 @@ export const DETAIL_SECTIONS = ['problem', 'sure', 'evidence', 'fix', 'recheck']
 export function FindingDetailView(props: {
   readonly scan: ScanSummary
   readonly findingId: string
-  readonly focusOnOpen?: boolean
+  /** Truthy: focus the heading once loaded. A new value (or finding) focuses again. */
+  readonly focusOnOpen?: boolean | number
 }) {
   const controller = useController()
   const { scan, findingId } = props
@@ -34,8 +35,8 @@ export function FindingDetailView(props: {
   const detail = entry.value
   const ready = Boolean(detail)
   useEffect(() => {
-    if (ready && props.focusOnOpen) headingRef.current?.focus()
-  }, [ready, props.focusOnOpen])
+    if (ready && props.focusOnOpen && findingId) headingRef.current?.focus()
+  }, [ready, props.focusOnOpen, findingId])
 
   if (!detail && entry.status === 'error' && entry.error) {
     return <LoadError error={entry.error} onRetry={() => void controller.loadFinding(scan.id, findingId, true)} />

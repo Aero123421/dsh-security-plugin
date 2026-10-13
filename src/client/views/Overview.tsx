@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   AnalyzerStatus,
   Coverage,
@@ -9,7 +9,7 @@ import type {
   ScanSummary,
 } from '../../shared/contracts.ts'
 import { SCAN_PHASES, SEVERITIES, type Severity } from '../../shared/domain.ts'
-import { severityTone, StatusBadge } from '../components/Badge.tsx'
+import { severityTone } from '../components/Badge.tsx'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
@@ -22,7 +22,6 @@ import {
   formatCompact,
   formatDateTime,
   formatDuration,
-  formatMinutes,
   formatNumber,
   formatRelative,
   formatTime,
@@ -112,6 +111,8 @@ function ProgressCard(props: { readonly scan: ScanSummary }) {
         : tr.t('progress.running')
   const phase = summary.phase
   const phaseLabel = tr.lookup(`phase.${phase}`) ?? text(phase)
+  const aiOff = isBuiltinOnly(detail)
+  const notices = asArray(detail?.notices).filter(n => !(aiOff && n.key === 'ai-disabled'))
 
   return (
     <section className="dshsec-card dshsec-progress" aria-labelledby={`dshsec-progress-${scan.id}`}>
@@ -120,9 +121,11 @@ function ProgressCard(props: { readonly scan: ScanSummary }) {
           <h2 className="dshsec-h2" id={`dshsec-progress-${scan.id}`}>
             {heading}
           </h2>
-          <p className="dshsec-muted dshsec-card-sub">
-            <span>{tr.t(`mode.${summary.mode}`)}</span>
-            <StatusBadge status={status} />
+          <p className="dshsec-card-sub">
+            <span>{aiOff ? tr.t('newScan.builtin') : tr.t(`mode.${summary.mode}`)}</span>
+            {summary.startedAt ? (
+              <span>{tr.t('progress.startedAt', { time: formatHourMinute(summary.startedAt, tr.intlLocale) })}</span>
+            ) : null}
           </p>
         </div>
         <div className="dshsec-card-actions">
@@ -146,33 +149,41 @@ function ProgressCard(props: { readonly scan: ScanSummary }) {
         <LoadError error={detailEntry.error} onRetry={() => void controller.loadScanDetail(scan.id, true)} />
       ) : null}
 
-      <PhaseStepper detail={detail} current={phase} />
-
-      <div className="dshsec-live" aria-live="polite" aria-atomic="true">
-        <div className="dshsec-live-line">
-          <span>{tr.t('progress.phase', { phase: phaseLabel })}</span>
-          {detail?.progress ? (
-            <span className="dshsec-muted">
-              {tr.t('progress.count', {
-                done: formatNumber(detail.progress.done, tr.intlLocale),
-                total: formatNumber(detail.progress.total, tr.intlLocale),
-                unit: tr.lookup(`unit.${detail.progress.unit}`) ?? text(detail.progress.unit),
-              })}
-            </span>
-          ) : null}
+      <div className="dshsec-progress-grid">
+        <PhaseStepper detail={detail} current={phase} />
+        <div className="dshsec-progress-main">
+          <div className="dshsec-now">
+            <div className="dshsec-now-line" aria-live="polite" aria-atomic="true">
+              <span className="dshsec-now-phase">
+                {status === 'running'
+                  ? tr.t('progress.phase', { phase: phaseLabel })
+                  : status === 'paused'
+                    ? tr.t('progress.pausedAt', { phase: phaseLabel })
+                    : tr.t('progress.waiting')}
+              </span>
+              {detail?.progress && status === 'running' ? (
+                <span className="dshsec-now-count">
+                  {tr.t('progress.count', {
+                    done: formatNumber(detail.progress.done, tr.intlLocale),
+                    total: formatNumber(detail.progress.total, tr.intlLocale),
+                    unit: tr.lookup(`unit.${detail.progress.unit}`) ?? text(detail.progress.unit),
+                  })}
+                </span>
+              ) : null}
+            </div>
+            <Meter
+              value={detail?.progress ? ratio(detail.progress.done, detail.progress.total) : 0}
+              label={tr.t('progress.phase', { phase: phaseLabel })}
+              strong
+              {...(detail?.progress ? {} : { indeterminate: status === 'running' })}
+            />
+          </div>
+          {detail ? <UsageBlock detail={detail} aiOff={aiOff} /> : null}
+          {detail && !aiOff ? <WorkersTable detail={detail} /> : null}
         </div>
       </div>
-      {detail?.progress ? (
-        <Meter
-          value={ratio(detail.progress.done, detail.progress.total)}
-          label={tr.t('progress.phase', { phase: phaseLabel })}
-          strong
-        />
-      ) : null}
 
-      {detail ? <UsageBlock detail={detail} /> : null}
-      {detail ? <WorkersTable detail={detail} /> : null}
-      {detail && asArray(detail.notices).length ? <Notices notices={detail.notices} /> : null}
+      {notices.length ? <Notices notices={notices} /> : null}
       <ActivityFeed events={events} />
 
       {confirming ? (
@@ -211,6 +222,15 @@ function PhaseStepper(props: { readonly detail: ScanDetail | undefined; readonly
         >
           <span className="dshsec-step-dot" aria-hidden="true" />
           <span className="dshsec-step-label">{tr.lookup(`phase.${item.phase}`) ?? text(item.phase)}</span>
+          <span className="dshsec-step-tag">
+            {item.state === 'skipped' ? (
+              tr.t('progress.skipped')
+            ) : item.state === 'done' ? (
+              <span className="dshsec-visually-hidden">{tr.t('progress.stepDone')}</span>
+            ) : item.state === 'running' ? (
+              <span className="dshsec-visually-hidden">{tr.t('progress.stepRunning')}</span>
+            ) : null}
+          </span>
         </li>
       ))}
     </ol>
@@ -222,60 +242,68 @@ export function Meter(props: {
   readonly label: string
   readonly strong?: boolean
   readonly tone?: 'warn'
+  readonly indeterminate?: boolean
 }) {
   const pct = Math.round(props.value * 100)
   return (
     <div
-      className={`dshsec-meter ${props.strong ? 'dshsec-meter--strong' : ''} ${props.tone === 'warn' ? 'dshsec-meter--warn' : ''}`}
+      className={`dshsec-meter${props.strong ? ' dshsec-meter--strong' : ''}${props.tone === 'warn' ? ' dshsec-meter--warn' : ''}`}
       role="progressbar"
       aria-label={props.label}
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={pct}
+      aria-valuenow={props.indeterminate ? undefined : pct}
     >
       <span style={{ width: `${pct}%` }} />
     </div>
   )
 }
 
-function UsageBlock(props: { readonly detail: ScanDetail }) {
+function UsageBlock(props: { readonly detail: ScanDetail; readonly aiOff: boolean }) {
   const tr = useT()
   const locale = tr.intlLocale
   const { usage, budget } = props.detail
   const tokens = (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)
-  const minutes = formatMinutes(usage?.elapsedMs)
+  const elapsedMs = isFiniteNumber(usage?.elapsedMs) ? usage.elapsedMs : 0
+  const maxMs = isFiniteNumber(budget?.maxMinutes) ? budget.maxMinutes * 60_000 : undefined
   const rows = [
+    ...(props.aiOff
+      ? []
+      : [
+          {
+            key: 'tokens',
+            label: tr.t('usage.tokens'),
+            used: formatCompact(tokens, locale),
+            max: formatCompact(budget?.maxTokens, locale),
+            ratio: ratio(tokens, budget?.maxTokens),
+          },
+          {
+            key: 'calls',
+            label: tr.t('usage.calls'),
+            used: formatNumber(usage?.llmCalls, locale),
+            max: formatNumber(budget?.maxLlmCalls, locale),
+            ratio: ratio(usage?.llmCalls, budget?.maxLlmCalls),
+          },
+        ]),
     {
-      key: 'tokens',
-      label: tr.t('usage.tokens'),
-      used: formatCompact(tokens, locale),
-      max: formatCompact(budget?.maxTokens, locale),
-      ratio: ratio(tokens, budget?.maxTokens),
-    },
-    {
-      key: 'calls',
-      label: tr.t('usage.calls'),
-      used: formatNumber(usage?.llmCalls, locale),
-      max: formatNumber(budget?.maxLlmCalls, locale),
-      ratio: ratio(usage?.llmCalls, budget?.maxLlmCalls),
-    },
-    {
-      key: 'minutes',
-      label: tr.t('usage.minutes'),
-      used: formatNumber(minutes, locale),
-      max: formatNumber(budget?.maxMinutes, locale),
-      ratio: ratio(minutes, budget?.maxMinutes),
+      key: 'time',
+      label: tr.t('usage.time'),
+      used: formatClock(elapsedMs),
+      max: tr.t('usage.minutesLimit', { minutes: formatNumber(budget?.maxMinutes, locale) }),
+      ratio: ratio(elapsedMs, maxMs),
     },
   ]
   return (
-    <section className="dshsec-subsection">
-      <h3 className="dshsec-h3">{tr.t('progress.usage')}</h3>
+    <section className="dshsec-subsection" aria-label={tr.t('progress.usage')}>
       <dl className="dshsec-usage">
         {rows.map(row => (
           <div key={row.key} className="dshsec-usage-row">
             <dt>{row.label}</dt>
             <dd>
-              <span className="dshsec-num">{tr.t('usage.ofBudget', { used: row.used, max: row.max })}</span>
+              <span className="dshsec-usage-value dshsec-num">
+                {row.used}
+                <span className="dshsec-usage-max"> / {row.max}</span>
+              </span>
               <Meter value={row.ratio} label={row.label} {...(row.ratio >= 0.9 ? { tone: 'warn' as const } : {})} />
             </dd>
           </div>
@@ -285,42 +313,77 @@ function UsageBlock(props: { readonly detail: ScanDetail }) {
   )
 }
 
+/** `m:ss` or `h:mm:ss` elapsed clock. */
+function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = String(total % 60).padStart(2, '0')
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`
+}
+
+/**
+ * Working reviewers first, then the most recently finished, in a fixed number
+ * of rows so the card keeps its height while workers come and go.
+ */
+const WORKER_ROWS = 5
+
 function WorkersTable(props: { readonly detail: ScanDetail }) {
   const tr = useT()
-  const workers = asArray(props.detail.workers)
+  const all = asArray(props.detail.workers)
+  const active = all.filter(w => w.state === 'running')
+  const finished = all.filter(w => w.state !== 'running')
+  const shown = [...active, ...finished].slice(0, Math.max(WORKER_ROWS, active.length))
+  const hidden = all.length - shown.length
   return (
-    <section className="dshsec-subsection">
-      <h3 className="dshsec-h3">{tr.t('workers.title')}</h3>
-      {workers.length ? (
+    <section className="dshsec-subsection dshsec-workers">
+      <div className="dshsec-subhead">
+        <h3 className="dshsec-h3">{tr.t('workers.title')}</h3>
+        {all.length ? (
+          <span className="dshsec-hint" title={hidden > 0 ? tr.t('workers.more', { count: hidden }) : undefined}>
+            {tr.t('workers.summary', { active: active.length, done: finished.length })}
+          </span>
+        ) : null}
+      </div>
+      {shown.length ? (
         <div className="dshsec-table-wrap">
           <table className="dshsec-table">
             <thead>
               <tr>
-                <th scope="col">{tr.t('workers.role')}</th>
-                <th scope="col">{tr.t('workers.task')}</th>
-                <th scope="col">{tr.t('workers.model')}</th>
-                <th scope="col">{tr.t('workers.state')}</th>
-                <th scope="col" className="dshsec-num">
-                  {tr.t('workers.turns')}
+                <th scope="col" className="dshsec-w-role">
+                  {tr.t('workers.role')}
                 </th>
-                <th scope="col" className="dshsec-num">
-                  {tr.t('workers.toolCalls')}
+                <th scope="col">{tr.t('workers.task')}</th>
+                <th scope="col" className="dshsec-col-opt dshsec-w-model">
+                  {tr.t('workers.model')}
+                </th>
+                <th scope="col" className="dshsec-w-state">
+                  {tr.t('workers.state')}
+                </th>
+                <th scope="col" className="dshsec-num dshsec-col-opt dshsec-w-turns">
+                  {tr.t('workers.turns')}
                 </th>
               </tr>
             </thead>
             <tbody>
-              {workers.map(w => (
+              {shown.map(w => (
                 <tr key={w.id}>
                   <td>{tr.lookup(`role.${w.role}`) ?? text(w.role)}</td>
-                  <td className="dshsec-cell-wrap">{text(w.title)}</td>
-                  <td className="dshsec-cell-mono">{text(w.model)}</td>
+                  <td className="dshsec-cell-wrap" title={typeof w.title === 'string' ? w.title : undefined}>
+                    {text(w.title)}
+                  </td>
+                  <td
+                    className="dshsec-cell-mono dshsec-col-opt"
+                    title={typeof w.model === 'string' ? w.model : undefined}
+                  >
+                    {text(w.model)}
+                  </td>
                   <td>
                     <span className={`dshsec-wstate dshsec-wstate--${w.state}`}>
                       {tr.lookup(`workerState.${w.state}`) ?? text(w.state)}
                     </span>
                   </td>
-                  <td className="dshsec-num">{formatNumber(w.turns, tr.intlLocale)}</td>
-                  <td className="dshsec-num">{formatNumber(w.toolCalls, tr.intlLocale)}</td>
+                  <td className="dshsec-num dshsec-col-opt">{formatNumber(w.turns, tr.intlLocale)}</td>
                 </tr>
               ))}
             </tbody>
@@ -336,43 +399,42 @@ function WorkersTable(props: { readonly detail: ScanDetail }) {
 function Notices(props: { readonly notices: readonly ScanNotice[] }) {
   const tr = useT()
   return (
-    <section className="dshsec-subsection">
-      <h3 className="dshsec-h3">{tr.t('notices.title')}</h3>
-      <div className="dshsec-stack-sm">
-        {props.notices.map((notice, i) => (
-          <Callout
-            // biome-ignore lint/suspicious/noArrayIndexKey: notices are append-only
-            key={`${notice.key}-${i}`}
-            tone={notice.level === 'error' ? 'error' : notice.level === 'warn' ? 'warn' : 'info'}
-            live={false}
-          >
-            {noticeText(tr, notice)}
-          </Callout>
-        ))}
-      </div>
-    </section>
+    <div className="dshsec-stack-sm">
+      {props.notices.map((notice, i) => (
+        <Callout
+          // biome-ignore lint/suspicious/noArrayIndexKey: notices are append-only
+          key={`${notice.key}-${i}`}
+          tone={notice.level === 'error' ? 'error' : notice.level === 'warn' ? 'warn' : 'info'}
+          live={false}
+        >
+          {noticeText(tr, notice)}
+        </Callout>
+      ))}
+    </div>
   )
 }
 
 function ActivityFeed(props: { readonly events: readonly ScanEvent[] }) {
   const tr = useT()
-  const [el, setEl] = useState<HTMLOListElement | null>(null)
+  const ref = useRef<HTMLOListElement>(null)
+  /** Whether the reader is at the bottom (then new lines keep it there); measured before each update. */
+  const pinned = useRef(true)
   const last = props.events[props.events.length - 1]?.seq
-  // Keep the newest entry in view (newest at bottom) unless the user scrolled up.
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const el = ref.current
     if (!el || last === undefined) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48
-    if (nearBottom || el.dataset.init !== '1') {
-      el.scrollTop = el.scrollHeight
-      el.dataset.init = '1'
-    }
-  }, [el, last])
+    if (pinned.current) el.scrollTop = el.scrollHeight
+  }, [last])
+  const onScroll = () => {
+    const el = ref.current
+    if (el) pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+  }
   return (
     <section className="dshsec-subsection">
       <h3 className="dshsec-h3">{tr.t('activity.title')}</h3>
       {props.events.length ? (
         // biome-ignore lint/a11y/noNoninteractiveTabindex: scrollable log must be keyboard-reachable
-        <ol className="dshsec-feed" ref={setEl} tabIndex={0} aria-label={tr.t('activity.title')}>
+        <ol className="dshsec-feed" ref={ref} tabIndex={0} aria-label={tr.t('activity.title')} onScroll={onScroll}>
           {props.events.map(event => (
             <li key={event.seq} className={`dshsec-feed-item dshsec-feed-item--${event.level}`}>
               <time className="dshsec-feed-time" dateTime={event.at}>
@@ -475,6 +537,26 @@ function ProblemCard(props: { readonly scan: ScanSummary }) {
 // Completed
 // ---------------------------------------------------------------------------
 
+/** A scan that ran only the built-in analyzers (the Host notes it, and skips the AI phases). */
+function isBuiltinOnly(detail: ScanDetail | undefined): boolean {
+  if (!detail) return false
+  if (asArray(detail.notices).some(n => n.key === 'ai-disabled')) return true
+  const phases = asArray(detail.phases)
+  return phases.length > 0 && phases.filter(p => AI_PHASES.has(p.phase)).every(p => p.state === 'skipped')
+}
+
+const AI_PHASES: ReadonlySet<string> = new Set(['threat-model', 'hunt', 'review', 'chain'])
+
+function formatHourMinute(value: string, locale: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return DASH
+  try {
+    return new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' }).format(date)
+  } catch {
+    return date.toISOString().slice(11, 16)
+  }
+}
+
 function ResultsSummary(props: { readonly scan: ScanSummary; readonly heading: string }) {
   const controller = useController()
   const tr = useT()
@@ -511,7 +593,7 @@ function ResultsSummary(props: { readonly scan: ScanSummary; readonly heading: s
             {props.heading}
           </h2>
           <p className="dshsec-muted dshsec-card-sub">
-            <span>{tr.t(`mode.${scan.mode}`)}</span>
+            <span>{isBuiltinOnly(detail) ? tr.t('newScan.builtin') : tr.t(`mode.${scan.mode}`)}</span>
             <time
               dateTime={scan.finishedAt ?? scan.createdAt}
               title={formatDateTime(scan.finishedAt ?? scan.createdAt, tr.intlLocale)}

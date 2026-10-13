@@ -1,7 +1,7 @@
 /** Model-route helpers shared by the New Scan dialog and Settings. */
 
 import type { ProviderOption } from '../shared/contracts.ts'
-import { ROLE_NAMES, type RoleName } from '../shared/domain.ts'
+import { ROLE_NAMES, type RoleName, type ScanMode } from '../shared/domain.ts'
 import type { ModelRef, RoleModels } from '../shared/settings.ts'
 
 export interface ResolvedRole {
@@ -24,6 +24,18 @@ export function resolveRoleModels(models: RoleModels | undefined): ResolvedRole[
     const own = validRef(models?.[role])
     return { role, ref: own ?? fallback, inherited: !own && Boolean(fallback) }
   })
+}
+
+/** Roles a scan of this depth actually runs (mirrors the Host pipeline). */
+export function rolesForMode(mode: ScanMode): readonly RoleName[] {
+  switch (mode) {
+    case 'quick':
+      return ['hunter']
+    case 'deep':
+      return ['planner', 'hunter', 'skeptic']
+    case 'research':
+      return ROLE_NAMES
+  }
 }
 
 export function hunterModel(models: RoleModels | undefined): ModelRef | undefined {

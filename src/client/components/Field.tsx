@@ -6,6 +6,11 @@ export interface SelectOption<V extends string> {
   readonly disabled?: boolean
 }
 
+export interface SelectGroup<V extends string> {
+  readonly label: string
+  readonly options: readonly SelectOption<V>[]
+}
+
 /** Label + control + hint + inline error, wired with ids for assistive tech. */
 export function Field(props: {
   readonly label: ReactNode
@@ -42,6 +47,8 @@ export function Select<V extends string>(props: {
   readonly id?: string
   readonly value: V
   readonly options: readonly SelectOption<V>[]
+  /** Extra options rendered as `<optgroup>`s after `options`. */
+  readonly groups?: readonly SelectGroup<V>[]
   readonly onChange: (value: V) => void
   readonly disabled?: boolean
   readonly describedBy?: string | undefined
@@ -64,6 +71,15 @@ export function Select<V extends string>(props: {
           <option key={option.value} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
+        ))}
+        {props.groups?.map(group => (
+          <optgroup key={group.label} label={group.label}>
+            {group.options.map(option => (
+              <option key={option.value} value={option.value} disabled={option.disabled}>
+                {option.label}
+              </option>
+            ))}
+          </optgroup>
         ))}
       </select>
     </span>

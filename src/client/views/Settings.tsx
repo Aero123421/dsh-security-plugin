@@ -1,16 +1,23 @@
-import { type ReactNode, useEffect, useId, useMemo, useState } from 'react'
-import type { AnalyzerStatus, OperatorLimits, ProviderOption, ToolkitEntry } from '../../shared/contracts.ts'
+import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
+import type {
+  AnalyzerStatus,
+  ModelOption,
+  OperatorLimits,
+  ProviderOption,
+  ToolkitEntry,
+} from '../../shared/contracts.ts'
 import { SCAN_MODES, SEVERITIES } from '../../shared/domain.ts'
 import { Badge } from '../components/Badge.tsx'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
 import { ErrorBoundary } from '../components/ErrorBoundary.tsx'
-import { Field, Select, type SelectOption, Toggle } from '../components/Field.tsx'
+import { Field, Select, type SelectGroup, type SelectOption, Toggle } from '../components/Field.tsx'
 import { ControllerProvider, useController, useSecurity, useT } from '../context.tsx'
 import type { SecurityController } from '../controller.ts'
 import { formatNumber, text } from '../format.ts'
 import { errorText, LANGUAGE_NAMES, type Translator } from '../i18n.ts'
 import { IconExternal } from '../icons.tsx'
+import { modelName } from '../models.ts'
 import {
   BUDGET_FIELDS,
   budgetRange,
@@ -18,6 +25,7 @@ import {
   isDraftDirty,
   isHighRiskLocked,
   MODEL_SLOTS,
+  modelRefOf,
   type ModelDraft,
   type ModelSlot,
   parallelRange,
@@ -95,12 +103,18 @@ function SettingsForm() {
     return e ? tr.t(e.key, e.params) : undefined
   }
   const update = controller.updateDraft
+  const formRef = useRef<HTMLFormElement>(null)
 
   return (
     <form
+      ref={formRef}
       className="dshsec-settings"
       onSubmit={event => {
         event.preventDefault()
+        if (Object.keys(errors).length) {
+          // Take the user to the first field that needs fixing.
+          formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus()
+        }
         void controller.saveSettings()
       }}
       noValidate
@@ -249,7 +263,11 @@ function SettingsForm() {
 
       {dirty ? (
         <section className="dshsec-savebar" aria-label={tr.t('settings.unsaved')}>
-          <span className="dshsec-savebar-text">
+          <span
+            className={`dshsec-savebar-text${result?.tone === 'error' ? ' is-error' : ''}`}
+            role="status"
+            aria-live="polite"
+          >
             {result ? ('key' in result ? tr.t(result.key) : errorText(tr, result.error)) : tr.t('settings.unsaved')}
           </span>
           <div className="dshsec-savebar-actions">
@@ -353,6 +371,7 @@ function ModelsSection(props: {
   const tr = useT()
   const models = useSecurity(s => s.models)
   const providers = models.value ?? NO_PROVIDERS
+  const fallback = modelRefOf(props.draft.models.default)
 
   return (
     <SettingsGroup title={tr.t('settings.models')} description={tr.t('settings.modelsDesc')}>
@@ -380,6 +399,7 @@ function ModelsSection(props: {
             slot={slot}
             value={props.draft.models[slot]}
             providers={providers}
+            fallbackLabel={fallback ? modelName(providers, fallback) : undefined}
             errorFor={props.errorFor}
           />
         ))}
@@ -388,109 +408,141 @@ function ModelsSection(props: {
   )
 }
 
+/** Option value for "inherit / not set" in the combined route select. */
+const INHERIT = ''
+const ROUTE_SEP = '\u0000'
+
+function routeKey(provider: string, model: string): string {
+  return provider ? `${provider}${ROUTE_SEP}${model}` : INHERIT
+}
+
+/**
+ * One role: name and a one-line explanation on the left, a single model
+ * select on the right (models grouped by provider). Unset roles say which
+ * model they will use instead. Effort and output cap live under "Advanced".
+ */
 function ModelRoute(props: {
   readonly slot: ModelSlot
   readonly value: ModelDraft
   readonly providers: readonly ProviderOption[]
+  readonly fallbackLabel: string | undefined
   readonly errorFor: (path: string) => string | undefined
 }) {
   const controller = useController()
   const tr = useT()
   const { slot, value, providers } = props
+  const selectId = useId()
+  const descId = `${selectId}-desc`
   const provider = providers.find(p => p.id === value.provider)
-  const model = provider?.models?.find(m => m.id === value.model)
+  const model = asModels(provider).find(m => m.id === value.model)
   const efforts = Array.isArray(model?.reasoningEfforts) ? model.reasoningEfforts : []
   const set = (next: ModelDraft) => controller.updateDraft(d => ({ ...d, models: { ...d.models, [slot]: next } }))
+  const isDefault = slot === 'default'
+  const inherited = !isDefault && !value.provider
+  const modelError = props.errorFor(`models.${slot}.model`)
+  const outputError = props.errorFor(`models.${slot}.maxOutputTokens`)
 
-  const providerOptions: SelectOption<string>[] = [
-    { value: '', label: slot === 'default' ? tr.t('common.notSet') : tr.t('settings.useDefault') },
-    ...providers.map(p => ({ value: p.id, label: p.name || p.id })),
-  ]
-  if (value.provider && !provider) {
-    providerOptions.push({ value: value.provider, label: tr.t('settings.unavailableModel', { name: value.provider }) })
+  const groups: SelectGroup<string>[] = providers
+    .filter(p => asModels(p).length)
+    .map(p => ({
+      label: p.name || p.id,
+      options: asModels(p).map(m => ({ value: routeKey(p.id, m.id), label: m.name || m.id })),
+    }))
+  const current = routeKey(value.provider, value.model)
+  const known = groups.some(g => g.options.some(o => o.value === current))
+  if (value.provider && !known) {
+    const name = value.model ? `${provider?.name || value.provider} · ${value.model}` : provider?.name || value.provider
+    groups.push({
+      label: tr.t('settings.unavailableGroup'),
+      options: [{ value: current, label: tr.t('settings.unavailableModel', { name }) }],
+    })
   }
-  const modelOptions: SelectOption<string>[] = [
-    { value: '', label: tr.t('settings.chooseModel'), disabled: true },
-    ...asModels(provider).map(m => ({ value: m.id, label: m.name || m.id })),
-  ]
-  if (value.model && !model) {
-    modelOptions.push({ value: value.model, label: tr.t('settings.unavailableModel', { name: value.model }) })
-  }
+  const first: SelectOption<string> = isDefault
+    ? { value: INHERIT, label: tr.t('settings.noDefault') }
+    : {
+        value: INHERIT,
+        label: props.fallbackLabel
+          ? tr.t('settings.usesDefaultNamed', { model: props.fallbackLabel })
+          : tr.t('settings.usesDefault'),
+      }
 
   return (
-    <fieldset className={`dshsec-role ${slot === 'default' ? 'dshsec-role--default' : ''}`}>
-      <legend className="dshsec-role-name">{tr.t(`role.${slot}`)}</legend>
-      <p className="dshsec-hint">{tr.t(`role.${slot}.desc`)}</p>
-      <div className="dshsec-role-grid">
-        <Field label={tr.t('settings.provider')}>
-          {({ id }) => (
-            <Select
-              id={id}
-              value={value.provider}
-              options={providerOptions}
-              onChange={providerId => {
-                const nextProvider = providers.find(p => p.id === providerId)
-                const first = asModels(nextProvider)[0]
-                set({
-                  provider: providerId,
-                  model: providerId ? (first?.id ?? '') : '',
-                  reasoningEffort: '',
-                  maxOutputTokens: providerId ? value.maxOutputTokens : '',
-                })
-              }}
-            />
-          )}
-        </Field>
-        {value.provider ? (
-          <Field label={tr.t('settings.model')} {...optionalError(props.errorFor(`models.${slot}.model`))}>
-            {({ id, describedBy, invalid }) => (
-              <Select
-                id={id}
-                value={value.model}
-                options={modelOptions}
-                describedBy={describedBy}
-                invalid={invalid}
-                onChange={modelId => set({ ...value, model: modelId, reasoningEffort: '' })}
-              />
-            )}
-          </Field>
-        ) : null}
-        {value.provider && efforts.length ? (
-          <Field label={tr.t('settings.effort')}>
-            {({ id }) => (
-              <Select
-                id={id}
-                value={value.reasoningEffort}
-                options={[
-                  { value: '', label: tr.t('settings.effortDefault') },
-                  ...efforts.map(e => ({ value: e.id, label: e.name || e.id })),
-                ]}
-                onChange={reasoningEffort => set({ ...value, reasoningEffort })}
-              />
-            )}
-          </Field>
+    <div
+      className={`dshsec-role${isDefault ? ' dshsec-role--default' : ''}${inherited ? ' is-inherited' : ''}`}
+      data-slot={slot}
+    >
+      <div className="dshsec-role-text">
+        <label className="dshsec-label" htmlFor={selectId}>
+          {tr.t(`role.${slot}`)}
+        </label>
+        <p className="dshsec-hint" id={descId}>
+          {tr.t(`role.${slot}.desc`)}
+        </p>
+      </div>
+      <div className="dshsec-role-control">
+        <Select
+          id={selectId}
+          value={current}
+          options={[first]}
+          groups={groups}
+          describedBy={modelError ? `${descId} ${selectId}-error` : descId}
+          invalid={Boolean(modelError)}
+          onChange={key => {
+            if (key === INHERIT) {
+              set({ provider: '', model: '', reasoningEffort: '', maxOutputTokens: '' })
+              return
+            }
+            const [providerId = '', modelId = ''] = key.split(ROUTE_SEP)
+            set({
+              provider: providerId,
+              model: modelId,
+              reasoningEffort: modelId === value.model && providerId === value.provider ? value.reasoningEffort : '',
+              maxOutputTokens: value.maxOutputTokens,
+            })
+          }}
+        />
+        {modelError ? (
+          <div className="dshsec-field-error" id={`${selectId}-error`}>
+            {modelError}
+          </div>
         ) : null}
         {value.provider ? (
-          <NumberField
-            label={tr.t('settings.maxOutput')}
-            hint={tr.t('settings.maxOutputHint')}
-            value={value.maxOutputTokens}
-            range={{ min: 1, max: 1_000_000 }}
-            error={props.errorFor(`models.${slot}.maxOutputTokens`)}
-            onChange={maxOutputTokens => set({ ...value, maxOutputTokens })}
-          />
+          <details className="dshsec-advanced" open={Boolean(outputError) || undefined}>
+            <summary>{tr.t('settings.advanced')}</summary>
+            <div className="dshsec-advanced-body">
+              {efforts.length ? (
+                <Field label={tr.t('settings.effort')}>
+                  {({ id }) => (
+                    <Select
+                      id={id}
+                      value={value.reasoningEffort}
+                      options={[
+                        { value: '', label: tr.t('settings.effortDefault') },
+                        ...efforts.map(e => ({ value: e.id, label: e.name || e.id })),
+                      ]}
+                      onChange={reasoningEffort => set({ ...value, reasoningEffort })}
+                    />
+                  )}
+                </Field>
+              ) : null}
+              <NumberField
+                label={tr.t('settings.maxOutput')}
+                hint={tr.t('settings.maxOutputHint')}
+                value={value.maxOutputTokens}
+                range={{ min: 1, max: 1_000_000 }}
+                error={outputError}
+                onChange={maxOutputTokens => set({ ...value, maxOutputTokens })}
+              />
+            </div>
+          </details>
         ) : null}
       </div>
-    </fieldset>
+    </div>
   )
 }
 
-function asModels(provider: ProviderOption | undefined) {
+function asModels(provider: ProviderOption | undefined): readonly ModelOption[] {
   return Array.isArray(provider?.models) ? provider.models : []
-}
-
-function optionalError(error: string | undefined): { error?: string } {
-  return error ? { error } : {}
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +588,12 @@ function BudgetsSection(props: {
 // Toolkit
 // ---------------------------------------------------------------------------
 
+/** Known Host reasons get a localized sentence; anything else is shown as sent. */
+function analyzerReason(tr: Translator, status: AnalyzerStatus): string {
+  if (status.id === 'osv' && /turned off|disabled/i.test(status.reason ?? '')) return tr.t('analyzer.osvOff')
+  return status.reason ?? ''
+}
+
 function sourceLabel(tr: Translator, status: AnalyzerStatus | undefined): string {
   return status ? (tr.lookup(`source.${status.source}`) ?? text(status.source)) : '—'
 }
@@ -563,7 +621,7 @@ function ToolkitSection() {
                 <span className="dshsec-muted">
                   {a.available ? tr.t('analyzer.available') : tr.t('analyzer.unavailable')}
                   {a.version ? ` · ${a.version}` : ''}
-                  {!a.available && a.reason ? ` — ${a.reason}` : ''}
+                  {!a.available && a.reason ? ` — ${analyzerReason(tr, a)}` : ''}
                 </span>
               </li>
             ))}
@@ -638,7 +696,7 @@ function ToolRow(props: { readonly tool: ToolkitEntry }) {
       </div>
       <div className="dshsec-tool-meta dshsec-muted">
         <span>{tr.t('toolkit.license', { license: text(tool.license) })}</span>
-        <span>{sourceLabel(tr, status)}</span>
+        {status && status.source !== 'disabled' ? <span>{sourceLabel(tr, status)}</span> : null}
         {version ? <span>{tr.t('toolkit.version', { version })}</span> : null}
       </div>
       {!available && status?.reason ? <p className="dshsec-hint">{status.reason}</p> : null}

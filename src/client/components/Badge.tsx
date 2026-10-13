@@ -4,9 +4,17 @@ import { useT } from '../context.tsx'
 
 export type BadgeTone = 'neutral' | 'quiet' | 'brand' | 'success' | 'warn' | 'error' | 'error-strong'
 
-export function Badge(props: { readonly tone?: BadgeTone; readonly title?: string; readonly children: ReactNode }) {
+export function Badge(props: {
+  readonly tone?: BadgeTone
+  readonly title?: string
+  readonly className?: string
+  readonly children: ReactNode
+}) {
   return (
-    <span className={`dshsec-badge dshsec-badge--${props.tone ?? 'neutral'}`} title={props.title}>
+    <span
+      className={`dshsec-badge dshsec-badge--${props.tone ?? 'neutral'}${props.className ? ` ${props.className}` : ''}`}
+      title={props.title}
+    >
       {props.children}
     </span>
   )
@@ -27,7 +35,11 @@ export function severityTone(severity: Severity): BadgeTone {
 export function SeverityBadge(props: { readonly severity: Severity }) {
   const tr = useT()
   const label = tr.lookup(`severity.${props.severity}`) ?? String(props.severity ?? '—')
-  return <Badge tone={severityTone(props.severity)}>{label}</Badge>
+  return (
+    <Badge tone={severityTone(props.severity)} className="dshsec-sev">
+      {label}
+    </Badge>
+  )
 }
 
 /** Number of filled bars in the certainty glyph. */

@@ -1,6 +1,6 @@
 /** Small view pieces shared by several tabs. */
 
-import { type ReactNode, useState } from 'react'
+import { type KeyboardEvent, type ReactNode, useState } from 'react'
 import type { FindingSummary, ReportFormat, ScanSummary } from '../../shared/contracts.ts'
 import type { ScanMode } from '../../shared/domain.ts'
 import { Badge, SeverityBadge, TriageBadge, VerificationBadge } from '../components/Badge.tsx'
@@ -9,7 +9,7 @@ import { Callout } from '../components/Callout.tsx'
 import { MenuButton } from '../components/Menu.tsx'
 import { formatLocation } from '../components/Text.tsx'
 import { useController, useSecurity, useT } from '../context.tsx'
-import { formatDateTime } from '../format.ts'
+import { DASH, formatDateTime } from '../format.ts'
 import { useScanAvailability } from '../hooks.ts'
 import { errorText } from '../i18n.ts'
 import { IconDownload, IconRefresh } from '../icons.tsx'
@@ -148,26 +148,35 @@ export function FindingRow(props: {
   readonly finding: FindingSummary
   readonly selected?: boolean
   readonly onSelect: () => void
+  /** Roving tabindex: only the active row is in the Tab order. */
+  readonly tabIndex?: number
+  readonly onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void
 }) {
   const tr = useT()
   const f = props.finding
+  const location = formatLocation(f.location)
   return (
     <button
       type="button"
-      className={`dshsec-frow ${props.selected ? 'is-selected' : ''} ${f.closure === 'ruled_out' ? 'is-ruled-out' : ''}`}
+      className={`dshsec-frow${props.selected ? ' is-selected' : ''}${f.closure === 'ruled_out' ? ' is-ruled-out' : ''}`}
       aria-current={props.selected ? 'true' : undefined}
+      data-finding-row={f.id}
+      tabIndex={props.tabIndex}
       onClick={props.onSelect}
+      onKeyDown={props.onKeyDown}
     >
       <span className="dshsec-frow-sev">
         <SeverityBadge severity={f.severity} />
       </span>
       <span className="dshsec-frow-main">
-        <span className="dshsec-frow-title">{typeof f.title === 'string' && f.title ? f.title : '—'}</span>
+        <span className="dshsec-frow-title">{typeof f.title === 'string' && f.title ? f.title : DASH}</span>
         <span className="dshsec-frow-meta">
           <VerificationBadge verification={f.verification} withTitle={false} />
-          <span className="dshsec-frow-loc">{formatLocation(f.location)}</span>
           {f.isNew ? <Badge tone="brand">{tr.t('findings.new')}</Badge> : null}
           <TriageBadge triage={f.triage} />
+          <span className="dshsec-frow-loc" title={location}>
+            <bdi>{location}</bdi>
+          </span>
         </span>
       </span>
     </button>
@@ -240,18 +249,21 @@ export function ExportButtons(props: { readonly scanId: string }) {
 }
 
 /** Fallback for a view that threw while rendering unexpected data. */
-export function RenderFailure(props: { readonly onRetry: () => void }) {
+export function RenderFailure(props: { readonly onRetry: () => void; readonly retryLabel?: string }) {
   const tr = useT()
   return (
-    <Callout
-      tone="error"
-      action={
-        <Button size="sm" icon={<IconRefresh size={14} />} onClick={props.onRetry}>
-          {tr.t('common.retry')}
-        </Button>
-      }
-    >
-      {tr.t('error.generic')}
-    </Callout>
+    <div className="dshsec-failure">
+      <Callout
+        tone="error"
+        title={tr.t('error.renderTitle')}
+        action={
+          <Button size="sm" icon={props.retryLabel ? undefined : <IconRefresh size={14} />} onClick={props.onRetry}>
+            {props.retryLabel ?? tr.t('common.retry')}
+          </Button>
+        }
+      >
+        {tr.t('error.renderBody')}
+      </Callout>
+    </div>
   )
 }

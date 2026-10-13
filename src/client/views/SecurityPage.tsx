@@ -3,13 +3,12 @@ import type { WorkspaceSummary } from '../../shared/contracts.ts'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
 import { ErrorBoundary } from '../components/ErrorBoundary.tsx'
-import { Select } from '../components/Field.tsx'
 import { Tabs, tabPanelProps } from '../components/Tabs.tsx'
 import { ControllerProvider, PageWidthContext, useController, useSecurity, useT } from '../context.tsx'
 import { TAB_IDS, type SecurityController, type TabId } from '../controller.ts'
 import { useElementWidth } from '../hooks.ts'
 import { errorText } from '../i18n.ts'
-import { IconPlus, IconRefresh } from '../icons.tsx'
+import { IconChevronDown, IconFolder, IconPlus, IconRefresh } from '../icons.tsx'
 import { FindingsView, SPLIT_MIN_WIDTH } from './Findings.tsx'
 import { HistoryView } from './History.tsx'
 import { NewScanDialog } from './NewScanDialog.tsx'
@@ -36,21 +35,24 @@ function PageFrame() {
   const language = useSecurity(s => s.language)
   const newScan = useSecurity(s => s.newScan)
   const [pageRef, width] = useElementWidth<HTMLDivElement>()
-  const wide = tab === 'findings' && width >= SPLIT_MIN_WIDTH
+  const split = tab === 'findings' && width >= SPLIT_MIN_WIDTH
 
   useEffect(() => {
-    controller.ensureLoaded()
+    // DSH unmounts the panel when another one is shown; pick up scans started elsewhere.
+    controller.revalidate()
   }, [controller])
 
   const tabs = useMemo(() => TAB_IDS.map(id => ({ id, label: tr.t(`tab.${id}`) })), [tr])
 
   return (
     <PageWidthContext.Provider value={width}>
-      <div className="dshsec-root dshsec-page" lang={language} ref={pageRef}>
+      <div className={`dshsec-root dshsec-page${split ? ' dshsec-page--split' : ''}`} lang={language} ref={pageRef}>
         <div className="dshsec-scroll">
-          <div className={`dshsec-column ${wide ? 'dshsec-column--wide' : ''}`}>
-            <PageHeader />
-            <GlobalBanners />
+          <div className="dshsec-column">
+            <ErrorBoundary fallback={reset => <RenderFailure onRetry={reset} />}>
+              <PageHeader />
+              <GlobalBanners />
+            </ErrorBoundary>
             <Tabs<TabId>
               idPrefix={ID_PREFIX}
               label={tr.t('page.sections')}
@@ -65,7 +67,13 @@ function PageFrame() {
             </div>
           </div>
         </div>
-        {newScan ? <NewScanDialog request={newScan} /> : null}
+        {newScan ? (
+          <ErrorBoundary
+            fallback={() => <RenderFailure onRetry={controller.closeNewScan} retryLabel={tr.t('common.close')} />}
+          >
+            <NewScanDialog request={newScan} />
+          </ErrorBoundary>
+        ) : null}
       </div>
     </PageWidthContext.Provider>
   )
@@ -91,38 +99,66 @@ function PageHeader() {
   const workspaceId = useSecurity(s => s.workspaceId)
   const canScan = useSecurity(s => s.bootstrap.value?.capabilities?.workspaces !== false)
 
-  const options = useMemo(
-    () =>
-      workspaces.map(w => ({
-        value: w.id,
-        label: w.title && w.displayPath ? `${w.title} — ${w.displayPath}` : w.title || w.displayPath || w.id,
-      })),
-    [workspaces],
-  )
-
   return (
     <header className="dshsec-head">
       <h1 className="dshsec-title">{tr.t('page.title')}</h1>
-      <div className="dshsec-head-actions">
-        {options.length ? (
-          <Select
-            className="dshsec-workspace"
-            ariaLabel={tr.t('page.workspace')}
-            value={workspaceId ?? ''}
-            options={options}
-            onChange={controller.selectWorkspace}
-          />
-        ) : null}
-        <Button
-          variant="primary"
-          icon={<IconPlus size={16} />}
-          disabled={!canScan || !options.length}
-          onClick={() => controller.openNewScan({ ...(workspaceId ? { workspaceId } : {}) })}
-        >
-          {tr.t('page.newScan')}
-        </Button>
-      </div>
+      <Button
+        variant="primary"
+        icon={<IconPlus size={16} />}
+        disabled={!canScan || !workspaces.length}
+        onClick={() => controller.openNewScan({ ...(workspaceId ? { workspaceId } : {}) })}
+      >
+        {tr.t('page.newScan')}
+      </Button>
+      {workspaces.length ? (
+        <div className="dshsec-head-project">
+          <ProjectPicker workspaces={workspaces} value={workspaceId} onChange={controller.selectWorkspace} />
+        </div>
+      ) : null}
     </header>
+  )
+}
+
+/**
+ * The current project as a quiet line (title, then the path in secondary
+ * text, truncated). With several projects a transparent native select sits on
+ * top, so picking stays keyboard- and screen-reader-friendly.
+ */
+export function ProjectPicker(props: {
+  readonly workspaces: readonly WorkspaceSummary[]
+  readonly value: string | undefined
+  readonly onChange: (workspaceId: string) => void
+}) {
+  const tr = useT()
+  const { workspaces } = props
+  const current = workspaces.find(w => w.id === props.value) ?? workspaces[0]
+  const title = current?.title || current?.displayPath || current?.id || ''
+  const path = current?.title && current.displayPath ? current.displayPath : ''
+  const many = workspaces.length > 1
+  return (
+    <div className={`dshsec-project${many ? ' is-picker' : ''}`} title={path || title}>
+      <IconFolder size={16} />
+      <span className="dshsec-project-title">{title}</span>
+      {path ? <span className="dshsec-project-path">{path}</span> : null}
+      {many ? (
+        <>
+          <IconChevronDown size={14} />
+          <select
+            aria-label={tr.t('page.workspace')}
+            value={current?.id ?? ''}
+            onChange={event => props.onChange(event.target.value)}
+          >
+            {workspaces.map(w => (
+              <option key={w.id} value={w.id}>
+                {w.title && w.displayPath ? `${w.title} — ${w.displayPath}` : w.title || w.displayPath || w.id}
+              </option>
+            ))}
+          </select>
+        </>
+      ) : (
+        <span className="dshsec-visually-hidden">{tr.t('page.workspace')}</span>
+      )}
+    </div>
   )
 }
 

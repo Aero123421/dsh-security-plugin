@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createController, MAX_EVENTS, POLL_HIDDEN_MS, POLL_VISIBLE_MS } from '../../src/client/controller.ts'
+import {
+  createController,
+  MAX_EVENTS,
+  POLL_HIDDEN_MS,
+  POLL_VISIBLE_MS,
+  REVALIDATE_MS,
+} from '../../src/client/controller.ts'
 import type { ScanEvent } from '../../src/shared/contracts.ts'
 import { fail, fakeApi, makeBootstrap, makeDetail, makeFinding, makeScan, makeSettings, ok } from './helpers.tsx'
 
@@ -206,6 +212,70 @@ describe('controller new-scan consent flow', () => {
     expect(api.callsOf('createScan')).toHaveLength(1)
   })
 
+  it('aiReview: false skips consent and model routes and tells the Host', async () => {
+    const { api, controller } = setup()
+    await controller.reloadBootstrap()
+    const result = await controller.startScan({
+      workspaceId: 'ws-1',
+      mode: 'quick',
+      aiReview: false,
+      consent: true,
+      model: { provider: 'p', model: 'm' },
+    })
+    expect(result.ok).toBe(true)
+    expect(api.callsOf('updateSettings')).toHaveLength(0)
+    expect(api.callsOf('createScan')).toEqual([{ workspaceId: 'ws-1', mode: 'quick', language: 'en', aiReview: false }])
+  })
+
+  it('saves an inline model as models.default before consent, retrying once on conflict', async () => {
+    let revision = 1
+    let conflicted = false
+    const { api, controller } = setup({
+      getBootstrap: () => ok(makeBootstrap({ settingsRevision: revision })),
+      updateSettings: payload => {
+        if (!conflicted) {
+          conflicted = true
+          revision = 4
+          return fail('security/conflict')
+        }
+        revision = payload.expectedRevision + 1
+        return ok({
+          settings: makeSettings({
+            models: { default: { provider: 'p', model: 'm' } },
+            privacy: { ...makeSettings().privacy, ...payload.patch.privacy },
+          }),
+          revision,
+        })
+      },
+    })
+    await controller.reloadBootstrap()
+    const result = await controller.startScan({
+      workspaceId: 'ws-1',
+      mode: 'deep',
+      consent: true,
+      model: { provider: 'p', model: 'm' },
+    })
+    expect(result.ok).toBe(true)
+    expect(api.callsOf('updateSettings')).toEqual([
+      { patch: { models: { default: { provider: 'p', model: 'm' } } }, expectedRevision: 1 },
+      { patch: { models: { default: { provider: 'p', model: 'm' } } }, expectedRevision: 4 },
+      { patch: { privacy: { sendCodeToModel: true } }, expectedRevision: 5 },
+    ])
+    expect(api.callsOf('createScan')).toHaveLength(1)
+  })
+
+  it('does not create a scan when saving the inline model fails', async () => {
+    const { api, controller } = setup({ updateSettings: () => fail('security/bad-request') })
+    await controller.reloadBootstrap()
+    const result = await controller.startScan({
+      workspaceId: 'ws-1',
+      mode: 'deep',
+      model: { provider: 'p', model: 'm' },
+    })
+    expect(result).toMatchObject({ ok: false, error: { code: 'security/bad-request' } })
+    expect(api.callsOf('createScan')).toHaveLength(0)
+  })
+
   it('keeps no-model failures for the dialog to explain', async () => {
     const { controller } = setup({ createScan: () => fail('security/no-model') })
     await controller.reloadBootstrap()
@@ -281,5 +351,34 @@ describe('controller language', () => {
     api.handlers.getBootstrap = () => ok(makeBootstrap({ settings: makeSettings({ ui: { language: 'zh' } }) }))
     await controller.reloadBootstrap()
     expect(controller.store.getState().language).toBe('zh')
+  })
+})
+
+describe('controller revalidate', () => {
+  it('loads once, then refreshes scans when the page is shown again (throttled)', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-10-13T00:00:00Z'))
+      const api = fakeApi({
+        getBootstrap: () => ok(makeBootstrap()),
+        listWorkspaces: () => ok([{ id: 'ws-1', title: 'Demo', displayPath: '~/demo' }]),
+        listScans: () => ok([]),
+      })
+      const controller = createController({ api, storage: null })
+      controller.revalidate()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(api.callsOf('listScans')).toHaveLength(1)
+      controller.revalidate()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(api.callsOf('listScans')).toHaveLength(1)
+      vi.setSystemTime(new Date(Date.now() + REVALIDATE_MS + 1))
+      controller.revalidate()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(api.callsOf('listScans')).toHaveLength(2)
+      expect(api.callsOf('getBootstrap')).toHaveLength(2)
+      controller.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

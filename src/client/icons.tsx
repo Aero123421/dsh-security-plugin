@@ -149,3 +149,21 @@ export const IconExternal = (p: IconProps) => (
     <path d="M14 5h5v5M19 5l-8 8M18 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h4" />
   </Svg>
 )
+
+export const IconFolder = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2.2h7.4a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z" />
+  </Svg>
+)
+
+export const IconSpark = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3.5 13.9 10l6.6 2-6.6 2L12 20.5 10.1 14l-6.6-2 6.6-2L12 3.5Z" />
+  </Svg>
+)
+
+export const IconShield = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3.2 5 6v5.4c0 4.3 2.9 8.1 7 9.4 4.1-1.3 7-5.1 7-9.4V6l-7-2.8Z" />
+  </Svg>
+)

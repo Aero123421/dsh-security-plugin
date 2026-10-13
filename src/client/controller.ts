@@ -21,7 +21,7 @@ import {
   CONTRACT_VERSION,
 } from '../shared/contracts.ts'
 import type { ScanMode, TriageState } from '../shared/domain.ts'
-import type { SecuritySettings, SettingsPatch } from '../shared/settings.ts'
+import type { ModelRef, SecuritySettings, SettingsPatch } from '../shared/settings.ts'
 import { failure, type SecurityApi } from './api.ts'
 import { copyText, downloadFile } from './download.ts'
 import type { DshLayout, DshUiWorkspace } from './dsh.ts'
@@ -57,6 +57,17 @@ export type FlashMessage =
 export interface NewScanRequest {
   readonly workspaceId?: string
   readonly mode?: ScanMode
+}
+
+export interface StartScanInput {
+  readonly workspaceId: string
+  readonly mode: ScanMode
+  /** Grant `privacy.sendCodeToModel` first (the user ticked the consent box). */
+  readonly consent?: boolean
+  /** `false` runs only the built-in analyzers: no model, no consent. */
+  readonly aiReview?: boolean
+  /** Save this route as `models.default` first (picked inline in the dialog). */
+  readonly model?: ModelRef
 }
 
 export interface SettingsFormState {
@@ -116,6 +127,8 @@ export const POLL_VISIBLE_MS = 1500
 export const POLL_HIDDEN_MS = 10_000
 export const MAX_EVENTS = 200
 const FLASH_MS = 6000
+/** Showing the page again refreshes scans at most this often. */
+export const REVALIDATE_MS = 3000
 const WORKSPACE_KEY = 'dsh-security:workspace'
 
 export function findingKey(scanId: string, findingId: string): string {
@@ -156,6 +169,8 @@ export interface SecurityController {
   ensureLoaded(): void
   /** Re-fetch everything visible (after a reconnect or on Retry). */
   reload(): Promise<void>
+  /** Refresh workspaces and scans when the page is shown again (throttled). */
+  revalidate(): void
   reloadBootstrap(): Promise<RpcResult<Bootstrap>>
   refreshWorkspaces(): Promise<void>
   refreshScans(workspaceId?: string): Promise<void>
@@ -172,7 +187,7 @@ export interface SecurityController {
   openNewScan(request?: NewScanRequest): void
   closeNewScan(): void
   estimate(workspaceId: string, mode: ScanMode, signal?: AbortSignal): Promise<RpcResult<ScanEstimate>>
-  startScan(input: { workspaceId: string; mode: ScanMode; consent?: boolean }): Promise<RpcResult<{ scanId: string }>>
+  startScan(input: StartScanInput): Promise<RpcResult<{ scanId: string }>>
   quickRescan(workspaceId: string): Promise<RpcResult<{ scanId: string }> | undefined>
 
   loadScanDetail(scanId: string, force?: boolean): Promise<void>
@@ -246,6 +261,7 @@ export function createController(options: ControllerOptions): SecurityController
   const set = store.setState
 
   let loaded = false
+  let lastRevalidate = 0
   let disposed = false
   let flashSeq = 0
   let flashTimer: ReturnType<typeof setTimeout> | undefined
@@ -343,6 +359,19 @@ export function createController(options: ControllerOptions): SecurityController
   function ensureLoaded(): void {
     if (loaded) return
     loaded = true
+    lastRevalidate = Date.now()
+    void reloadBootstrap()
+    void refreshWorkspaces()
+  }
+
+  function revalidate(): void {
+    if (!loaded) {
+      ensureLoaded()
+      return
+    }
+    const now = Date.now()
+    if (now - lastRevalidate < REVALIDATE_MS) return
+    lastRevalidate = now
     void reloadBootstrap()
     void refreshWorkspaces()
   }
@@ -436,30 +465,46 @@ export function createController(options: ControllerOptions): SecurityController
     return result
   }
 
-  /** Grant consent (when asked), retrying once after a revision conflict. */
-  async function grantConsent(): Promise<RpcResult<unknown>> {
-    const enabled = () => get().bootstrap.value?.settings?.privacy?.sendCodeToModel === true
-    if (enabled()) return { ok: true, value: undefined }
-    const patch: SettingsPatch = { privacy: { sendCodeToModel: true } }
+  /**
+   * Apply a settings patch the New Scan dialog needs before creating a scan,
+   * retrying once after a revision conflict. `done` says whether the server
+   * copy already satisfies the patch (so a retry after reload can be skipped).
+   */
+  async function patchBeforeScan(patch: SettingsPatch, done: () => boolean): Promise<RpcResult<unknown>> {
+    if (done()) return { ok: true, value: undefined }
     let result: RpcResult<unknown> = await updateSettings(patch)
     if (!result.ok && result.error.code === 'security/conflict') {
       const reloaded = await reloadBootstrap()
       if (!reloaded.ok) return reloaded
-      if (enabled()) return { ok: true, value: undefined }
+      if (done()) return { ok: true, value: undefined }
       result = await updateSettings(patch)
     }
     return result
   }
 
-  async function startScan(input: { workspaceId: string; mode: ScanMode; consent?: boolean }) {
-    if (input.consent) {
-      const granted = await grantConsent()
+  async function startScan(input: StartScanInput) {
+    const aiReview = input.aiReview !== false
+    const settings = () => get().bootstrap.value?.settings
+    if (aiReview && input.model) {
+      const model = input.model
+      const saved = await patchBeforeScan({ models: { default: model } }, () => {
+        const current = settings()?.models?.default
+        return current?.provider === model.provider && current?.model === model.model
+      })
+      if (!saved.ok) return saved
+    }
+    if (aiReview && input.consent) {
+      const granted = await patchBeforeScan(
+        { privacy: { sendCodeToModel: true } },
+        () => settings()?.privacy?.sendCodeToModel === true,
+      )
       if (!granted.ok) return granted
     }
     const result = await api.call('createScan', {
       workspaceId: input.workspaceId,
       mode: input.mode,
       language: get().language,
+      ...(aiReview ? {} : { aiReview: false }),
     })
     if (result.ok || result.error.code === 'security/busy') {
       estimateCache.clear()
@@ -968,6 +1013,7 @@ export function createController(options: ControllerOptions): SecurityController
     host,
     ensureLoaded,
     reload,
+    revalidate,
     reloadBootstrap,
     refreshWorkspaces,
     refreshScans,
