@@ -1,0 +1,387 @@
+import { createHash } from 'node:crypto'
+import { describe, expect, it } from 'vitest'
+import { Redactor, scanSecrets } from '../../../src/host/analysis/secrets.ts'
+import {
+  checkStaleness,
+  excerpt,
+  type QuoteSource,
+  SNIPPET_MAX_CHARS,
+  snapshotQuoteSource,
+  verifyQuote,
+} from '../../../src/host/evidence/quote.ts'
+import { snapshotOf } from '../analysis/helpers.ts'
+
+// Assembled at runtime so this file never contains a contiguous token.
+const j = (...parts: string[]): string => parts.join('')
+const TOKEN = j('ghp', '_', 'aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5')
+
+const sha = (text: string): string => createHash('sha256').update(text).digest('hex')
+
+/** A QuoteSource over `path → content` with an optional redaction function and withheld set. */
+function sourceOf(
+  files: Record<string, string>,
+  options: { redact?: (path: string, content: string) => string; withheld?: readonly string[] } = {},
+): QuoteSource & { redactCalls: number } {
+  const source = {
+    redactCalls: 0,
+    file: (path: string) => {
+      const content = files[path]
+      return content === undefined ? undefined : { content, sha256: sha(content) }
+    },
+    redact: (path: string, content: string) => {
+      source.redactCalls++
+      return options.redact ? options.redact(path, content) : content
+    },
+    isWithheld: (path: string) => (options.withheld ?? []).includes(path),
+  }
+  return source
+}
+
+const APP = [
+  "import express from 'express'", // 1
+  "import { db } from './db'", // 2
+  '', // 3
+  'const app = express()', // 4
+  '', // 5
+  "app.get('/users/:id', async (req, res) => {", // 6
+  '  const user = await db.query(', // 7
+  "    'SELECT * FROM users WHERE id = ' + req.params.id,", // 8
+  '  )', // 9
+  '  res.json(user)', // 10
+  '})', // 11
+  '', // 12
+  "app.get('/health', (req, res) => res.send('ok'))", // 13
+  '', // 14
+  'export default app', // 15
+].join('\n')
+
+describe('verifyQuote: match', () => {
+  const source = sourceOf({ 'src/app.ts': `${APP}\n` })
+
+  it('matches a quote at the cited lines and returns the cited location with a snippet', () => {
+    const result = verifyQuote(source, {
+      path: 'src/app.ts',
+      startLine: 8,
+      endLine: 8,
+      quote: "'SELECT * FROM users WHERE id = ' + req.params.id",
+    })
+    expect(result.check).toBe('match')
+    expect(result.location).toEqual({ path: 'src/app.ts', startLine: 8, endLine: 8 })
+    expect(result.snippet).toBe("    'SELECT * FROM users WHERE id = ' + req.params.id,")
+    expect(result.reason).toBeUndefined()
+  })
+
+  it('accepts a quote within the slack window around the cited range', () => {
+    const cited = { path: 'src/app.ts', startLine: 10, endLine: 10, quote: 'const user = await db.query(' }
+    expect(verifyQuote(source, cited).check).toBe('match') // line 7 is within 3 lines of 10
+    expect(verifyQuote(source, cited, { slackLines: 0 }).check).toBe('relocated')
+  })
+
+  it('matches a multi-line quote regardless of indentation and wrapping', () => {
+    const quote = "const user = await db.query(\n'SELECT * FROM users WHERE id = ' +\n      req.params.id,\n)"
+    const result = verifyQuote(source, { path: 'src/app.ts', startLine: 7, endLine: 9, quote })
+    expect(result.check).toBe('match')
+    expect(result.location).toEqual({ path: 'src/app.ts', startLine: 7, endLine: 9 })
+    expect(result.snippet?.split('\n')).toHaveLength(3)
+  })
+
+  it('is indentation-insensitive with tabs and CRLF line endings', () => {
+    const crlf = sourceOf({ 'a.py': 'def f(x):\r\n\tif x:\r\n\t\treturn eval(x)\r\n\treturn None\r\n' })
+    const result = verifyQuote(crlf, { path: 'a.py', startLine: 2, endLine: 3, quote: 'if x:   return eval(x)' })
+    expect(result.check).toBe('match')
+    expect(result.snippet).toBe('\tif x:\n\t\treturn eval(x)')
+  })
+
+  it('normalizes the cited path', () => {
+    const result = verifyQuote(source, {
+      path: './src//app.ts',
+      startLine: 15,
+      endLine: 15,
+      quote: 'export default app',
+    })
+    expect(result.check).toBe('match')
+    expect(result.location?.path).toBe('src/app.ts')
+    expect(
+      verifyQuote(source, { path: 'src\\app.ts', startLine: 15, endLine: 15, quote: 'export default app' }).check,
+    ).toBe('match')
+  })
+
+  it('accepts quotes copied with read_file line-number prefixes', () => {
+    const quote = "   7|   const user = await db.query(\n   8|     'SELECT * FROM users WHERE id = ' + req.params.id,"
+    const result = verifyQuote(source, { path: 'src/app.ts', startLine: 7, endLine: 8, quote })
+    expect(result.check).toBe('match')
+  })
+})
+
+describe('verifyQuote: relocation', () => {
+  const source = sourceOf({ 'src/app.ts': APP })
+
+  it('relocates a quote found exactly once elsewhere and computes the true line range', () => {
+    const result = verifyQuote(source, {
+      path: 'src/app.ts',
+      startLine: 1,
+      endLine: 1,
+      quote: "res.json(user)\n})\n\napp.get('/health'",
+    })
+    expect(result.check).toBe('relocated')
+    expect(result.location).toEqual({ path: 'src/app.ts', startLine: 10, endLine: 13 })
+    expect(result.snippet).toBe("  res.json(user)\n})\n\napp.get('/health', (req, res) => res.send('ok'))")
+  })
+
+  it('maps offsets to lines correctly with CRLF, tabs, and blank lines', () => {
+    const content = 'a = 1\r\n\r\n\t\tfoo(  bar,\r\n\t\t\tbaz )\r\n\r\nz = 2\r\n'
+    const crlf = sourceOf({ 'x.py': content })
+    const result = verifyQuote(
+      crlf,
+      { path: 'x.py', startLine: 6, endLine: 6, quote: 'foo( bar, baz )' },
+      { slackLines: 0 },
+    )
+    expect(result.check).toBe('relocated')
+    expect(result.location).toEqual({ path: 'x.py', startLine: 3, endLine: 4 })
+    expect(result.snippet).toBe('\t\tfoo(  bar,\n\t\t\tbaz )')
+  })
+
+  it('maps a quote that starts mid-line and ends at the end of the file without a trailing newline', () => {
+    const content = 'one\ntwo three four\nfive six seven'
+    const s = sourceOf({ 'f.txt': content })
+    const result = verifyQuote(
+      s,
+      { path: 'f.txt', startLine: 1, endLine: 1, quote: 'four five six seven' },
+      { slackLines: 0 },
+    )
+    expect(result).toMatchObject({ check: 'relocated', location: { path: 'f.txt', startLine: 2, endLine: 3 } })
+  })
+
+  it('relocates when the cited lines are out of range', () => {
+    const result = verifyQuote(source, {
+      path: 'src/app.ts',
+      startLine: 900,
+      endLine: 905,
+      quote: 'export default app',
+    })
+    expect(result).toMatchObject({ check: 'relocated', location: { startLine: 15, endLine: 15 } })
+  })
+
+  it('relocates when the cited range is reversed or not an integer', () => {
+    expect(
+      verifyQuote(source, { path: 'src/app.ts', startLine: 9, endLine: 2, quote: 'const app = express()' }),
+    ).toMatchObject({
+      check: 'relocated',
+      location: { startLine: 4, endLine: 4 },
+    })
+    expect(
+      verifyQuote(source, { path: 'src/app.ts', startLine: 0, endLine: 0, quote: 'const app = express()' }).check,
+    ).toBe('relocated')
+    expect(
+      verifyQuote(source, { path: 'src/app.ts', startLine: Number.NaN, endLine: 4, quote: 'const app = express()' })
+        .check,
+    ).toBe('relocated')
+  })
+})
+
+describe('verifyQuote: mismatch', () => {
+  const source = sourceOf({ 'src/app.ts': APP, 'src/empty.ts': '' }, { withheld: ['.env'] })
+
+  it('reports a quote that does not occur in the file', () => {
+    const result = verifyQuote(source, { path: 'src/app.ts', startLine: 8, endLine: 8, quote: 'db.raw(req.body.sql)' })
+    expect(result).toEqual({ check: 'mismatch', reason: 'quote not found' })
+  })
+
+  it('reports an ambiguous quote that occurs several times elsewhere', () => {
+    const result = verifyQuote(source, { path: 'src/app.ts', startLine: 1, endLine: 1, quote: 'async (req, res) =>' })
+    // Only once in the file: relocated. `(req, res) =>` occurs twice: ambiguous.
+    expect(result.check).toBe('relocated')
+    const twice = verifyQuote(source, { path: 'src/app.ts', startLine: 1, endLine: 1, quote: '(req, res) =>' })
+    expect(twice).toEqual({ check: 'mismatch', reason: 'quote ambiguous' })
+  })
+
+  it('prefers the cited occurrence over ambiguity', () => {
+    const result = verifyQuote(source, { path: 'src/app.ts', startLine: 13, endLine: 13, quote: '(req, res) =>' })
+    expect(result.check).toBe('match')
+  })
+
+  it('rejects quotes shorter than minQuoteChars', () => {
+    expect(verifyQuote(source, { path: 'src/app.ts', startLine: 10, endLine: 10, quote: '  }) ' })).toEqual({
+      check: 'mismatch',
+      reason: 'quote too short',
+    })
+    expect(verifyQuote(source, { path: 'src/app.ts', startLine: 8, endLine: 8, quote: 'req' })).toEqual({
+      check: 'mismatch',
+      reason: 'quote too short',
+    })
+    expect(verifyQuote(source, { path: 'src/app.ts', startLine: 8, endLine: 8, quote: ' \n\t ' }).reason).toBe(
+      'quote too short',
+    )
+  })
+
+  it('accepts a short quote when the whole cited range is that short', () => {
+    const result = verifyQuote(source, { path: 'src/app.ts', startLine: 9, endLine: 9, quote: ')' })
+    expect(result).toMatchObject({ check: 'match', location: { startLine: 9, endLine: 9 }, snippet: '  )' })
+    // ...but never relocates it.
+    expect(verifyQuote(source, { path: 'src/app.ts', startLine: 900, endLine: 900, quote: ')' }).reason).toBe(
+      'quote too short',
+    )
+    expect(verifyQuote(source, { path: 'src/app.ts', startLine: 11, endLine: 11, quote: '})' }).check).toBe('match')
+    expect(verifyQuote(source, { path: 'src/app.ts', startLine: 12, endLine: 12, quote: ')' }).reason).toBe(
+      'quote not found',
+    )
+  })
+
+  it('honors a custom minQuoteChars', () => {
+    const cited = { path: 'src/app.ts', startLine: 4, endLine: 4, quote: 'express()' }
+    expect(verifyQuote(source, cited).check).toBe('match')
+    expect(verifyQuote(source, cited, { minQuoteChars: 20 }).reason).toBe('quote too short')
+  })
+
+  it('reports out-of-range lines when relocation fails', () => {
+    const result = verifyQuote(source, {
+      path: 'src/app.ts',
+      startLine: 50,
+      endLine: 52,
+      quote: 'nothing like this here',
+    })
+    expect(result).toEqual({ check: 'mismatch', reason: 'lines out of range' })
+    expect(
+      verifyQuote(source, { path: 'src/empty.ts', startLine: 1, endLine: 1, quote: 'anything at all' }).reason,
+    ).toBe('lines out of range')
+  })
+
+  it('reports unknown and invalid paths as not in the snapshot', () => {
+    for (const path of ['src/missing.ts', '../src/app.ts', '/src/app.ts', 'C:\\src\\app.ts', 'src/app.ts\0', '']) {
+      expect(verifyQuote(source, { path, startLine: 1, endLine: 1, quote: 'import express' }), path).toEqual({
+        check: 'mismatch',
+        reason: 'file not in snapshot',
+      })
+    }
+  })
+
+  it('never verifies quotes from withheld files', () => {
+    const withheld = sourceOf({ '.env': 'API_TOKEN=abcdefghijklmnop\n' }, { withheld: ['.env'] })
+    const result = verifyQuote(withheld, {
+      path: '.env',
+      startLine: 1,
+      endLine: 1,
+      quote: 'API_TOKEN=abcdefghijklmnop',
+    })
+    expect(result).toEqual({ check: 'mismatch', reason: 'withheld file' })
+    expect(withheld.redactCalls).toBe(0)
+  })
+
+  it('does not throw on malformed citations', () => {
+    const bad = { path: 'src/app.ts', startLine: 1, endLine: 1, quote: undefined as unknown as string }
+    expect(verifyQuote(source, bad)).toEqual({ check: 'mismatch', reason: 'quote too short' })
+  })
+})
+
+describe('verifyQuote: redacted content', () => {
+  const content = `const client = new Octokit({\n  auth: "${TOKEN}",\n})\n`
+
+  it('compares against redacted content so quotes with redaction markers match', async () => {
+    const snapshot = snapshotOf({ 'src/gh.ts': content })
+    const source = snapshotQuoteSource(snapshot, new Redactor(await scanSecrets(snapshot)))
+    const result = verifyQuote(source, {
+      path: 'src/gh.ts',
+      startLine: 2,
+      endLine: 2,
+      quote: 'auth: "[REDACTED:github-token]",',
+    })
+    expect(result.check).toBe('match')
+    expect(result.snippet).toBe('  auth: "[REDACTED:github-token]",')
+    expect(result.snippet).not.toContain(TOKEN)
+  })
+
+  it('does not match (and does not crash on) a quote holding the raw secret', async () => {
+    const snapshot = snapshotOf({ 'src/gh.ts': content })
+    const source = snapshotQuoteSource(snapshot, new Redactor(await scanSecrets(snapshot)))
+    const result = verifyQuote(source, { path: 'src/gh.ts', startLine: 2, endLine: 2, quote: `auth: "${TOKEN}",` })
+    expect(result).toEqual({ check: 'mismatch', reason: 'quote not found' })
+  })
+
+  it('relocates within redacted content and never leaks the secret in the snippet', async () => {
+    const snapshot = snapshotOf({ 'src/gh.ts': content })
+    const source = snapshotQuoteSource(snapshot, new Redactor([]))
+    const result = verifyQuote(
+      source,
+      { path: 'src/gh.ts', startLine: 3, endLine: 3, quote: 'new Octokit({ auth:' },
+      { slackLines: 0 },
+    )
+    expect(result).toMatchObject({ check: 'relocated', location: { startLine: 1, endLine: 2 } })
+    expect(result.snippet).toContain('[REDACTED:github-token]')
+    expect(result.snippet).not.toContain(TOKEN)
+  })
+
+  it('withholds sensitive paths through snapshotQuoteSource', () => {
+    const snapshot = snapshotOf({ '.env': 'A=1\n', 'config/secrets.yml': 'k: v\n', 'conf/x.yml': 'k: v\n' })
+    const source = snapshotQuoteSource(snapshot, new Redactor([]), ['conf/**'])
+    expect(source.isWithheld('.env')).toBe(true)
+    expect(source.isWithheld('config/secrets.yml')).toBe(true)
+    expect(source.isWithheld('conf/x.yml')).toBe(true)
+    expect(
+      verifyQuote(source, { path: 'config/secrets.yml', startLine: 1, endLine: 1, quote: 'k: v and more' }).reason,
+    ).toBe('withheld file')
+  })
+
+  it('redacts each file version once', () => {
+    const source = sourceOf({ 'src/app.ts': APP })
+    for (let i = 0; i < 5; i++)
+      verifyQuote(source, { path: 'src/app.ts', startLine: 4, endLine: 4, quote: 'const app = express()' })
+    expect(source.redactCalls).toBe(1)
+  })
+})
+
+describe('verifyQuote: snippet limits', () => {
+  it('caps snippets at 12 lines and 1500 characters', () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `line_${i + 1} = ${'x'.repeat(200)}`)
+    const source = sourceOf({ 'big.py': lines.join('\n') })
+    const result = verifyQuote(source, { path: 'big.py', startLine: 1, endLine: 30, quote: 'line_1 = xxxxxxxx' })
+    expect(result.check).toBe('match')
+    expect(result.snippet!.length).toBeLessThanOrEqual(SNIPPET_MAX_CHARS)
+    expect(result.snippet!.split('\n').length).toBeLessThanOrEqual(12)
+
+    const short = Array.from({ length: 30 }, (_, i) => `v${i + 1} = ${i}`)
+    const s2 = sourceOf({ 's.py': short.join('\n') })
+    const r2 = verifyQuote(s2, { path: 's.py', startLine: 1, endLine: 30, quote: 'v1 = 0 v2 = 1' })
+    expect(r2.snippet!.split('\n')).toHaveLength(12)
+    expect(r2.snippet!.endsWith('v12 = 11 …')).toBe(true)
+  })
+})
+
+describe('excerpt', () => {
+  const source = sourceOf({ 'src/app.ts': APP, '.env': 'A=1' }, { withheld: ['.env'] })
+
+  it('returns numbered redacted lines', () => {
+    expect(excerpt(source, { path: 'src/app.ts', startLine: 9, endLine: 11 })).toBe(
+      ' 9|   )\n10|   res.json(user)\n11| })',
+    )
+  })
+
+  it('clamps to the file and cuts after maxLines', () => {
+    expect(excerpt(source, { path: 'src/app.ts', startLine: 14, endLine: 99 })).toBe('14|\n15| export default app')
+    expect(excerpt(source, { path: 'src/app.ts', startLine: 1, endLine: 15 }, 2)).toBe(
+      "1| import express from 'express'\n2| import { db } from './db'\n… (13 more lines)",
+    )
+  })
+
+  it('returns undefined for withheld, unknown, invalid, or empty ranges', () => {
+    expect(excerpt(source, { path: '.env', startLine: 1, endLine: 1 })).toBeUndefined()
+    expect(excerpt(source, { path: 'nope.ts', startLine: 1, endLine: 1 })).toBeUndefined()
+    expect(excerpt(source, { path: '../src/app.ts', startLine: 1, endLine: 1 })).toBeUndefined()
+    expect(excerpt(source, { path: 'src/app.ts', startLine: 40, endLine: 50 })).toBeUndefined()
+  })
+
+  it('applies redaction', async () => {
+    const snapshot = snapshotOf({ 'gh.ts': `const t = "${TOKEN}"\n` })
+    const s = snapshotQuoteSource(snapshot, new Redactor(await scanSecrets(snapshot)))
+    expect(excerpt(s, { path: 'gh.ts', startLine: 1, endLine: 1 })).toBe('1| const t = "[REDACTED:github-token]"')
+  })
+})
+
+describe('checkStaleness', () => {
+  it('compares hashes case-insensitively and treats a missing file as stale', () => {
+    const h = sha('x')
+    expect(checkStaleness(h, h)).toBe('same')
+    expect(checkStaleness(h.toUpperCase(), h)).toBe('same')
+    expect(checkStaleness(sha('y'), h)).toBe('stale')
+    expect(checkStaleness(undefined, h)).toBe('stale')
+  })
+})
