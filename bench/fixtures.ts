@@ -7,7 +7,7 @@
  * these entries with {@link matchesExpected}.
  */
 
-import { cp, mkdir, readdir, readFile } from 'node:fs/promises'
+import { cp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINDING_CATEGORIES, type FindingCategory, SEVERITIES, type Severity } from '../src/shared/domain.ts'
@@ -214,8 +214,32 @@ export function matchesExpected(
 export const ANSWER_KEY_FILES: readonly string[] = [MANIFEST_FILE, 'README.md']
 
 /**
- * Copy one fixture app to `<destRoot>/<app>` without its answer keys and
- * return the new directory. The copy is what gets registered as a workspace.
+ * Marker inside the fake credentials of the fixture apps. Provider-format
+ * keys (`sk_live_…`) are stored split by this marker so the repository holds
+ * no string in a real credential format; {@link materializeFixtureText}
+ * removes it when a fixture is copied for scanning.
+ */
+export const FAKE_SECRET_SPLIT = '<<fake-split>>'
+
+/** Fixture text as the scanners should see it (fake credentials joined). */
+export function materializeFixtureText(text: string): string {
+  return text.includes(FAKE_SECRET_SPLIT) ? text.split(FAKE_SECRET_SPLIT).join('') : text
+}
+
+/** Rewrite every file under `dir` that contains {@link FAKE_SECRET_SPLIT}. */
+export async function materializeFixtureDir(dir: string): Promise<void> {
+  for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
+    if (!entry.isFile()) continue
+    const file = join(entry.parentPath, entry.name)
+    const text = await readFile(file, 'utf8')
+    if (text.includes(FAKE_SECRET_SPLIT)) await writeFile(file, materializeFixtureText(text))
+  }
+}
+
+/**
+ * Copy one fixture app to `<destRoot>/<app>` without its answer keys, with
+ * fake credentials materialized, and return the new directory. The copy is
+ * what gets registered as a workspace.
  */
 export async function copyFixtureApp(
   manifest: Pick<FixtureManifest, 'app' | 'dir'>,
@@ -227,6 +251,7 @@ export async function copyFixtureApp(
     recursive: true,
     filter: source => !ANSWER_KEY_FILES.includes(normalizePath(relative(manifest.dir, source))),
   })
+  await materializeFixtureDir(dest)
   return dest
 }
 

@@ -61,8 +61,11 @@ These are enforced by the compiler, Biome and review.
 - **Run analyzers in both modes.** Analyzer tests use `MODES` / `PY_MODES` from `tests/host/analysis/sast-helpers.ts`,
   so they run with the native ast-grep engine (when available) and with the built-in tokenizer.
 - **Fixtures with fake credentials** must be obviously fake (include `FAKE` or `EXAMPLE`) so they are not mistaken
-  for leaks. Files under `tests/fixtures/apps/` start with the *INTENTIONALLY VULNERABLE TEST FIXTURE* header,
-  which `tests/host/fixtures-manifest.test.ts` checks.
+  for leaks. Keys in a provider format that secret scanners block (e.g. Stripe `sk_live_…`, which GitHub push
+  protection rejects even when fake) are stored split by the `<<fake-split>>` marker (`FAKE_SECRET_SPLIT` in
+  `bench/fixtures.ts`); `copyFixtureApp`/`copyFixture` join them in the scanned copy. Files under
+  `tests/fixtures/apps/` start with the *INTENTIONALLY VULNERABLE TEST FIXTURE* header. Both rules are checked by
+  `tests/host/fixtures-manifest.test.ts`.
 
 ## Precision over recall
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import type { AstGrepHandle } from '../../../src/host/analysis/astgrep.ts'
 import { extractRoutes } from '../../../src/host/analysis/routes/index.ts'
 import type { Endpoint, Snapshot } from '../../../src/host/analysis/types.ts'
+import { materializeFixtureText } from '../../../bench/fixtures.ts'
 import { snapshotOf } from './helpers.ts'
 
 const FIXTURES = fileURLToPath(new URL('../../fixtures/routes/', import.meta.url))
@@ -29,7 +30,8 @@ async function dirSnapshot(dir: string, extra: Record<string, string>): Promise<
     for (const entry of await readdir(current, { withFileTypes: true })) {
       const abs = join(current, entry.name)
       if (entry.isDirectory()) await walk(abs)
-      else if (entry.name !== 'biome.json') files[relative(dir, abs).split(sep).join('/')] = await readFile(abs, 'utf8')
+      else if (entry.name !== 'biome.json')
+        files[relative(dir, abs).split(sep).join('/')] = materializeFixtureText(await readFile(abs, 'utf8'))
     }
   }
   await walk(dir)

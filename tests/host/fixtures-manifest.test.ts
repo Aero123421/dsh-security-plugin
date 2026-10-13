@@ -5,6 +5,7 @@ import {
   FIXTURE_APPS_DIR,
   type FixtureManifest,
   loadFixtures,
+  materializeFixtureText,
   matchesExpected,
   parseFixtureManifest,
 } from '../../bench/fixtures.ts'
@@ -38,7 +39,7 @@ function filesUnder(dir: string): string[] {
 }
 
 function linesOf(manifest: FixtureManifest, path: string): string[] {
-  return readFileSync(join(manifest.dir, ...path.split('/')), 'utf8').split(/\r?\n/)
+  return materializeFixtureText(readFileSync(join(manifest.dir, ...path.split('/')), 'utf8')).split(/\r?\n/)
 }
 
 function entriesOf(manifest: FixtureManifest) {
@@ -112,11 +113,19 @@ describe('fixture app manifests', () => {
       expect(readFileSync(readme, 'utf8')).toContain(HEADER.replace(' — do not deploy', ''))
     })
 
-    it('contains only obviously fake credentials', () => {
+    it('stores provider-format fake keys split, so the repository holds none', () => {
+      // Secret scanners (GitHub push protection among them) flag these formats even when the value is fake.
+      const providerFormat = /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}/
+      for (const file of filesUnder(manifest.dir)) {
+        expect(providerFormat.test(readFileSync(file, 'utf8')), relative(manifest.dir, file)).toBe(false)
+      }
+    })
+
+    it('contains only obviously fake credentials once materialized', () => {
       const token =
         /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16})\b/g
       for (const file of filesUnder(manifest.dir)) {
-        for (const [match] of readFileSync(file, 'utf8').matchAll(token)) {
+        for (const [match] of materializeFixtureText(readFileSync(file, 'utf8')).matchAll(token)) {
           expect(/FAKE|x{8,}/.test(match), `${relative(manifest.dir, file)}: ${match.slice(0, 8)}…`).toBe(true)
           expect(match).not.toBe('AKIAIOSFODNN7EXAMPLE')
         }

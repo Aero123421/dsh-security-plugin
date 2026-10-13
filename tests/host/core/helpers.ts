@@ -31,6 +31,7 @@ import type { SecurityStore } from '../../../src/host/store/types.ts'
 import type { ScanStatus } from '../../../src/shared/domain.ts'
 import type { SettingsPatch } from '../../../src/shared/settings.ts'
 import { recordingLogger } from '../rpc/helpers.ts'
+import { materializeFixtureDir } from '../../../bench/fixtures.ts'
 
 export const FIXTURE_APPS = fileURLToPath(new URL('../../fixtures/apps/', import.meta.url))
 const ORACLE_URL = pathToFileURL(fileURLToPath(new URL('../../e2e/scripted-llm/index.mjs', import.meta.url))).href
@@ -209,6 +210,7 @@ export async function copyFixture(app: string): Promise<TempWorkspace> {
   const root = await realpath(await mkdtemp(join(tmpdir(), `dshsec-${app}-`)))
   await cp(join(FIXTURE_APPS, app), root, { recursive: true })
   await rm(join(root, 'expected.json'), { force: true })
+  await materializeFixtureDir(root)
   return { root, cleanup: () => rm(root, { recursive: true, force: true }) }
 }
 

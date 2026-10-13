@@ -1,7 +1,8 @@
 /**
  * Copy a fixture app to a directory you can register as a DSH workspace,
  * leaving out the answer keys (`expected.json`, `README.md`) so the model
- * under evaluation cannot read them.
+ * under evaluation cannot read them, and joining the fake credentials that
+ * the repository stores split (`FAKE_SECRET_SPLIT`).
  *
  *   node --experimental-strip-types bench/prepare.ts <app-name> <destination-dir>
  *

@@ -83,10 +83,13 @@ On Node 22 the log shows `ExperimentalWarning: SQLite is an experimental feature
    the planted issues:
 
    ```sh
-   mkdir -p /tmp/dsh-e2e/apps
-   cp -r /path/to/dsh-security-plugin/tests/fixtures/apps/express-shop /tmp/dsh-e2e/apps/
-   rm /tmp/dsh-e2e/apps/express-shop/expected.json /tmp/dsh-e2e/apps/express-shop/README.md
+   cd /path/to/dsh-security-plugin
+   node --experimental-strip-types bench/prepare.ts express-shop /tmp/dsh-e2e/apps
    ```
+
+   `prepare.ts` also joins the fake credentials, which the repository stores split by a `<<fake-split>>` marker
+   (see `FAKE_SECRET_SPLIT` in `bench/fixtures.ts`). A plain `cp` would leave the marker in, and the secret
+   detectors would then miss those planted keys.
 
    (The oracle reads the answers from `fixturesDir`, not from the workspace.)
 2. Open the printed URL. Add `/tmp/dsh-e2e/apps/express-shop` as a project in DSH.
