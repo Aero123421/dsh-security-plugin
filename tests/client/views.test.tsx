@@ -456,7 +456,7 @@ describe('finding detail', () => {
     const headings = [...container.querySelectorAll('.dshsec-dsec-title')].map(h => h.textContent)
     expect(headings).toEqual([
       'What is the problem',
-      'How sure are we',
+      'How sure we are',
       'Evidence',
       'How to fix',
       'Re-check after fixing',
