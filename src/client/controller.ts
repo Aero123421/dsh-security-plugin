@@ -1,0 +1,1051 @@
+/**
+ * The browser half's single source of truth. Components read slices of
+ * `controller.store` with `useStoreSelector` and call actions; every Host
+ * call, cache, timer, and DSH service interaction lives here.
+ */
+
+import {
+  type Bootstrap,
+  type FindingDetail,
+  type FindingSummary,
+  type ProviderOption,
+  type ReportFormat,
+  type RpcFailure,
+  type RpcResult,
+  type ScanDetail,
+  type ScanEstimate,
+  type ScanEvent,
+  type ScanSummary,
+  type ToolkitEntry,
+  type WorkspaceSummary,
+  CONTRACT_VERSION,
+} from '../shared/contracts.ts'
+import type { ScanMode, TriageState } from '../shared/domain.ts'
+import type { SecuritySettings, SettingsPatch } from '../shared/settings.ts'
+import { failure, type SecurityApi } from './api.ts'
+import { copyText, downloadFile } from './download.ts'
+import type { DshLayout, DshUiWorkspace } from './dsh.ts'
+import { DEFAULT_FINDINGS_FILTER, type FindingsFilter } from './findings.ts'
+import { type Language, type MessageKey, resolveLanguage } from './i18n.ts'
+import { isPollableStatus, mergeSummary, sortScans } from './selectors.ts'
+import {
+  buildPatch,
+  draftFromSettings,
+  enforceHighRisk,
+  isPatchEmpty,
+  rebaseDraft,
+  type SettingsDraft,
+  validateDraft,
+} from './settingsForm.ts'
+import { createStore, type Store } from './store.ts'
+
+export type TabId = 'overview' | 'findings' | 'history' | 'settings'
+export const TAB_IDS: readonly TabId[] = ['overview', 'findings', 'history', 'settings']
+
+export interface Loadable<T> {
+  readonly status: 'idle' | 'loading' | 'ready' | 'error'
+  readonly value?: T
+  readonly error?: RpcFailure
+}
+
+export type Tone = 'info' | 'success' | 'warn' | 'error'
+
+export type FlashMessage =
+  | { readonly id: number; readonly tone: Tone; readonly key: MessageKey }
+  | { readonly id: number; readonly tone: Tone; readonly error: RpcFailure }
+
+export interface NewScanRequest {
+  readonly workspaceId?: string
+  readonly mode?: ScanMode
+}
+
+export interface SettingsFormState {
+  readonly base: SettingsDraft
+  readonly draft: SettingsDraft
+  readonly revision: number
+  readonly saving: boolean
+  /** Outcome of the last save attempt. */
+  readonly result?:
+    | { readonly tone: Tone; readonly key: MessageKey }
+    | { readonly tone: Tone; readonly error: RpcFailure }
+}
+
+export interface SecurityState {
+  readonly bootstrap: Loadable<Bootstrap>
+  readonly workspaces: Loadable<readonly WorkspaceSummary[]>
+  readonly workspaceId: string | undefined
+  /** Scan lists by workspace id, newest first. */
+  readonly scans: Readonly<Record<string, Loadable<readonly ScanSummary[]>>>
+  /** A scan picked in History; undefined follows the latest scan. */
+  readonly viewScanId: string | undefined
+  readonly details: Readonly<Record<string, Loadable<ScanDetail>>>
+  readonly events: Readonly<Record<string, readonly ScanEvent[]>>
+  readonly findings: Readonly<Record<string, Loadable<readonly FindingSummary[]>>>
+  /** Keyed by `findingKey(scanId, findingId)`. */
+  readonly findingDetails: Readonly<Record<string, Loadable<FindingDetail>>>
+  readonly selectedFindingId: string | undefined
+  readonly filter: FindingsFilter
+  readonly tab: TabId
+  readonly newScan: NewScanRequest | undefined
+  readonly models: Loadable<readonly ProviderOption[]>
+  readonly toolkit: Loadable<readonly ToolkitEntry[]>
+  readonly form: SettingsFormState | undefined
+  readonly dshLocale: string
+  readonly language: Language
+  readonly flash: FlashMessage | undefined
+}
+
+export interface ControllerHost {
+  layout(): DshLayout | undefined
+  uiWorkspace(): DshUiWorkspace | undefined
+  readonly isLoopback: boolean
+}
+
+export interface ControllerOptions {
+  readonly api: SecurityApi
+  readonly host?: Partial<ControllerHost>
+  readonly dshLocale?: string
+  /** Defaults to the global document (visibility, downloads). */
+  readonly doc?: Document
+  /** Per-viewer convenience storage; defaults to `localStorage` when usable. */
+  readonly storage?: Pick<Storage, 'getItem' | 'setItem'> | null
+}
+
+/** Poll intervals for an active scan. */
+export const POLL_VISIBLE_MS = 1500
+export const POLL_HIDDEN_MS = 10_000
+export const MAX_EVENTS = 200
+const FLASH_MS = 6000
+const WORKSPACE_KEY = 'dsh-security:workspace'
+
+export function findingKey(scanId: string, findingId: string): string {
+  return `${scanId}\u0000${findingId}`
+}
+
+const IDLE: Loadable<never> = { status: 'idle' }
+
+function loading<T>(prev: Loadable<T> | undefined): Loadable<T> {
+  return prev?.value !== undefined ? { status: 'loading', value: prev.value } : { status: 'loading' }
+}
+
+function errored<T>(prev: Loadable<T> | undefined, error: RpcFailure): Loadable<T> {
+  return prev?.value !== undefined ? { status: 'error', value: prev.value, error } : { status: 'error', error }
+}
+
+function settleLoadable<T>(prev: Loadable<T> | undefined, result: RpcResult<T>): Loadable<T> {
+  return result.ok ? { status: 'ready', value: result.value } : errored(prev, result.error)
+}
+
+function asList<T>(value: unknown): readonly T[] {
+  return Array.isArray(value) ? (value as T[]) : []
+}
+
+interface Watcher {
+  refs: number
+  timer: ReturnType<typeof setTimeout> | undefined
+  abort: AbortController | undefined
+  stopped: boolean
+}
+
+export interface SecurityController {
+  readonly store: Store<SecurityState>
+  readonly api: SecurityApi
+  readonly host: ControllerHost
+
+  /** Load bootstrap and workspaces once (idempotent). */
+  ensureLoaded(): void
+  /** Re-fetch everything visible (after a reconnect or on Retry). */
+  reload(): Promise<void>
+  reloadBootstrap(): Promise<RpcResult<Bootstrap>>
+  refreshWorkspaces(): Promise<void>
+  refreshScans(workspaceId?: string): Promise<void>
+  setDshLocale(locale: string): void
+  contractMismatch(): boolean
+
+  selectWorkspace(workspaceId: string): void
+  setTab(tab: TabId): void
+  viewScan(scanId: string | undefined): void
+  selectFinding(findingId: string | undefined): void
+  setFilter(update: FindingsFilter | ((prev: FindingsFilter) => FindingsFilter)): void
+  openFindingFromOverview(scanId: string, findingId: string): void
+
+  openNewScan(request?: NewScanRequest): void
+  closeNewScan(): void
+  estimate(workspaceId: string, mode: ScanMode, signal?: AbortSignal): Promise<RpcResult<ScanEstimate>>
+  startScan(input: { workspaceId: string; mode: ScanMode; consent?: boolean }): Promise<RpcResult<{ scanId: string }>>
+  quickRescan(workspaceId: string): Promise<RpcResult<{ scanId: string }> | undefined>
+
+  loadScanDetail(scanId: string, force?: boolean): Promise<void>
+  watchScan(scanId: string): () => void
+  pauseScan(scanId: string): Promise<RpcResult<ScanSummary>>
+  resumeScan(scanId: string): Promise<RpcResult<ScanSummary>>
+  cancelScan(scanId: string): Promise<RpcResult<ScanSummary>>
+  deleteScan(scanId: string): Promise<RpcResult<{ deleted: boolean }>>
+  exportReport(scanId: string, format: ReportFormat): Promise<RpcResult<unknown>>
+
+  loadFindings(scanId: string, force?: boolean): Promise<void>
+  loadFinding(scanId: string, findingId: string, force?: boolean): Promise<void>
+  setTriage(input: {
+    scanId: string
+    findingId: string
+    triage: TriageState
+    note?: string
+  }): Promise<RpcResult<FindingSummary>>
+  canFixInChat(): boolean
+  fixInChat(input: { workspaceId: string; scanId: string; findingId: string }): Promise<RpcResult<unknown>>
+  copyFixPrompt(scanId: string, findingId: string): Promise<RpcResult<unknown>>
+
+  loadModels(force?: boolean): Promise<void>
+  loadToolkit(force?: boolean): Promise<void>
+  installTool(toolId: ToolkitEntry['id']): Promise<RpcResult<ToolkitEntry>>
+  updateDraft(update: (draft: SettingsDraft) => SettingsDraft): void
+  discardDraft(): void
+  saveSettings(): Promise<RpcResult<unknown> | undefined>
+  updateSettings(patch: SettingsPatch): Promise<RpcResult<{ settings: SecuritySettings; revision: number }>>
+
+  canOpenPage(): boolean
+  openSecurityPage(close?: () => void): void
+  flash(message: { tone: Tone; key: MessageKey } | { tone: Tone; error: RpcFailure }): void
+  dismissFlash(): void
+  dispose(): void
+}
+
+export function createController(options: ControllerOptions): SecurityController {
+  const { api } = options
+  const doc: Document | undefined = options.doc ?? (typeof document !== 'undefined' ? document : undefined)
+  const storage = options.storage === undefined ? defaultStorage() : options.storage
+  const host: ControllerHost = {
+    layout: () => options.host?.layout?.(),
+    uiWorkspace: () => options.host?.uiWorkspace?.(),
+    isLoopback: options.host?.isLoopback ?? true,
+  }
+  const dshLocale = options.dshLocale ?? 'en'
+
+  const store = createStore<SecurityState>({
+    bootstrap: IDLE,
+    workspaces: IDLE,
+    workspaceId: readStorage(storage, WORKSPACE_KEY),
+    scans: {},
+    viewScanId: undefined,
+    details: {},
+    events: {},
+    findings: {},
+    findingDetails: {},
+    selectedFindingId: undefined,
+    filter: DEFAULT_FINDINGS_FILTER,
+    tab: 'overview',
+    newScan: undefined,
+    models: IDLE,
+    toolkit: IDLE,
+    form: undefined,
+    dshLocale,
+    language: resolveLanguage(undefined, dshLocale),
+    flash: undefined,
+  })
+  const get = store.getState
+  const set = store.setState
+
+  let loaded = false
+  let disposed = false
+  let flashSeq = 0
+  let flashTimer: ReturnType<typeof setTimeout> | undefined
+  const watchers = new Map<string, Watcher>()
+  const estimateCache = new Map<string, ScanEstimate>()
+  const inflight = new Map<string, Promise<unknown>>()
+
+  /** Coalesce identical concurrent loads. */
+  function once<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const pending = inflight.get(key)
+    if (pending) return pending as Promise<T>
+    const promise = run().finally(() => inflight.delete(key))
+    inflight.set(key, promise)
+    return promise
+  }
+
+  // -------------------------------------------------------------------------
+  // Bootstrap, settings form, language
+  // -------------------------------------------------------------------------
+
+  function applyBootstrap(bootstrap: Bootstrap): void {
+    set(s => {
+      const settings = bootstrap.settings
+      const revision = typeof bootstrap.settingsRevision === 'number' ? bootstrap.settingsRevision : 0
+      const base = draftFromSettings(settings)
+      let form: SettingsFormState
+      if (!s.form) form = { base, draft: base, revision, saving: false }
+      else if (s.form.revision === revision && JSON.stringify(s.form.base) === JSON.stringify(base)) form = s.form
+      else form = { ...s.form, base, draft: rebaseDraft(s.form.base, base, s.form.draft), revision }
+      return {
+        ...s,
+        bootstrap: { status: 'ready', value: bootstrap },
+        form,
+        language: resolveLanguage(settings?.ui?.language, s.dshLocale),
+      }
+    })
+  }
+
+  function applySettings(settings: SecuritySettings, revision: number): void {
+    const current = get().bootstrap.value
+    if (!current) return
+    applyBootstrap({ ...current, settings, settingsRevision: revision })
+  }
+
+  async function reloadBootstrap(): Promise<RpcResult<Bootstrap>> {
+    return once('bootstrap', async () => {
+      set(s => ({ ...s, bootstrap: loading(s.bootstrap) }))
+      const result = await api.call('getBootstrap', {})
+      if (result.ok && isBootstrap(result.value)) applyBootstrap(result.value)
+      else {
+        const error = result.ok ? failure('security/internal', 'Malformed bootstrap.') : result.error
+        set(s => ({ ...s, bootstrap: errored(s.bootstrap, error) }))
+        return { ok: false, error } as const
+      }
+      return result
+    })
+  }
+
+  async function refreshWorkspaces(): Promise<void> {
+    await once('workspaces', async () => {
+      set(s => ({ ...s, workspaces: loading(s.workspaces) }))
+      const result = await api.call('listWorkspaces', {})
+      const list = result.ok ? asList<WorkspaceSummary>(result.value).filter(w => w && typeof w.id === 'string') : []
+      set(s => {
+        const workspaces: Loadable<readonly WorkspaceSummary[]> = result.ok
+          ? { status: 'ready', value: list }
+          : errored(s.workspaces, result.error)
+        const known = workspaces.value ?? []
+        let workspaceId = s.workspaceId
+        if (!workspaceId || (result.ok && !known.some(w => w.id === workspaceId))) workspaceId = pickWorkspace(known)
+        return { ...s, workspaces, workspaceId }
+      })
+      const workspaceId = get().workspaceId
+      if (workspaceId) await refreshScans(workspaceId)
+    })
+  }
+
+  async function refreshScans(workspaceId = get().workspaceId): Promise<void> {
+    if (!workspaceId) return
+    await once(`scans:${workspaceId}`, async () => {
+      set(s => ({ ...s, scans: { ...s.scans, [workspaceId]: loading(s.scans[workspaceId]) } }))
+      const result = await api.call('listScans', { workspaceId })
+      set(s => {
+        const prev = s.scans[workspaceId]
+        const entry: Loadable<readonly ScanSummary[]> = result.ok
+          ? { status: 'ready', value: sortScans(asList<ScanSummary>(result.value)) }
+          : errored(prev, result.error)
+        const viewScanId =
+          s.viewScanId && result.ok && !entry.value?.some(scan => scan.id === s.viewScanId) ? undefined : s.viewScanId
+        return { ...s, scans: { ...s.scans, [workspaceId]: entry }, viewScanId }
+      })
+    })
+  }
+
+  function ensureLoaded(): void {
+    if (loaded) return
+    loaded = true
+    void reloadBootstrap()
+    void refreshWorkspaces()
+  }
+
+  async function reload(): Promise<void> {
+    loaded = true
+    const tasks: Promise<unknown>[] = [reloadBootstrap(), refreshWorkspaces()]
+    const s = get()
+    if (s.models.status !== 'idle') tasks.push(loadModels(true))
+    if (s.toolkit.status !== 'idle') tasks.push(loadToolkit(true))
+    await Promise.all(tasks)
+    // Watchers keep running; nudge them so the UI catches up immediately.
+    for (const [scanId, watcher] of watchers) {
+      if (!watcher.stopped) schedulePoll(scanId, 0)
+    }
+  }
+
+  function setDshLocale(locale: string): void {
+    set(s =>
+      s.dshLocale === locale
+        ? s
+        : {
+            ...s,
+            dshLocale: locale,
+            language: resolveLanguage(s.bootstrap.value?.settings?.ui?.language, locale),
+          },
+    )
+  }
+
+  // -------------------------------------------------------------------------
+  // Navigation
+  // -------------------------------------------------------------------------
+
+  function selectWorkspace(workspaceId: string): void {
+    if (get().workspaceId === workspaceId) return
+    writeStorage(storage, WORKSPACE_KEY, workspaceId)
+    set(s => ({ ...s, workspaceId, viewScanId: undefined, selectedFindingId: undefined }))
+    void refreshScans(workspaceId)
+  }
+
+  function setTab(tab: TabId): void {
+    set(s => (s.tab === tab ? s : { ...s, tab }))
+  }
+
+  function viewScan(scanId: string | undefined): void {
+    set(s => ({ ...s, viewScanId: scanId, selectedFindingId: undefined }))
+  }
+
+  function selectFinding(findingId: string | undefined): void {
+    set(s => (s.selectedFindingId === findingId ? s : { ...s, selectedFindingId: findingId }))
+  }
+
+  function setFilter(update: FindingsFilter | ((prev: FindingsFilter) => FindingsFilter)): void {
+    set(s => ({ ...s, filter: typeof update === 'function' ? update(s.filter) : update }))
+  }
+
+  function openFindingFromOverview(scanId: string, findingId: string): void {
+    set(s => {
+      const list = s.workspaceId ? (s.scans[s.workspaceId]?.value ?? []) : []
+      const latestCompleted = list.find(scan => scan.status === 'completed')
+      const viewScanId = s.viewScanId ?? (latestCompleted?.id === scanId ? undefined : scanId)
+      return { ...s, tab: 'findings', selectedFindingId: findingId, viewScanId }
+    })
+  }
+
+  // -------------------------------------------------------------------------
+  // New scan
+  // -------------------------------------------------------------------------
+
+  function openNewScan(request: NewScanRequest = {}): void {
+    set(s => ({ ...s, newScan: request }))
+  }
+
+  function closeNewScan(): void {
+    set(s => (s.newScan ? { ...s, newScan: undefined } : s))
+  }
+
+  async function estimate(workspaceId: string, mode: ScanMode, signal?: AbortSignal) {
+    const key = `${workspaceId}\u0000${mode}`
+    const cached = estimateCache.get(key)
+    if (cached) return { ok: true, value: cached } as const
+    const result = await api.call('estimateScan', { workspaceId, mode }, signal)
+    if (result.ok) estimateCache.set(key, result.value)
+    return result
+  }
+
+  async function updateSettings(patch: SettingsPatch) {
+    const revision = get().bootstrap.value?.settingsRevision ?? 0
+    const result = await api.call('updateSettings', { patch, expectedRevision: revision })
+    if (result.ok) applySettings(result.value.settings, result.value.revision)
+    return result
+  }
+
+  /** Grant consent (when asked), retrying once after a revision conflict. */
+  async function grantConsent(): Promise<RpcResult<unknown>> {
+    const enabled = () => get().bootstrap.value?.settings?.privacy?.sendCodeToModel === true
+    if (enabled()) return { ok: true, value: undefined }
+    const patch: SettingsPatch = { privacy: { sendCodeToModel: true } }
+    let result: RpcResult<unknown> = await updateSettings(patch)
+    if (!result.ok && result.error.code === 'security/conflict') {
+      const reloaded = await reloadBootstrap()
+      if (!reloaded.ok) return reloaded
+      if (enabled()) return { ok: true, value: undefined }
+      result = await updateSettings(patch)
+    }
+    return result
+  }
+
+  async function startScan(input: { workspaceId: string; mode: ScanMode; consent?: boolean }) {
+    if (input.consent) {
+      const granted = await grantConsent()
+      if (!granted.ok) return granted
+    }
+    const result = await api.call('createScan', { workspaceId: input.workspaceId, mode: input.mode })
+    if (result.ok || result.error.code === 'security/busy') {
+      estimateCache.clear()
+      set(s => ({
+        ...s,
+        workspaceId: input.workspaceId,
+        viewScanId: undefined,
+        selectedFindingId: s.workspaceId === input.workspaceId ? s.selectedFindingId : undefined,
+      }))
+      writeStorage(storage, WORKSPACE_KEY, input.workspaceId)
+      await refreshScans(input.workspaceId)
+    }
+    return result
+  }
+
+  async function quickRescan(workspaceId: string) {
+    if (get().bootstrap.value?.settings?.privacy?.sendCodeToModel !== true) {
+      openNewScan({ workspaceId, mode: 'quick' })
+      return undefined
+    }
+    const result = await startScan({ workspaceId, mode: 'quick' })
+    if (result.ok) flash({ tone: 'success', key: 'detail.recheckStarted' })
+    else if (result.error.code === 'security/consent-required' || result.error.code === 'security/no-model') {
+      openNewScan({ workspaceId, mode: 'quick' })
+    } else flash({ tone: result.error.code === 'security/busy' ? 'info' : 'error', error: result.error })
+    return result
+  }
+
+  // -------------------------------------------------------------------------
+  // Scan detail and polling
+  // -------------------------------------------------------------------------
+
+  function storeDetail(scanId: string, detail: ScanDetail): void {
+    set(s => {
+      const summary = detail.summary
+      let scans = s.scans
+      if (summary && typeof summary.workspaceId === 'string' && s.scans[summary.workspaceId]?.value) {
+        const entry = s.scans[summary.workspaceId]!
+        scans = {
+          ...s.scans,
+          [summary.workspaceId]: { ...entry, value: mergeSummary(entry.value ?? [], summary) },
+        }
+      }
+      return { ...s, details: { ...s.details, [scanId]: { status: 'ready', value: detail } }, scans }
+    })
+  }
+
+  async function loadScanDetail(scanId: string, force = false): Promise<void> {
+    const prev = get().details[scanId]
+    if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
+    await once(`detail:${scanId}`, async () => {
+      set(s => ({ ...s, details: { ...s.details, [scanId]: loading(s.details[scanId]) } }))
+      const result = await api.call('getScan', { scanId })
+      if (result.ok && result.value && typeof result.value === 'object') storeDetail(scanId, result.value)
+      else if (!result.ok) {
+        set(s => ({ ...s, details: { ...s.details, [scanId]: errored(s.details[scanId], result.error) } }))
+      }
+    })
+  }
+
+  async function pollEvents(scanId: string, signal: AbortSignal): Promise<void> {
+    const existing = get().events[scanId] ?? []
+    const afterSeq = existing.length ? existing[existing.length - 1]!.seq : undefined
+    const result = await api.call(
+      'listEvents',
+      { scanId, ...(afterSeq !== undefined ? { afterSeq } : {}), limit: MAX_EVENTS },
+      signal,
+    )
+    if (!result.ok || signal.aborted) return
+    const incoming = asList<ScanEvent>(result.value).filter(e => e && typeof e.seq === 'number')
+    if (!incoming.length) return
+    set(s => {
+      const current = s.events[scanId] ?? []
+      const last = current.length ? current[current.length - 1]!.seq : Number.NEGATIVE_INFINITY
+      const fresh = incoming.filter(e => e.seq > last).sort((a, b) => a.seq - b.seq)
+      if (!fresh.length) return s
+      return { ...s, events: { ...s.events, [scanId]: [...current, ...fresh].slice(-MAX_EVENTS) } }
+    })
+  }
+
+  function pollDelay(): number {
+    return doc?.visibilityState === 'hidden' ? POLL_HIDDEN_MS : POLL_VISIBLE_MS
+  }
+
+  function schedulePoll(scanId: string, delay: number): void {
+    const watcher = watchers.get(scanId)
+    if (!watcher || watcher.stopped) return
+    if (watcher.timer !== undefined) clearTimeout(watcher.timer)
+    watcher.timer = setTimeout(() => {
+      watcher.timer = undefined
+      void poll(scanId)
+    }, delay)
+  }
+
+  function stopWatcher(scanId: string): void {
+    const watcher = watchers.get(scanId)
+    if (!watcher) return
+    watcher.stopped = true
+    if (watcher.timer !== undefined) clearTimeout(watcher.timer)
+    watcher.abort?.abort()
+    watchers.delete(scanId)
+  }
+
+  async function poll(scanId: string): Promise<void> {
+    const watcher = watchers.get(scanId)
+    if (!watcher || watcher.stopped || watcher.abort) return
+    const abort = new AbortController()
+    watcher.abort = abort
+    let next = pollDelay()
+    try {
+      const result = await api.call('getScan', { scanId }, abort.signal)
+      if (watcher.stopped) return
+      if (!result.ok) {
+        if (result.error.code === 'security/not-found') {
+          stopWatcher(scanId)
+          void refreshScans()
+          return
+        }
+        next = POLL_HIDDEN_MS
+        return
+      }
+      storeDetail(scanId, result.value)
+      await pollEvents(scanId, abort.signal)
+      if (watcher.stopped) return
+      const status = result.value.summary?.status
+      if (!isPollableStatus(status)) {
+        stopWatcher(scanId)
+        void onScanSettled(result.value.summary)
+      }
+    } finally {
+      watcher.abort = undefined
+      if (!watcher.stopped) schedulePoll(scanId, next)
+    }
+  }
+
+  async function onScanSettled(summary: ScanSummary | undefined): Promise<void> {
+    if (!summary) return
+    const tasks: Promise<unknown>[] = [refreshScans(summary.workspaceId), refreshWorkspaces()]
+    if (summary.status === 'completed') tasks.push(loadFindings(summary.id, true))
+    await Promise.all(tasks)
+  }
+
+  function watchScan(scanId: string): () => void {
+    let watcher = watchers.get(scanId)
+    if (!watcher) {
+      watcher = { refs: 0, timer: undefined, abort: undefined, stopped: false }
+      watchers.set(scanId, watcher)
+      schedulePoll(scanId, 0)
+    }
+    watcher.refs++
+    const owned = watcher
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      owned.refs--
+      if (owned.refs <= 0 && watchers.get(scanId) === owned) stopWatcher(scanId)
+    }
+  }
+
+  const onVisibility = () => {
+    if (doc?.visibilityState !== 'visible') return
+    for (const [scanId, watcher] of watchers) {
+      if (!watcher.stopped && !watcher.abort) schedulePoll(scanId, 0)
+    }
+  }
+  doc?.addEventListener('visibilitychange', onVisibility)
+
+  async function scanAction(
+    method: 'pauseScan' | 'resumeScan' | 'cancelScan',
+    scanId: string,
+  ): Promise<RpcResult<ScanSummary>> {
+    const result = await api.call(method, { scanId })
+    if (result.ok && result.value) {
+      const summary = result.value
+      set(s => {
+        const entry = s.scans[summary.workspaceId]
+        if (!entry?.value) return s
+        return {
+          ...s,
+          scans: { ...s.scans, [summary.workspaceId]: { ...entry, value: mergeSummary(entry.value, summary) } },
+        }
+      })
+      await loadScanDetail(scanId, true)
+      // A resumed scan becomes pollable again; the page re-attaches its watcher.
+      if (!isPollableStatus(summary.status)) void onScanSettled(summary)
+    }
+    return result
+  }
+
+  async function deleteScan(scanId: string) {
+    const result = await api.call('deleteScan', { scanId })
+    if (result.ok) {
+      stopWatcher(scanId)
+      set(s => {
+        const { [scanId]: _detail, ...details } = s.details
+        const { [scanId]: _findings, ...findings } = s.findings
+        const { [scanId]: _events, ...events } = s.events
+        const scans: Record<string, Loadable<readonly ScanSummary[]>> = {}
+        for (const [id, entry] of Object.entries(s.scans)) {
+          scans[id] = entry.value ? { ...entry, value: entry.value.filter(scan => scan.id !== scanId) } : entry
+        }
+        return {
+          ...s,
+          details,
+          findings,
+          events,
+          scans,
+          viewScanId: s.viewScanId === scanId ? undefined : s.viewScanId,
+        }
+      })
+      void refreshWorkspaces()
+    }
+    return result
+  }
+
+  async function exportReport(scanId: string, format: ReportFormat): Promise<RpcResult<unknown>> {
+    const result = await api.call('exportReport', { scanId, format })
+    if (!result.ok) return result
+    if (!result.value || typeof result.value.content !== 'string') {
+      return { ok: false, error: failure('security/internal', 'The report was empty.') }
+    }
+    try {
+      downloadFile(result.value, doc)
+    } catch (error) {
+      return {
+        ok: false,
+        error: failure('security/internal', error instanceof Error ? error.message : 'Download failed.'),
+      }
+    }
+    return { ok: true, value: undefined }
+  }
+
+  // -------------------------------------------------------------------------
+  // Findings
+  // -------------------------------------------------------------------------
+
+  async function loadFindings(scanId: string, force = false): Promise<void> {
+    const prev = get().findings[scanId]
+    if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
+    await once(`findings:${scanId}`, async () => {
+      set(s => ({ ...s, findings: { ...s.findings, [scanId]: loading(s.findings[scanId]) } }))
+      const result = await api.call('listFindings', { scanId })
+      set(s => ({
+        ...s,
+        findings: {
+          ...s.findings,
+          [scanId]: settleLoadable(
+            s.findings[scanId],
+            result.ok ? { ok: true, value: asList<FindingSummary>(result.value) } : result,
+          ),
+        },
+      }))
+    })
+  }
+
+  async function loadFinding(scanId: string, findingId: string, force = false): Promise<void> {
+    const key = findingKey(scanId, findingId)
+    const prev = get().findingDetails[key]
+    if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
+    await once(`finding:${key}`, async () => {
+      set(s => ({ ...s, findingDetails: { ...s.findingDetails, [key]: loading(s.findingDetails[key]) } }))
+      const result = await api.call('getFinding', { scanId, findingId })
+      set(s => ({
+        ...s,
+        findingDetails: { ...s.findingDetails, [key]: settleLoadable(s.findingDetails[key], result) },
+      }))
+    })
+  }
+
+  async function setTriage(input: { scanId: string; findingId: string; triage: TriageState; note?: string }) {
+    const result = await api.call('setTriage', {
+      scanId: input.scanId,
+      findingId: input.findingId,
+      triage: input.triage,
+      ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+    })
+    if (result.ok && result.value) {
+      const updated = result.value
+      const key = findingKey(input.scanId, input.findingId)
+      set(s => {
+        const list = s.findings[input.scanId]
+        const detail = s.findingDetails[key]
+        return {
+          ...s,
+          findings: list?.value
+            ? {
+                ...s.findings,
+                [input.scanId]: { ...list, value: list.value.map(f => (f.id === updated.id ? updated : f)) },
+              }
+            : s.findings,
+          findingDetails: detail?.value
+            ? {
+                ...s.findingDetails,
+                [key]: {
+                  ...detail,
+                  value: {
+                    ...detail.value,
+                    ...updated,
+                    ...(input.note?.trim() ? { triageNote: input.note.trim() } : { triageNote: undefined }),
+                  },
+                },
+              }
+            : s.findingDetails,
+        }
+      })
+      void refreshScans()
+    }
+    return result
+  }
+
+  function canFixInChat(): boolean {
+    return host.uiWorkspace() !== undefined
+  }
+
+  async function fixInChat(input: { workspaceId: string; scanId: string; findingId: string }) {
+    const ui = host.uiWorkspace()
+    if (!ui) return { ok: false, error: failure('security/invalid-state', 'DSH chat is not available.') } as const
+    const result = await api.call('getFixPrompt', { scanId: input.scanId, findingId: input.findingId })
+    if (!result.ok) return result
+    try {
+      await ui.startSession(input.workspaceId, { prompt: result.value.prompt, clearPreviousDraft: true })
+    } catch (error) {
+      return {
+        ok: false,
+        error: failure('security/internal', error instanceof Error ? error.message : 'Could not open a chat.'),
+      } as const
+    }
+    return { ok: true, value: undefined } as const
+  }
+
+  async function copyFixPrompt(scanId: string, findingId: string): Promise<RpcResult<unknown>> {
+    const result = await api.call('getFixPrompt', { scanId, findingId })
+    if (!result.ok) return result
+    const copied = doc ? await copyText(result.value.prompt, doc) : false
+    return copied
+      ? { ok: true, value: undefined }
+      : { ok: false, error: failure('security/clipboard', 'Could not copy to the clipboard.') }
+  }
+
+  // -------------------------------------------------------------------------
+  // Settings
+  // -------------------------------------------------------------------------
+
+  async function loadModels(force = false): Promise<void> {
+    if (!force && get().models.status !== 'idle' && get().models.status !== 'error') return
+    await once('models', async () => {
+      set(s => ({ ...s, models: loading(s.models) }))
+      const result = await api.call('listModels', {})
+      set(s => ({
+        ...s,
+        models: settleLoadable(
+          s.models,
+          result.ok ? { ok: true, value: asList<ProviderOption>(result.value) } : result,
+        ),
+      }))
+    })
+  }
+
+  async function loadToolkit(force = false): Promise<void> {
+    if (!force && get().toolkit.status !== 'idle' && get().toolkit.status !== 'error') return
+    await once('toolkit', async () => {
+      set(s => ({ ...s, toolkit: loading(s.toolkit) }))
+      const result = await api.call('listToolkit', {})
+      set(s => ({
+        ...s,
+        toolkit: settleLoadable(
+          s.toolkit,
+          result.ok ? { ok: true, value: asList<ToolkitEntry>(result.value) } : result,
+        ),
+      }))
+    })
+  }
+
+  async function installTool(toolId: ToolkitEntry['id']) {
+    const result = await api.call('installTool', { toolId, acceptLicense: true })
+    if (result.ok) {
+      const entry = result.value
+      set(s => ({
+        ...s,
+        toolkit: s.toolkit.value
+          ? { ...s.toolkit, value: s.toolkit.value.map(t => (t.id === entry.id ? entry : t)) }
+          : s.toolkit,
+      }))
+      void reloadBootstrap()
+    }
+    return result
+  }
+
+  function updateDraft(update: (draft: SettingsDraft) => SettingsDraft): void {
+    set(s => {
+      if (!s.form) return s
+      const draft = update(s.form.draft)
+      const { result: _result, ...rest } = s.form
+      return { ...s, form: { ...rest, draft } }
+    })
+  }
+
+  function discardDraft(): void {
+    set(s =>
+      s.form ? { ...s, form: { base: s.form.base, draft: s.form.base, revision: s.form.revision, saving: false } } : s,
+    )
+  }
+
+  function setFormResult(result: SettingsFormState['result'], saving = false): void {
+    set(s => (s.form ? { ...s, form: { ...s.form, saving, ...(result ? { result } : {}) } } : s))
+  }
+
+  async function saveSettings(): Promise<RpcResult<unknown> | undefined> {
+    const s = get()
+    const form = s.form
+    const bootstrap = s.bootstrap.value
+    if (!form || !bootstrap || form.saving) return undefined
+    const errors = validateDraft(form.draft, form.base, bootstrap.limits)
+    if (Object.keys(errors).length) {
+      setFormResult({ tone: 'error', key: 'settings.invalid' })
+      return { ok: false, error: failure('security/bad-request', 'Invalid settings.') }
+    }
+    const draft = enforceHighRisk(form.base, form.draft, bootstrap.canEditHighRiskSettings === true)
+    const patch = buildPatch(form.base, draft)
+    if (isPatchEmpty(patch)) {
+      discardDraft()
+      return { ok: true, value: undefined }
+    }
+    set(st => (st.form ? { ...st, form: { ...st.form, saving: true } } : st))
+    const result = await api.call('updateSettings', { patch, expectedRevision: form.revision })
+    if (result.ok) {
+      set(st => {
+        const current = st.bootstrap.value
+        if (!current) return st
+        const base = draftFromSettings(result.value.settings)
+        return {
+          ...st,
+          bootstrap: {
+            status: 'ready',
+            value: { ...current, settings: result.value.settings, settingsRevision: result.value.revision },
+          },
+          form: {
+            base,
+            draft: base,
+            revision: result.value.revision,
+            saving: false,
+            result: { tone: 'success', key: 'settings.saved' },
+          },
+          language: resolveLanguage(result.value.settings?.ui?.language, st.dshLocale),
+        }
+      })
+      estimateCache.clear()
+      return result
+    }
+    if (result.error.code === 'security/conflict') {
+      setFormResult(undefined, true)
+      await reloadBootstrap()
+      setFormResult({ tone: 'warn', key: 'settings.conflict' })
+      return result
+    }
+    setFormResult({ tone: 'error', error: result.error })
+    return result
+  }
+
+  // -------------------------------------------------------------------------
+  // Misc
+  // -------------------------------------------------------------------------
+
+  function canOpenPage(): boolean {
+    return host.layout() !== undefined
+  }
+
+  function openSecurityPage(close?: () => void): void {
+    close?.()
+    host.layout()?.selectPanel('security')
+  }
+
+  function flash(message: { tone: Tone; key: MessageKey } | { tone: Tone; error: RpcFailure }): void {
+    const id = ++flashSeq
+    set(s => ({ ...s, flash: { ...message, id } }))
+    if (flashTimer !== undefined) clearTimeout(flashTimer)
+    flashTimer = setTimeout(() => {
+      flashTimer = undefined
+      set(s => (s.flash?.id === id ? { ...s, flash: undefined } : s))
+    }, FLASH_MS)
+  }
+
+  function dismissFlash(): void {
+    if (flashTimer !== undefined) clearTimeout(flashTimer)
+    flashTimer = undefined
+    set(s => (s.flash ? { ...s, flash: undefined } : s))
+  }
+
+  function contractMismatch(): boolean {
+    const version = get().bootstrap.value?.contractVersion
+    return version !== undefined && version !== CONTRACT_VERSION
+  }
+
+  function dispose(): void {
+    if (disposed) return
+    disposed = true
+    for (const scanId of [...watchers.keys()]) stopWatcher(scanId)
+    if (flashTimer !== undefined) clearTimeout(flashTimer)
+    doc?.removeEventListener('visibilitychange', onVisibility)
+  }
+
+  return {
+    store,
+    api,
+    host,
+    ensureLoaded,
+    reload,
+    reloadBootstrap,
+    refreshWorkspaces,
+    refreshScans,
+    setDshLocale,
+    contractMismatch,
+    selectWorkspace,
+    setTab,
+    viewScan,
+    selectFinding,
+    setFilter,
+    openFindingFromOverview,
+    openNewScan,
+    closeNewScan,
+    estimate,
+    startScan,
+    quickRescan,
+    loadScanDetail,
+    watchScan,
+    pauseScan: scanId => scanAction('pauseScan', scanId),
+    resumeScan: scanId => scanAction('resumeScan', scanId),
+    cancelScan: scanId => scanAction('cancelScan', scanId),
+    deleteScan,
+    exportReport,
+    loadFindings,
+    loadFinding,
+    setTriage,
+    canFixInChat,
+    fixInChat,
+    copyFixPrompt,
+    loadModels,
+    loadToolkit,
+    installTool,
+    updateDraft,
+    discardDraft,
+    saveSettings,
+    updateSettings,
+    canOpenPage,
+    openSecurityPage,
+    flash,
+    dismissFlash,
+    dispose,
+  }
+}
+
+function isBootstrap(value: unknown): value is Bootstrap {
+  return typeof value === 'object' && value !== null && 'settings' in value
+}
+
+/** Prefer the workspace scanned most recently, else the first listed. */
+function pickWorkspace(workspaces: readonly WorkspaceSummary[]): string | undefined {
+  let best: WorkspaceSummary | undefined
+  let bestTime = Number.NEGATIVE_INFINITY
+  for (const w of workspaces) {
+    const t = Date.parse(w.lastScan?.createdAt ?? '')
+    if (Number.isFinite(t) && t > bestTime) {
+      best = w
+      bestTime = t
+    }
+  }
+  return (best ?? workspaces[0])?.id
+}
+
+function defaultStorage(): Pick<Storage, 'getItem' | 'setItem'> | null {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage : null
+  } catch {
+    return null
+  }
+}
+
+function readStorage(storage: Pick<Storage, 'getItem'> | null, key: string): string | undefined {
+  try {
+    return storage?.getItem(key) ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function writeStorage(storage: Pick<Storage, 'setItem'> | null, key: string, value: string): void {
+  try {
+    storage?.setItem(key, value)
+  } catch {
+    // Private mode or blocked storage: the selection just isn't remembered.
+  }
+}

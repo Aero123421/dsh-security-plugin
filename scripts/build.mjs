@@ -63,6 +63,7 @@ const clientOptions = {
   format: 'cjs',
   target: 'es2022',
   jsx: 'automatic',
+  charset: 'utf8',
   sourcemap: true,
   sourcesContent: true,
   minify: production,
