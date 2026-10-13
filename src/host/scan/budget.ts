@@ -88,5 +88,5 @@ export class ScanBudgetGate implements BudgetGate {
 }
 
 function safe(value: number | undefined): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0
 }

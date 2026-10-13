@@ -510,7 +510,7 @@ export class ScanJob {
 
   private async runSkeptic(task: TaskRecord, route: ModelRef): Promise<void> {
     const finding = task.input.findingId ? this.deps.store.getFinding(this.scan.id, task.input.findingId) : undefined
-    if (!finding || finding.verification !== 'potential') {
+    if (finding?.verification !== 'potential') {
       this.deps.store.updateTask(task.id, { status: 'skipped', finishedAt: this.iso() })
       return
     }
