@@ -12,6 +12,9 @@ finding. Results stay on your machine and can be exported as Markdown, JSON, or 
 ![Security page: overview of a finished scan](docs/images/overview.png)
 ![Finding detail with verified attack path and independent review](docs/images/finding.png)
 
+<sub>Screenshots: a Deep scan of the intentionally vulnerable fixture app `tests/fixtures/apps/express-shop`, run with
+the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/oracle`).</sub>
+
 ## What it does
 
 - **Deterministic analyzers.** A secret scanner with 25 rules (it also does the redaction), 50 pattern rules for

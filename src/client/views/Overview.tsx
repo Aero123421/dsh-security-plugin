@@ -611,7 +611,7 @@ function ResultsSummary(props: { readonly scan: ScanSummary; readonly heading: s
       </header>
 
       <div className={`dshsec-notsafe ${openTotal === 0 ? 'dshsec-notsafe--prominent' : ''}`} role="note">
-        <strong>{tr.t('summary.notSafeTitle')}</strong>
+        <strong>{tr.t(openTotal === 0 ? 'summary.notSafeTitle' : 'summary.notCompleteTitle')}</strong>
         <span>{tr.t('summary.notSafeBody')}</span>
       </div>
 

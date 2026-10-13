@@ -228,6 +228,7 @@ const en = {
   'summary.completed': 'Completed {time}',
   'summary.duration': 'Took {duration}',
   'summary.notSafeTitle': 'No findings doesn’t mean the project is safe',
+  'summary.notCompleteTitle': 'This may not be every problem in the project',
   'summary.notSafeBody':
     'A scan only reports problems it could find and back with evidence within its budget. Check the coverage below to see what was and wasn’t reviewed.',
   'summary.openBySeverity': 'Open findings by severity',
@@ -335,7 +336,7 @@ const en = {
   'detail.problem': 'What is the problem',
   'detail.impact': 'What could happen',
   'detail.preconditions': 'When it applies',
-  'detail.sure': 'How sure are we',
+  'detail.sure': 'How sure we are',
   'detail.review': 'Independent review',
   'detail.reviewBy': 'Reviewed by {model}',
   'detail.noReview': 'This finding didn’t get an independent review.',
@@ -735,6 +736,7 @@ const ja = {
   'summary.completed': '{time}に完了',
   'summary.duration': '所要時間 {duration}',
   'summary.notSafeTitle': '検出結果が 0 件でも、安全とは限りません',
+  'summary.notCompleteTitle': 'ここに挙がっている問題がすべてとは限りません',
   'summary.notSafeBody':
     'スキャンが報告するのは、予算の範囲内で見つけられ、根拠を示せた問題だけです。下の「調べた範囲」で、何を調べて何を調べていないかを確認してください。',
   'summary.openBySeverity': '未対応の検出結果（深刻度別）',
@@ -1226,6 +1228,7 @@ const zh = {
   'summary.completed': '{time}完成',
   'summary.duration': '耗时 {duration}',
   'summary.notSafeTitle': '没有发现问题并不代表项目是安全的',
+  'summary.notCompleteTitle': '这里列出的未必是项目中的全部问题',
   'summary.notSafeBody':
     '扫描只会报告在预算范围内能够找到并给出证据的问题。请查看下方的覆盖范围，了解哪些内容审查过、哪些没有。',
   'summary.openBySeverity': '按严重程度统计的待处理问题',

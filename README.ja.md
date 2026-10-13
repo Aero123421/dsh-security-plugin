@@ -7,6 +7,8 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 ![セキュリティページ：完了したスキャンの概要](docs/images/overview.png)
 ![検出結果の詳細：照合済みの攻撃経路と独立レビュー](docs/images/finding.png)
 
+<sub>画面は、わざと脆弱にしたテスト用アプリ `tests/fixtures/apps/express-shop` を、テスト用の決定的なモデル（`tests/e2e/scripted-llm`、画面上の表示は `scripted/oracle`）で Deep スキャンしたものです。</sub>
+
 ## できること
 
 - **決まった手順で動く解析ツール**: 秘密情報の検出 25 ルール（伏せ字処理も兼ねています）、JavaScript/TypeScript・Python・Dockerfile・Compose・Kubernetes 向けのパターンルール 50 個、エンドポイント（外部からの入口）の抽出（Express、Fastify、Koa、Hono、NestJS、Next.js、Flask、FastAPI、Django）、npm・PyPI・Go・Cargo のロックファイル解析。オプションで OSV.dev への脆弱性照会と、インストール済みなら Gitleaks・OSV-Scanner・Semgrep も使います。詳しくは [docs/analyzers.md](docs/analyzers.md)。
