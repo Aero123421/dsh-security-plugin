@@ -288,7 +288,12 @@ describe('Toolkit', () => {
       if (!entry.status.available) expect(entry.status.reason).toBeTruthy()
     }
     expect(entries.find(e => e.id === 'semgrep')!.installHint).toMatch(/pipx install semgrep/)
-    // The shipped lock is unpinned, so no managed offer is advertised.
-    expect(entries.every(e => e.managed === undefined)).toBe(true)
+    // A managed download is offered exactly for tools whose shipped lock entry is pinned for this platform;
+    // Semgrep is never downloaded.
+    for (const entry of entries) {
+      const asset = lock.tools[entry.id]?.assets[PLATFORM]
+      expect(entry.managed !== undefined, entry.id).toBe(asset?.sha256 != null)
+    }
+    expect(entries.find(e => e.id === 'semgrep')!.managed).toBeUndefined()
   })
 })
