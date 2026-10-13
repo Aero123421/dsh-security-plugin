@@ -10,36 +10,36 @@
       "assets": {
         "linux-x64": {
           "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz",
-          "sha256": null,
-          "size": null,
+          "sha256": "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb",
+          "size": 8216059,
           "archive": "tar.gz",
           "binary": "gitleaks"
         },
         "linux-arm64": {
           "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_arm64.tar.gz",
-          "sha256": null,
-          "size": null,
+          "sha256": "eff65261156100e5d94a6b3dec313d532fddfe19ae1590bf7a2b4f2699128356",
+          "size": 7588473,
           "archive": "tar.gz",
           "binary": "gitleaks"
         },
         "darwin-x64": {
           "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_darwin_x64.tar.gz",
-          "sha256": null,
-          "size": null,
+          "sha256": "edf5a507008b0d2ef4959575772772770586409c1f6f74dabf19cbe7ec341ced",
+          "size": 8343234,
           "archive": "tar.gz",
           "binary": "gitleaks"
         },
         "darwin-arm64": {
           "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_darwin_arm64.tar.gz",
-          "sha256": null,
-          "size": null,
+          "sha256": "d942f3ad147250c9edbaab3fed9e482f98d3b59ba10ae97b8d75647e3ade492c",
+          "size": 7881191,
           "archive": "tar.gz",
           "binary": "gitleaks"
         },
         "win32-x64": {
           "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_windows_x64.zip",
-          "sha256": null,
-          "size": null,
+          "sha256": "da6458e8864af553807de1c46a7a8eac0880bd6b99ba56288e87e86a45af884f",
+          "size": 8421550,
           "archive": "zip",
           "binary": "gitleaks.exe"
         }
@@ -54,43 +54,43 @@
       "assets": {
         "linux-x64": {
           "url": "https://github.com/google/osv-scanner/releases/download/v2.2.2/osv-scanner_linux_amd64",
-          "sha256": null,
-          "size": null,
+          "sha256": "c799274b682e0437c802d4714a136ad09b39c65547c460049ba5358d28afa576",
+          "size": 47603896,
           "archive": "none",
           "binary": "osv-scanner"
         },
         "linux-arm64": {
           "url": "https://github.com/google/osv-scanner/releases/download/v2.2.2/osv-scanner_linux_arm64",
-          "sha256": null,
-          "size": null,
+          "sha256": "62004a8b3c84d5041e6565113cc98af17da8d5ef9ebd070d355f1522bcd1d383",
+          "size": 44695736,
           "archive": "none",
           "binary": "osv-scanner"
         },
         "darwin-x64": {
           "url": "https://github.com/google/osv-scanner/releases/download/v2.2.2/osv-scanner_darwin_amd64",
-          "sha256": null,
-          "size": null,
+          "sha256": "5c2a2e2a686e34c0674e0a463aa626467df5d9fba0ed06870a2eb684dc434de3",
+          "size": 41610704,
           "archive": "none",
           "binary": "osv-scanner"
         },
         "darwin-arm64": {
           "url": "https://github.com/google/osv-scanner/releases/download/v2.2.2/osv-scanner_darwin_arm64",
-          "sha256": null,
-          "size": null,
+          "sha256": "f1e1cc84b6e365b79b874cb9028a4f74ac64666094b542f1eb196b10f44b505e",
+          "size": 39215314,
           "archive": "none",
           "binary": "osv-scanner"
         },
         "win32-x64": {
           "url": "https://github.com/google/osv-scanner/releases/download/v2.2.2/osv-scanner_windows_amd64.exe",
-          "sha256": null,
-          "size": null,
+          "sha256": "5cce6a9b96b88d0620bfdb22da72497c444948e56c64d3508f054cded13fb49f",
+          "size": 41973760,
           "archive": "none",
           "binary": "osv-scanner.exe"
         },
         "win32-arm64": {
           "url": "https://github.com/google/osv-scanner/releases/download/v2.2.2/osv-scanner_windows_arm64.exe",
-          "sha256": null,
-          "size": null,
+          "sha256": "bb4d4a291cc9a2e0ee30cd2acf53ccae1c1d6ce1fe2e470ab0b88fb485d0ff2d",
+          "size": 38803968,
           "archive": "none",
           "binary": "osv-scanner.exe"
         }
