@@ -3,6 +3,8 @@
  * `src/host/dsh/ports.ts` against the real DSH types pinned in
  * devDependencies (`@deepseek-ai/dsh-llm`, `@deepseek-ai/dsh-client-connection`,
  * `@deepseek-ai/dsh-workspace` 0.2.1-alpha.2, `@deepseek-ai/cordis` 4.0.5-alpha.1).
+ * Those pins are the minimum supported release. `scripts/check-dsh-alpha.mjs`
+ * repeats this typecheck against the newest `@deepseek-ai/dsh` alpha.
  *
  * The assertions are types: they are enforced by
  * `pnpm exec tsc -p tsconfig.test.json --noEmit` (part of `pnpm typecheck`),

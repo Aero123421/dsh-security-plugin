@@ -18,6 +18,7 @@ pnpm build          # lib/index.js + lib/client.js
 pnpm test           # or: pnpm test:watch
 pnpm check          # lint + typecheck + test + build + package verification (what CI runs)
 pnpm check:lib      # committed lib/ matches a fresh build
+pnpm check:dsh      # latest DSH alpha: peer range, typecheck, scratch web boot (needs network; CI runs this)
 ```
 
 `lib/` is committed so users can install with `github:Aero123421/dsh-security-plugin#vX.Y.Z` without a build step.
