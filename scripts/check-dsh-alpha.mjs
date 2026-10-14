@@ -76,7 +76,7 @@ function npmAlpha() {
 
 function installSemver() {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-semver-'))
-  run('npm', ['init', '-y'], { cwd: dir })
+  run('npm', ['init', '-y'], { cwd: dir, quiet: true })
   run('npm', ['install', '--silent', '--no-audit', '--no-fund', semverSpec], { cwd: dir, timeout: installMs })
   const installed = JSON.parse(readFileSync(join(dir, 'node_modules', 'semver', 'package.json'), 'utf8'))
   console.log(`semver ${installed.version} (DSH app-boot depends on ${semverSpec})`)
@@ -188,7 +188,7 @@ async function bootWebProfile(alpha) {
   try {
     const env = { ...process.env, DSH_HOME: home }
     console.log(`installing @deepseek-ai/dsh@${alpha} into a scratch profile`)
-    run('npm', ['init', '-y'], { cwd: installDir })
+    run('npm', ['init', '-y'], { cwd: installDir, quiet: true })
     run('npm', ['install', '--no-audit', '--no-fund', `@deepseek-ai/dsh@${alpha}`], {
       cwd: installDir,
       timeout: installMs,
@@ -361,8 +361,9 @@ function capture(command, args) {
   return result.stdout
 }
 
-function run(command, args, options) {
-  const result = spawnSync(command, args, { stdio: 'inherit', ...options })
+function run(command, args, options = {}) {
+  const { quiet, ...spawnOptions } = options
+  const result = spawnSync(command, args, { stdio: quiet ? 'ignore' : 'inherit', ...spawnOptions })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited ${result.status}`)
 }
