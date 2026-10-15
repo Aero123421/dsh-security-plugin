@@ -29,13 +29,13 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 1. **インストール**: DSH の Web UI で「プラグイン → プラグインを追加」を開き、次を入力します。
 
    ```text
-   github:Aero123421/dsh-security-plugin#v0.1.0
+   github:Aero123421/dsh-security-plugin#v0.1.1
    ```
 
    ターミナルから入れる場合（ここでは `web` プロファイル）:
 
    ```sh
-   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.1.0
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.1.1
    ```
 
    `#` の後ろには、入れたい[リリース](https://github.com/Aero123421/dsh-security-plugin/releases)のタグを指定します。タグを省くと、未リリースの `main` ブランチが入ります。各リリースにはビルド済みの `dsh-security-plugin-X.Y.Z.tgz` と `SHA256SUMS` も添付しており、その URL を同じ場所に入れても導入できます。npm には公開していません。有効化し、再起動を求められたら DSH を再起動してください。更新するときは、新しいタグで同じように追加します。動いている版は「設定」タブで確認できます。読み込まれたかどうかは、`dsh --profile web --dump-config` の出力に `# == dsh-security-plugin` というレイヤーがあるかで確認できます。

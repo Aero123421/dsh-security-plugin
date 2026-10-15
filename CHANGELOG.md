@@ -8,12 +8,22 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-15
+
 ### Fixed
 
 - SQLite writes that use numbered `?NNN` parameters now succeed on Node.js 22.19.0, the lower bound of `engines.node`.
   That release names `?NNN` parameters and skips them when a statement is given a positional argument list
   (`ERR_SQLITE_ERROR`, errcode 25, column index out of range), so scans could not be stored. Node.js 22.20.0 and
   later accept the positional list; the store binds `?1`, `?2`, … by name, which both releases accept.
+  ([#4](https://github.com/Aero123421/dsh-security-plugin/issues/4))
+
+### Documentation
+
+- Inventoried the plugin's loopback checks (`isLoopbackRequest`) against the DSH Host-header issue. The check only
+  decides which settings a browser page may change; authentication stays with DSH. No behaviour change; regression
+  tests pin that `X-Forwarded-*` headers do not affect it.
+  ([#5](https://github.com/Aero123421/dsh-security-plugin/issues/5))
 
 ## [0.1.0] - 2026-10-13
 
@@ -89,5 +99,6 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Aero123421/dsh-security-plugin/releases/tag/v0.1.0
