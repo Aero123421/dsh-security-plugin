@@ -104,6 +104,31 @@ describe('createMethodHandler: happy path', () => {
     await handler(rpcRequest('listModels', envelope('listModels'), { headers: { host: '192.168.1.10:3080' } }))
     expect(loopback).toBe(false)
   })
+
+  it('does not let a loopback URL or X-Forwarded-* mark the call local', async () => {
+    let loopback: boolean | undefined
+    const handler = createMethodHandler(
+      'listModels',
+      async (_payload, call) => {
+        loopback = call.loopback
+        return []
+      },
+      { logger: recordingLogger() },
+    )
+    await handler(
+      rpcRequest('listModels', envelope('listModels'), {
+        url: 'http://127.0.0.1:3080/api/dsh-security/listModels',
+        headers: {
+          host: '203.0.113.10:3080',
+          'x-forwarded-host': '127.0.0.1:3080',
+          'x-forwarded-for': '127.0.0.1',
+          'x-real-ip': '127.0.0.1',
+          forwarded: 'for=127.0.0.1;host=localhost',
+        },
+      }),
+    )
+    expect(loopback).toBe(false)
+  })
 })
 
 describe('createMethodHandler: transport failures', () => {

@@ -8,6 +8,13 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- SQLite writes that use numbered `?NNN` parameters now succeed on Node.js 22.19.0, the lower bound of `engines.node`.
+  That release names `?NNN` parameters and skips them when a statement is given a positional argument list
+  (`ERR_SQLITE_ERROR`, errcode 25, column index out of range), so scans could not be stored. Node.js 22.20.0 and
+  later accept the positional list; the store binds `?1`, `?2`, … by name, which both releases accept.
+
 ## [0.1.0] - 2026-10-13
 
 First public release.

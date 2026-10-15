@@ -229,6 +229,27 @@ const SQL = {
 } as const
 
 /**
+ * Bind a positional argument list to `?1`, `?2`, … by name.
+ *
+ * Node.js 22.19.0 gives `?NNN` a name and then skips every named parameter when
+ * applying a positional list, so `statement.run(a, b)` on `VALUES (?1, ?2)`
+ * throws `ERR_SQLITE_ERROR` (errcode 25, column index out of range). Node.js
+ * 22.20.0 and later bind that list by position. Passing the names explicitly
+ * works on both, including statements whose indexes are not in textual order
+ * (`UPDATE … SET col = ?2 WHERE id = ?1`). Anonymous `?` placeholders stay
+ * positional: they have no name for this map to address.
+ */
+function numbered(values: readonly SQLInputValue[]): Record<string, SQLInputValue> {
+  const params: Record<string, SQLInputValue> = Object.create(null)
+  for (let index = 0; index < values.length; index++) {
+    const value = values[index]
+    if (value === undefined) throw new TypeError(`SQLite parameter ?${index + 1} is undefined`)
+    params[`?${index + 1}`] = value
+  }
+  return params
+}
+
+/**
  * Open (creating and migrating as needed) the security database at `path`.
  * Use `':memory:'` for a throwaway database. Throws `StoreError` with code
  * `schema-too-new`, `corrupt`, or `io` when the file cannot be used.
@@ -327,7 +348,7 @@ class SqliteSecurityStore implements SecurityStore {
 
   insertScan(scan: ScanRecord): void {
     this.guard('insertScan', () => {
-      this.stmt(SQL.insertScan).run(...scanParams(scan))
+      this.stmt(SQL.insertScan).run(numbered(scanParams(scan)))
     })
   }
 
@@ -341,7 +362,7 @@ class SqliteSecurityStore implements SecurityStore {
         if (patch.clearProgress) delete next.progress
         next.updatedAt = this.stamp()
         const record = next as unknown as ScanRecord
-        this.stmt(SQL.updateScan).run(...scanParams(record))
+        this.stmt(SQL.updateScan).run(numbered(scanParams(record)))
         return record
       }),
     )
@@ -387,7 +408,7 @@ class SqliteSecurityStore implements SecurityStore {
   ensureTask(task: TaskRecord): TaskRecord {
     return this.guard('ensureTask', () =>
       this.atomic(() => {
-        this.stmt(SQL.insertTask).run(...taskParams(task))
+        this.stmt(SQL.insertTask).run(numbered(taskParams(task)))
         const row = this.stmt(SQL.getTaskByKey).get(task.scanId, task.key)
         if (row === undefined) throw new StoreError('io', `ensureTask: task ${task.key} vanished after insert`)
         return decodeTask(row)
@@ -401,7 +422,7 @@ class SqliteSecurityStore implements SecurityStore {
         const current = mapOne(this.stmt(SQL.getTask).get(id), decodeTask)
         if (current === undefined) throw notFound('task', id)
         const record = mergePatch(current, patch, TASK_PATCH_KEYS) as unknown as TaskRecord
-        this.stmt(SQL.updateTask).run(...taskParams(record))
+        this.stmt(SQL.updateTask).run(numbered(taskParams(record)))
         return record
       }),
     )
@@ -423,7 +444,7 @@ class SqliteSecurityStore implements SecurityStore {
 
   insertAgentRun(run: AgentRunRecord): void {
     this.guard('insertAgentRun', () => {
-      this.stmt(SQL.insertAgentRun).run(...agentRunParams(run))
+      this.stmt(SQL.insertAgentRun).run(numbered(agentRunParams(run)))
     })
   }
 
@@ -433,7 +454,7 @@ class SqliteSecurityStore implements SecurityStore {
         const current = mapOne(this.stmt(SQL.getAgentRun).get(id), decodeAgentRun)
         if (current === undefined) throw notFound('agent run', id)
         const record = mergePatch(current, patch, AGENT_RUN_PATCH_KEYS) as unknown as AgentRunRecord
-        this.stmt(SQL.updateAgentRun).run(...agentRunParams(record))
+        this.stmt(SQL.updateAgentRun).run(numbered(agentRunParams(record)))
         return record
       }),
     )
@@ -476,7 +497,7 @@ class SqliteSecurityStore implements SecurityStore {
 
   insertEvidence(evidence: EvidenceRecord): void {
     this.guard('insertEvidence', () => {
-      this.stmt(SQL.insertEvidence).run(...evidenceParams(evidence))
+      this.stmt(SQL.insertEvidence).run(numbered(evidenceParams(evidence)))
     })
   }
 
@@ -505,7 +526,7 @@ class SqliteSecurityStore implements SecurityStore {
 
   insertFinding(finding: FindingRecord): void {
     this.guard('insertFinding', () => {
-      this.stmt(SQL.insertFinding).run(...findingParams(finding))
+      this.stmt(SQL.insertFinding).run(numbered(findingParams(finding)))
     })
   }
 
@@ -517,7 +538,7 @@ class SqliteSecurityStore implements SecurityStore {
         const next = mergePatch(current, patch, FINDING_PATCH_KEYS)
         next.updatedAt = this.stamp()
         const record = next as unknown as FindingRecord
-        this.stmt(SQL.updateFinding).run(...findingParams(record))
+        this.stmt(SQL.updateFinding).run(numbered(findingParams(record)))
         return record
       }),
     )
@@ -564,7 +585,7 @@ class SqliteSecurityStore implements SecurityStore {
     return this.guard('countOpenFindings', () => {
       const counts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
       let confirmed = 0
-      for (const row of this.stmt(SQL.countOpenFindings).all(scanId, workspaceId)) {
+      for (const row of this.stmt(SQL.countOpenFindings).all(numbered([scanId, workspaceId]))) {
         const { severity, verification, n } = row
         if (typeof n !== 'number' || !isSeverity(severity) || typeof verification !== 'string') {
           throw new StoreError('corrupt', `findings of scan ${scanId}: unexpected severity ${String(severity)}`)

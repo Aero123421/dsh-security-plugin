@@ -160,6 +160,15 @@ the provider the user chose. The next section covers how that content is reduced
   - The peer's network address is not available: DSH passes exact Fetch routes a Web `Request` without connection
     information. `ctx.connection.allowsRemoteAuthorities` does not settle the question either: when it is `false`,
     DSH still admits the listener's own bind address (for example a LAN IP) as `Host`.
+  - **This is not the CVE-2026-82533 admission check.** That vulnerability (NVD, published 2026-09-08; fixed in
+    DeepSeek Harness 0.1.2-alpha.1) let an unauthenticated caller into the agent-control API when the client-supplied
+    `Host` was a loopback name, without comparing it to the TCP peer. This plugin's peer range starts at DSH
+    `0.2.1-alpha.2`. On `dsh-v0.2.1-alpha.2` and `dsh-v0.2.1-alpha.3`, Connection's `/api` handler calls `admit`
+    before any plugin route: a `Host` outside loopback, the listener bind address, and `trustedHosts` is rejected
+    with 403, and a request without a browser session is rejected with 401. The plugin does not see those requests
+    and does not open a listener of its own. `isLoopbackRequest` runs only after admission, and only for the page
+    policy above. `X-Forwarded-*` and `Forwarded` still do not change it, in either direction: a proxy header cannot
+    make a non-loopback `Host` local, and it cannot make a loopback `Host` remote.
 - **Concurrency.** Settings use compare-and-set on a revision, so a stale page cannot silently overwrite newer
   settings.
 
