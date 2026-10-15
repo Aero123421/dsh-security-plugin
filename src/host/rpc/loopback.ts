@@ -17,6 +17,11 @@
  * - The peer's socket address is not available: DSH hands exact Fetch routes
  *   a Web `Request` without connection information
  *   (`ConnectionFetchRoute.fetch(request)` in `@deepseek-ai/dsh-client-connection`).
+ * - This function does not admit the caller. CVE-2026-82533 was an
+ *   unauthenticated agent-control API in DeepSeek Harness before
+ *   0.1.2-alpha.1, which treated a client-supplied loopback `Host` as
+ *   sufficient. Supported DSH releases authenticate `/api` before a plugin
+ *   route runs. See `docs/security-model.md`.
  * - `ctx.connection.allowsRemoteAuthorities` is not used. When it is `false`
  *   DSH still admits the listener's own bind address as `Host` (for example a
  *   LAN IP), so it does not imply that every admitted page is local, and when

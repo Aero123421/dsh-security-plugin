@@ -878,3 +878,53 @@ describe('openSecurityStore (files)', () => {
     })
   })
 })
+
+describe('numbered ?NNN parameters (Node.js 22.19.0)', () => {
+  it('binds ?NNN by name when a positional argument list misses those parameters', () => {
+    const db = new DatabaseSync(':memory:')
+    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, b INTEGER NOT NULL) STRICT')
+    db.prepare('INSERT INTO t (id, b) VALUES (?, ?)').run(1, 1)
+    const update = db.prepare('UPDATE t SET b = ?2 WHERE id = ?1')
+    let positional: 'bound' | 'out-of-range' = 'bound'
+    try {
+      update.run(1, 7)
+    } catch (error) {
+      const sqlite = error as { code?: unknown; errcode?: unknown }
+      expect(sqlite.code).toBe('ERR_SQLITE_ERROR')
+      expect(sqlite.errcode).toBe(25)
+      positional = 'out-of-range'
+    }
+    // 22.19.0 is the engines lower bound and the release that skips named ?NNN.
+    if (process.versions.node.startsWith('22.19.')) expect(positional).toBe('out-of-range')
+    db.exec('UPDATE t SET b = 1')
+    update.run({ '?1': 1, '?2': 9 })
+    expect(db.prepare('SELECT id, b FROM t').get()).toEqual({ id: 1, b: 9 })
+    db.close()
+  })
+
+  it('round-trips rows whose ?NNN indexes are not in textual order', () => {
+    const store = openSecurityStore(':memory:', { now: () => NOW })
+    try {
+      store.insertScan(scanOf({ id: 'scan_n', workspaceId: 'ws_n' }))
+      const updated = store.updateScan('scan_n', { status: 'running', phase: 'inventory' })
+      expect(updated).toMatchObject({ id: 'scan_n', workspaceId: 'ws_n', status: 'running', phase: 'inventory' })
+      expect(store.getScan('scan_n')).toStrictEqual(updated)
+
+      store.insertFinding(findingOf({ id: 'f_n', scanId: 'scan_n', fingerprint: 'fp_n' }))
+      const revised = store.updateFinding('f_n', { title: 'Renamed' })
+      expect(revised).toMatchObject({ id: 'f_n', scanId: 'scan_n', title: 'Renamed' })
+      expect(store.getFinding('scan_n', 'f_n')).toStrictEqual(revised)
+
+      // countOpenFindings binds the scan as ?1 and the workspace as ?2, while the SQL names ?2 first.
+      // Triage is joined on ?2, so a dismissal in one workspace must not hide the finding from another.
+      const empty = { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
+      expect(store.countOpenFindings('scan_n', 'ws_n')).toEqual({ counts: { ...empty, high: 1 }, confirmed: 0 })
+      store.setTriage('ws_n', 'fp_n', 'fixed', undefined)
+      expect(store.countOpenFindings('scan_n', 'ws_n')).toEqual({ counts: empty, confirmed: 0 })
+      expect(store.countOpenFindings('scan_n', 'ws_other')).toEqual({ counts: { ...empty, high: 1 }, confirmed: 0 })
+      expect(store.countOpenFindings('scan_other', 'ws_n')).toEqual({ counts: empty, confirmed: 0 })
+    } finally {
+      store.close()
+    }
+  })
+})

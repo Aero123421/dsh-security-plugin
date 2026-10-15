@@ -52,6 +52,32 @@ describe('isLoopbackRequest', () => {
     )
   })
 
+  it('keeps a non-loopback Host remote when the URL and forwarded headers name loopback', () => {
+    expect(
+      isLoopbackRequest(
+        request('http://127.0.0.1:3080/api/dsh-security/updateSettings', {
+          host: '203.0.113.10:3080',
+          'x-forwarded-host': 'localhost',
+          'x-forwarded-for': '127.0.0.1',
+          'x-real-ip': '::1',
+          forwarded: 'for="[::1]";host=127.0.0.1',
+        }),
+      ),
+    ).toBe(false)
+  })
+
+  it('does not let X-Forwarded-* demote a loopback URL when Host is absent', () => {
+    expect(
+      isLoopbackRequest(
+        request('http://127.0.0.1:3080/api/x', {
+          'x-forwarded-for': '203.0.113.10',
+          'x-forwarded-host': 'evil.example',
+          forwarded: 'for=203.0.113.10;host=evil.example',
+        }),
+      ),
+    ).toBe(true)
+  })
+
   it('falls back to the URL hostname without a host header', () => {
     expect(isLoopbackRequest(request('http://localhost:3080/api/x'))).toBe(true)
     expect(isLoopbackRequest(request('http://[::1]:3080/api/x'))).toBe(true)
