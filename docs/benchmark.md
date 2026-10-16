@@ -16,7 +16,7 @@ contains `FAKE`. Nothing in these apps is installed or run.
 | `express-shop` | TypeScript, Express | 10 | 7 | ai 7, sast 4, secrets 2, dependency 2, routes 1 |
 | `fastapi-notes` | Python, FastAPI | 9 | 6 | ai 7, sast 5, dependency 2, secrets 1 |
 | `next-saas` | TypeScript, Next.js, next-auth, Prisma | 5 | 6 | ai 4, sast 2, secrets 1 |
-| `flask-secure` | Python, Flask, SQLAlchemy (mostly secure) | 1 | 10 | ai 1 |
+| `flask-secure` | Python, Flask, SQLAlchemy (mostly secure) | 1 | 10 | ai 1, sast 1 |
 
 - A **planted finding** records `path`, the key `line` (the sink or the missing check), an exact `anchor` substring
   on that line, `category`, optional `cwe`, `severity`, and `detectableBy`. The `detectableBy` values are `sast`,

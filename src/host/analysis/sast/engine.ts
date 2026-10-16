@@ -160,6 +160,9 @@ function toSignal(file: SnapshotFile, starts: readonly number[], hit: Hit, mode:
     metadata: {
       column,
       mode,
+      ...(rule.cwe === 'CWE-798' && masks.length === 1
+        ? { secretStart: masks[0]!.start, secretEnd: masks[0]!.end }
+        : {}),
       ...(hit.taint ? { source: redactText(hit.taint.source) } : {}),
       ...hit.metadata,
     },

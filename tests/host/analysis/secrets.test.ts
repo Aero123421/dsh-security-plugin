@@ -110,11 +110,37 @@ describe('secret rules', () => {
     expect(scanOne(text)).toEqual([])
   })
 
-  it('lowers confidence (but keeps) matches in test files', () => {
-    const text = SAMPLES['github-token']!
-    expect(scanFileContent('src/a.ts', text, { isTest: false })[0]!.confidence).toBe('high')
-    expect(scanFileContent('tests/a.ts', text, { isTest: true })[0]!.confidence).toBe('medium')
+  it.each([
+    [
+      'Japanese audit reproduction',
+      "'notice.budget-tokens': 'すべての作業が終わる前に、トークンの予算を使い切りました。'",
+    ],
+    ['Chinese without spaces', 'token: "在所有任务完成之前，令牌预算已经全部用完。"'],
+    ['Chinese mixed with ASCII', 'token: "在所有任务完成之前，token 预算已用完。"'],
+    ['English', 'token: "The token budget ran out before every task finished."'],
+    ['French', 'token: "Le budget de jetons est épuisé avant la fin des tâches !"'],
+    ['Japanese without punctuation', 'token: "すべての作業が終わる前にトークンの予算を使い切りました"'],
+  ])('ignores natural-language prose: %s', (_label, text) => {
+    expect(scanOne(text)).toEqual([])
   })
+
+  it.each(['src/config.ts', 'src/i18n.ts', 'locales/ja.json'])('keeps opaque generic tokens in %s', path => {
+    const matches = scanOne(`'notice.budget-tokens': "${RANDOM40}!"`, path)
+    expect(matches.map(m => m.ruleId)).toEqual(['generic-secret'])
+  })
+
+  it.each(['tests/a.ts', 'test/a.ts', 'fixtures/a.ts', 'examples/a.ts', 'src/a.test.ts'])(
+    'caps severity but keeps lowered-confidence secrets in %s',
+    path => {
+      const text = SAMPLES['github-token']!
+      expect(scanFileContent('src/a.ts', text)[0]).toMatchObject({ severity: 'high', confidence: 'high' })
+      expect(scanFileContent(path, text)[0]).toMatchObject({ severity: 'low', confidence: 'medium' })
+      expect(scanFileContent('src/a.ts', text, { isTest: true })[0]).toMatchObject({
+        severity: 'low',
+        confidence: 'medium',
+      })
+    },
+  )
 
   it('gives lower confidence to local or default database credentials', () => {
     const local = scanOne(`url = "${j('mysql', '://', 'app:R4nd0mP4ss@localhost:3306/db')}"`)

@@ -9,7 +9,8 @@
 
 import { createHash } from 'node:crypto'
 import ignore from 'ignore'
-import type { Severity } from '../../shared/domain.ts'
+import { type Severity, severityRank } from '../../shared/domain.ts'
+import { isTestPath } from './snapshot.ts'
 import { type Language, type Signal, type Snapshot, yieldToEventLoop } from './types.ts'
 
 export type SecretConfidence = 'low' | 'medium' | 'high'
@@ -443,7 +444,8 @@ export function scanFileContent(
   const candidates = findCandidates(content, 'scan', options.language)
   if (candidates.length === 0) return []
   const starts = lineStarts(content)
-  const downgrade = options.isTest === true || /(?:^|[./_-])(?:example|sample|template|dist)$/i.test(path)
+  const downgrade =
+    options.isTest === true || isTestPath(path) || /(?:^|[./_-])(?:example|sample|template|dist)$/i.test(path)
   return candidates.map(({ rule, start, end, confidence }) => {
     const secret = content.slice(start, end)
     const from = positionOf(starts, start)
@@ -458,7 +460,7 @@ export function scanFileContent(
       endColumn: to.column + 1,
       start,
       end,
-      severity: rule.severity,
+      severity: downgrade && severityRank(rule.severity) < severityRank('low') ? 'low' : rule.severity,
       confidence: downgrade ? lowerConfidence(confidence) : confidence,
       fingerprint: secretFingerprint(rule.id, path, secret),
       preview: maskSecret(secret),
@@ -507,7 +509,7 @@ export function secretSignals(matches: readonly SecretMatch[], snapshot: Snapsho
         'environment variable or a secret manager instead of source code, and purge it from git history ' +
         '(e.g. git filter-repo) because deleting the line does not remove earlier commits.',
       fingerprintParts: [match.ruleId, match.path, match.fingerprint],
-      metadata: { preview: match.preview, column: match.column },
+      metadata: { preview: match.preview, column: match.column, secretStart: match.start, secretEnd: match.end },
     })
   }
   return signals
@@ -791,9 +793,18 @@ function isTemplateValue(value: string): boolean {
   return /\$\{|\{\{|<[A-Za-z_ -]+>|^\{[\w.-]*\}$|^\$[A-Za-z_]\w*$|%\(\w+\)s|process\.env|os\.environ|getenv/.test(value)
 }
 
+/** Generic tokens are usually encoded ASCII; prose can have misleadingly high entropy. */
+function isProseValue(value: string): boolean {
+  const chars = [...value]
+  const nonAsciiLetters = chars.filter(ch => /\p{L}/u.test(ch) && !/[A-Za-z]/.test(ch)).length
+  // Whitespace already excludes English sentences; CJK prose often has none.
+  // Do not reject an opaque token merely for ending in sentence punctuation.
+  return nonAsciiLetters >= 6 && nonAsciiLetters > chars.length / 2
+}
+
 function refineGeneric(secret: string, key: string): SecretConfidence | false | undefined {
   if (KEY_NAME_EXCLUDE.test(key) || /token(?:iz|s?[_-]?(?:count|limit|usage|type))/i.test(key)) return false
-  if (secret.includes('://') || /^[$%@{<]/.test(secret)) return false
+  if (secret.includes('://') || /^[$%@{<]/.test(secret) || isProseValue(secret)) return false
   if (/^[a-z]+(?:[._-][a-z0-9]+)+$/.test(secret)) return false // dotted.or_snake identifiers
   if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(secret)) return false // ENV_VAR_NAMES
   if (/^[\w./-]+\.(?:js|ts|json|py|go|rb|php|java|ya?ml|txt|html?|css|png|svg)$/i.test(secret)) return false

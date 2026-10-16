@@ -190,6 +190,31 @@ const HOSTS: RuleMeta = {
   references: [REF.misconfig, cweUrl('CWE-16')],
 }
 
+const COOKIE_SECURE: RuleMeta = {
+  id: 'py.cookie-insecure',
+  title: 'Cookie sent without the Secure flag',
+  category: 'misconfiguration',
+  cwe: 'CWE-614',
+  severity: 'low',
+  message:
+    '`SESSION_COOKIE_SECURE = False` or `CSRF_COOKIE_SECURE = False` allows the browser to send the cookie over plain HTTP, where someone on the network can intercept it.',
+  recommendation:
+    'Set `SESSION_COOKIE_SECURE = True` and, for Django CSRF cookies, `CSRF_COOKIE_SECURE = True` in production, and serve the application over HTTPS.',
+  references: [REF.misconfig, cweUrl('CWE-614')],
+}
+
+const COOKIE_HTTPONLY: RuleMeta = {
+  id: 'py.cookie-without-httponly',
+  title: 'Session cookie readable by JavaScript',
+  category: 'misconfiguration',
+  cwe: 'CWE-1004',
+  severity: 'low',
+  message:
+    '`SESSION_COOKIE_HTTPONLY = False` lets JavaScript read the session cookie. An injected script can steal it and impersonate the user.',
+  recommendation: 'Set `SESSION_COOKIE_HTTPONLY = True` so browser scripts cannot read the session cookie.',
+  references: [REF.misconfig, cweUrl('CWE-1004')],
+}
+
 const SECRET_KEY: RuleMeta = {
   id: 'py.hardcoded-secret-key',
   title: 'Hard-coded framework secret key',
@@ -298,6 +323,8 @@ export const PY_RULES: readonly RuleMeta[] = [
   REDIRECT,
   DEBUG,
   HOSTS,
+  COOKIE_SECURE,
+  COOKIE_HTTPONLY,
   SECRET_KEY,
   TLS,
   JWT,
@@ -753,7 +780,7 @@ function massAssignment(chk: Checker, call: CallFact): void {
   }
 }
 
-/** Django/Flask settings: DEBUG, ALLOWED_HOSTS, SECRET_KEY. */
+/** Django/Flask settings: DEBUG, ALLOWED_HOSTS, cookie flags and SECRET_KEY. */
 function settings(chk: Checker): void {
   const settingsFile =
     /(?:^|\/)(?:settings|config|conf|configuration|local_settings|base)(?:\/[^/]*)?\.py$|(?:^|\/)settings\/[^/]+\.py$/.test(
@@ -769,6 +796,7 @@ function settings(chk: Checker): void {
   for (const assign of chk.model.assigns) {
     if (assign.fn || assign.op !== '=' || assign.targets.length !== 1) continue
     const name = assign.targets[0]!.name
+    cookieSetting(chk, name, assign.value, assign)
     if (name === 'DEBUG' && isDjango && chk.ex.isWord(assign.value, 'True')) {
       chk.certain(DEBUG, assign, 'high', { severity: devPath ? 'low' : 'medium' })
     } else if (
@@ -783,6 +811,7 @@ function settings(chk: Checker): void {
   }
   for (const assign of chk.model.memberAssigns) {
     if (assign.op !== '=') continue
+    cookieSetting(chk, assign.prop, assign.value, assign)
     if (
       assign.prop === 'SECRET_KEY' ||
       (assign.prop === 'secret_key' && /(?:^|\.)app$/.test(assign.target.replace(/\.secret_key$/, '')))
@@ -792,9 +821,19 @@ function settings(chk: Checker): void {
   }
   for (const call of chk.model.calls) {
     if (call.name !== 'update' || !/(?:^|\.)config$/.test(call.receiver)) continue
+    for (const name of ['SESSION_COOKIE_SECURE', 'CSRF_COOKIE_SECURE', 'SESSION_COOKIE_HTTPONLY']) {
+      const flag = chk.keyword(call, name)
+      if (flag) cookieSetting(chk, name, flag, flag)
+    }
     const value = chk.keyword(call, 'SECRET_KEY')
     if (value) secretKey(chk, value, call, devPath)
   }
+}
+
+function cookieSetting(chk: Checker, name: string, value: Span, at: Span): void {
+  if (!chk.ex.isWord(value, 'False')) return
+  if (name === 'SESSION_COOKIE_SECURE' || name === 'CSRF_COOKIE_SECURE') chk.certain(COOKIE_SECURE, at, 'high')
+  else if (name === 'SESSION_COOKIE_HTTPONLY') chk.certain(COOKIE_HTTPONLY, at, 'high')
 }
 
 const PLACEHOLDER_SECRET =

@@ -75,8 +75,46 @@ function signalLimitations(signal: Signal): string[] {
 }
 
 /**
- * Insert one finding per reportable signal, skipping fingerprints the scan
- * already has (safe to call again when a scan resumes).
+ * Merge generic secret hits only when a specific credential rule covers the
+ * same sensitive span. Never use the hunter's ±3-line overlap heuristic here:
+ * adjacent credentials and unrelated findings must remain independent.
+ */
+function signalGroups(signals: readonly Signal[]): { primary: Signal; duplicates: Signal[] }[] {
+  const reportable = signals.filter(isReportableSignal)
+  const groups = new Map(reportable.map(signal => [signal, { primary: signal, duplicates: [] as Signal[] }]))
+  const specific = reportable
+    .filter(
+      signal =>
+        (signal.analyzer === 'secrets' && signal.ruleId !== 'generic-secret' && signal.ruleId !== 'env-secret') ||
+        (signal.analyzer === 'sast' && signal.cwe === 'CWE-798'),
+    )
+    .sort((a, b) => severityRank(a.severity) - severityRank(b.severity) || a.ruleId.localeCompare(b.ruleId))
+  for (const generic of reportable) {
+    if (generic.analyzer !== 'secrets' || generic.ruleId !== 'generic-secret') continue
+    const start = generic.metadata?.secretStart
+    const end = generic.metadata?.secretEnd
+    if (typeof start !== 'number' || typeof end !== 'number' || end <= start) continue
+    const primary = specific.find(signal => {
+      const from = signal.metadata?.secretStart
+      const to = signal.metadata?.secretEnd
+      return (
+        signal.location.path === generic.location.path &&
+        typeof from === 'number' &&
+        typeof to === 'number' &&
+        from <= start &&
+        to >= end
+      )
+    })
+    if (!primary) continue
+    groups.get(primary)!.duplicates.push(generic)
+    groups.delete(generic)
+  }
+  return [...groups.values()]
+}
+
+/**
+ * Insert reportable signals, coalescing generic/specific secret duplicates and
+ * skipping fingerprints the scan already has (safe when a scan resumes).
  */
 export function recordSignalFindings(
   store: SecurityStore,
@@ -84,35 +122,41 @@ export function recordSignalFindings(
   signals: readonly Signal[],
   now: () => string,
 ): { readonly created: number; readonly byFingerprint: Map<string, Signal> } {
-  const byFingerprint = new Map<string, Signal>()
+  const byFingerprint = new Map(signals.filter(isReportableSignal).map(signal => [signalFingerprint(signal), signal]))
   let created = 0
   store.transaction(() => {
-    for (const signal of signals) {
-      if (!isReportableSignal(signal)) continue
+    for (const { primary: signal, duplicates } of signalGroups(signals)) {
       const fingerprint = signalFingerprint(signal)
-      byFingerprint.set(fingerprint, signal)
       if (store.findFindingByFingerprint(scanId, fingerprint)) continue
       const at = now()
-      const evidence: EvidenceRecord = {
-        id: newId(),
-        scanId,
-        origin: 'analyzer',
-        kind: 'tool_observation',
-        trust: 'observed',
-        claim: clip(`${signal.ruleId}: ${signal.title}`),
-        location: signal.location,
-        snippet: signal.snippet,
-        quoteCheck: 'match',
-        createdAt: at,
-      }
-      store.insertEvidence(evidence)
+      const supporting = [signal, ...duplicates]
+      const evidenceIds = supporting.map(observation => {
+        const evidence: EvidenceRecord = {
+          id: newId(),
+          scanId,
+          origin: 'analyzer',
+          kind: 'tool_observation',
+          trust: 'observed',
+          claim: clip(`${observation.ruleId}: ${observation.title}`),
+          location: observation.location,
+          snippet: observation.snippet,
+          quoteCheck: 'match',
+          createdAt: at,
+        }
+        store.insertEvidence(evidence)
+        return evidence.id
+      })
       const finding: FindingRecord = {
         id: newId(),
         scanId,
         fingerprint,
         title: clip(signal.title, 200),
         category: signal.category,
-        severity: signal.severity,
+        severity: supporting.reduce(
+          (severity, observation) =>
+            severityRank(observation.severity) < severityRank(severity) ? observation.severity : severity,
+          signal.severity,
+        ),
         verification: initialVerification(signal),
         source: sourceOfAnalyzer(signal.analyzer),
         ...(signal.cwe ? { cwe: signal.cwe } : {}),
@@ -134,9 +178,9 @@ export function recordSignalFindings(
         limitations: signalLimitations(signal),
         references: [...(signal.references ?? [])].slice(0, 8),
         createdBy: { role: 'analyzer', analyzer: signal.analyzer },
-        supportEvidenceIds: [evidence.id],
+        supportEvidenceIds: evidenceIds,
         counterEvidenceIds: [],
-        mergedFingerprints: [],
+        mergedFingerprints: [...new Set(duplicates.map(signalFingerprint))],
         isNew: false,
         createdAt: at,
         updatedAt: at,
@@ -247,7 +291,9 @@ export function recordHunterOutput(
     for (const assessment of output.assessments) {
       const fingerprint = ctx.signalIds.get(assessment.id.trim().toUpperCase())
       if (!fingerprint) continue
-      const target = store.findFindingByFingerprint(ctx.scanId, fingerprint)
+      const target =
+        store.findFindingByFingerprint(ctx.scanId, fingerprint) ??
+        store.listFindings(ctx.scanId).find(finding => finding.mergedFingerprints.includes(fingerprint))
       if (!target) continue
       assessed++
       const evidenceIds = assessment.evidence
