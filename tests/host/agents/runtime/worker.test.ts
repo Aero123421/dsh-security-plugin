@@ -106,6 +106,33 @@ describe('runWorker: happy path', () => {
     ])
   })
 
+  it('keeps one generated session identity across turns and retries, distinct from other workers', async () => {
+    const llm = new FakeLlm([
+      errorFinish('RATE_LIMIT'),
+      callReply('c1', 'read_file', { path: 'a.ts' }),
+      callReply('c2', 'submit_report', SUBMISSION),
+      callReply('c3', 'read_file', { path: 'b.ts' }),
+      callReply('c4', 'submit_report', SUBMISSION),
+    ])
+    expect((await runWorker(makeSpec(llm).spec)).status).toBe('submitted')
+    expect((await runWorker(makeSpec(llm).spec)).status).toBe('submitted')
+    const first = llm.calls[0]?.sessionId
+    const second = llm.calls[3]?.sessionId
+    expect(first).toMatch(/^[0-9a-f-]{36}$/)
+    expect(second).toMatch(/^[0-9a-f-]{36}$/)
+    expect(second).not.toBe(first)
+    expect(llm.calls.map(call => call.sessionId)).toEqual([first, first, first, second, second])
+  })
+
+  it('preserves an explicitly supplied session identity', async () => {
+    const llm = new FakeLlm([
+      callReply('c1', 'read_file', { path: 'a.ts' }),
+      callReply('c2', 'submit_report', SUBMISSION),
+    ])
+    await runWorker(makeSpec(llm, { sessionId: 'stable-task-id' }).spec)
+    expect(llm.calls.map(call => call.sessionId)).toEqual(['stable-task-id', 'stable-task-id'])
+  })
+
   it('passes route options through and sends temperature only when set', async () => {
     const llm = new FakeLlm([callReply('c1', 'submit_report', SUBMISSION)])
     const { spec } = makeSpec(llm, {
@@ -637,6 +664,8 @@ describe('runWorker: context overflow', () => {
     expect(result.status).toBe('submitted')
     expect(result.turns).toBe(4)
     expect(sleeps).toEqual([])
+    expect(new Set(llm.calls.map(call => call.sessionId))).toEqual(new Set([llm.calls[0]?.sessionId]))
+    expect(llm.calls[0]?.sessionId).toBeTruthy()
 
     const before = toolMessages(llm.messages(3))
     const after = toolMessages(llm.messages(4))

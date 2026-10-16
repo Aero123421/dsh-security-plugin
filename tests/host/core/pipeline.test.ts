@@ -168,6 +168,7 @@ describe('deep scan with the oracle model', () => {
     expect(runs.filter(r => r.role === 'hunter').length).toBeGreaterThan(5)
     expect(runs.filter(r => r.role === 'skeptic').length).toBeGreaterThan(3)
     expect(h.store.loadTranscript(runs[0]?.id ?? '')).toBeDefined()
+    expect(new Set(llm.calls.map(call => call.sessionId))).toEqual(new Set(runs.map(run => run.taskId)))
   })
 
   it('stores the planner threat model and turns its hypotheses into tasks', () => {
@@ -447,7 +448,10 @@ describe('pause, resume, cancel, and shutdown', () => {
 
     // The planner is not asked again; the interrupted tasks ran a second time.
     expect(llm.calls.filter(c => roleOf(c) === 'planner')).toHaveLength(plannerCalls)
-    for (const task of running) expect(h.store.getTask(task.id)).toMatchObject({ status: 'done', attempts: 2 })
+    for (const task of running) {
+      expect(h.store.getTask(task.id)).toMatchObject({ status: 'done', attempts: 2 })
+      expect(llm.calls.filter(call => call.sessionId === task.id).length).toBeGreaterThanOrEqual(2)
+    }
     const runs = h.store.listAgentRuns(id)
     expect(runs.filter(r => r.status === 'cancelled')).toHaveLength(2)
     // Same work and the same findings as an uninterrupted scan.
@@ -681,8 +685,200 @@ describe('budgets and provider failures', () => {
     expect(h.store.getScan(id)?.threatModel).toBeDefined()
     expect(h.store.listAgentRuns(id).some(r => r.role === 'skeptic' && r.status === 'submitted')).toBe(true)
     expect(h.store.getScan(id)?.coverage?.gaps).toContain(
-      `${huntTasks.length} review task(s) failed; see the activity log.`,
+      `${huntTasks.length} review task(s) failed (first: INVALID_REQUEST: The request was rejected by the content policy.); see the activity log.`,
     )
+  })
+})
+
+describe('provider route rejection circuit breaker', () => {
+  const rejection = '400 {"type":"MissingSessionID","message":"Request is missing x-opencode-session..."}'
+  const serial: SettingsPatch = { ...AI_SETTINGS, scan: { parallelWorkers: 1 } }
+
+  it('skips unopened same-route tasks after the first fatal, zero-token call and exposes the error', async () => {
+    const llm = scriptedLlm(() => failingStream('INVALID_REQUEST', rejection))
+    const h = createHarness({ llm, workspaces: [workspace()], settings: serial })
+    const id = await runScan(h, { mode: 'quick' })
+    const tasks = h.store.listTasks(id)
+    expect(tasks.length).toBeGreaterThan(2)
+    expect(tasks.filter(t => t.status === 'failed')).toHaveLength(1)
+    const skipped = tasks.filter(t => t.status === 'skipped')
+    expect(skipped).toHaveLength(tasks.length - 1)
+    expect(skipped.every(t => t.attempts === 0 && t.error?.code === 'provider-route-rejected')).toBe(true)
+    expect(skipped.every(t => t.error?.message.includes('INVALID_REQUEST: 400'))).toBe(true)
+    expect(llm.calls).toHaveLength(1)
+    expect(h.store.listAgentRuns(id)).toHaveLength(1)
+    const scan = h.store.getScan(id)
+    expect(scan?.status).toBe('completed')
+    expect(scan?.coverage?.tasks).toEqual({ planned: tasks.length, completed: 0, failed: 1, skipped: tasks.length - 1 })
+    expect(scan?.coverage?.gaps).toContain(
+      `1 review task(s) failed (first: INVALID_REQUEST: ${rejection}); see the activity log.`,
+    )
+    expect(scan?.coverage?.gaps.some(g => g.includes('model route rejected requests'))).toBe(true)
+    expect(h.events(id).find(e => e.type === 'worker-end')).toMatchObject({
+      message: expect.stringContaining(`failed: INVALID_REQUEST: ${rejection}`),
+      data: { status: 'failed', turns: 1 },
+    })
+  })
+
+  it('applies the breaker to review dispatch, without stopping a different hunter route', async () => {
+    const oracle = await oracleLlm()
+    const llm = scriptedLlm(options =>
+      options.model === 'rejected' ? failingStream('AUTH', 'Invalid provider credentials') : oracle.stream(options),
+    )
+    const h = createHarness({
+      llm,
+      workspaces: [workspace()],
+      settings: {
+        ...serial,
+        models: { ...AI_SETTINGS.models, skeptic: { provider: ORACLE_PROVIDER, model: 'rejected' } },
+      },
+    })
+    const id = await runScan(h, { mode: 'deep' })
+    const reviews = h.store.listTasks(id).filter(t => t.role === 'skeptic')
+    expect(reviews.length).toBeGreaterThan(1)
+    expect(reviews.filter(t => t.status === 'failed')).toHaveLength(1)
+    expect(reviews.filter(t => t.status === 'skipped')).toHaveLength(reviews.length - 1)
+    expect(llm.calls.filter(c => roleOf(c) === 'skeptic')).toHaveLength(1)
+    expect(
+      h.store
+        .listTasks(id)
+        .filter(t => t.role === 'hunter')
+        .every(t => t.status === 'done'),
+    ).toBe(true)
+    expect(h.store.getScan(id)?.coverage?.gaps.some(g => g.includes('first: AUTH: Invalid provider credentials'))).toBe(
+      true,
+    )
+  })
+
+  it('remembers a rejected route across phases but does not poison another provider with the same model', async () => {
+    const oracle = await oracleLlm()
+    const llm = scriptedLlm(
+      options =>
+        options.provider === 'broken' ? failingStream('AUTH', 'Invalid credentials') : oracle.stream(options),
+      {
+        providers: [
+          { id: ORACLE_PROVIDER, name: 'Oracle' },
+          { id: 'broken', name: 'Broken' },
+        ],
+      },
+    )
+    const h = createHarness({
+      llm,
+      workspaces: [workspace()],
+      settings: {
+        ...serial,
+        models: {
+          default: { provider: 'broken', model: ORACLE_MODEL },
+          skeptic: { provider: ORACLE_PROVIDER, model: ORACLE_MODEL },
+        },
+      },
+    })
+    const id = await runScan(h, { mode: 'deep' })
+    expect(llm.calls.filter(c => c.provider === 'broken')).toHaveLength(1)
+    expect(
+      h.store
+        .listTasks(id)
+        .filter(t => t.role === 'hunter')
+        .every(t => t.status === 'skipped'),
+    ).toBe(true)
+    expect(h.store.listAgentRuns(id).some(r => r.role === 'skeptic' && r.status === 'submitted')).toBe(true)
+  })
+
+  it.each([
+    { inputTokens: 1, outputTokens: 0 },
+    { inputTokens: 0, outputTokens: 1 },
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1 },
+  ])('does not trip for a first-turn fatal after token usage %j', async usage => {
+    const llm = scriptedLlm(async function* () {
+      yield { type: 'usage', usage }
+      yield* failingStream('INVALID_REQUEST', rejection)
+    })
+    const h = createHarness({ llm, workspaces: [workspace()], settings: serial })
+    const id = await runScan(h, { mode: 'quick' })
+    const tasks = h.store.listTasks(id)
+    expect(tasks.length).toBeGreaterThan(1)
+    expect(tasks.every(t => t.status === 'failed')).toBe(true)
+    expect(llm.calls).toHaveLength(tasks.length)
+  })
+
+  it('does not trip on a later turn even when the provider reports no usage', async () => {
+    const sessions = new Set<string>()
+    const llm = scriptedLlm(async function* (options) {
+      const session = options.sessionId!
+      if (sessions.has(session)) {
+        yield* failingStream('INVALID_REQUEST', rejection)
+      } else {
+        sessions.add(session)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    })
+    const h = createHarness({ llm, workspaces: [workspace()], settings: serial })
+    const id = await runScan(h, { mode: 'quick' })
+    const tasks = h.store.listTasks(id)
+    expect(tasks.every(t => t.status === 'failed')).toBe(true)
+    expect(llm.calls).toHaveLength(tasks.length * 2)
+    expect(h.store.listAgentRuns(id).every(r => r.turns === 2 && r.inputTokens === 0)).toBe(true)
+  })
+
+  it('leaves already-running workers untouched and skips only tasks not started', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>(resolve => {
+      release = resolve
+    })
+    let started = 0
+    const llm = scriptedLlm(async function* () {
+      if (++started === 1) {
+        yield* failingStream('INVALID_REQUEST', rejection)
+      } else {
+        await held
+        yield* callReply('submit', 'submit_findings', { findings: [], reviewed_paths: [] })
+      }
+    })
+    const h = createHarness({
+      llm,
+      workspaces: [workspace()],
+      settings: { ...AI_SETTINGS, scan: { parallelWorkers: 2 } },
+    })
+    const scan = await h.controller.create({ workspaceId: WS_ID, mode: 'quick' })
+    await until(() => started === 2 && h.store.listTasks(scan.id, ['skipped']).length > 0)
+    expect(h.store.listTasks(scan.id, ['running'])).toHaveLength(1)
+    release()
+    expect(await h.settle(scan.id)).toBe('completed')
+    expect(llm.calls).toHaveLength(2)
+    expect(h.store.listTasks(scan.id, ['done'])).toHaveLength(1)
+  })
+
+  it('scrubs provider-echoed secrets and Host paths before clipping every new diagnostic', async () => {
+    const knownSecret = 'Sh0pJwt9vQ2mX7pL4wR8zN3bFAKE'
+    const message =
+      `400 MissingSessionID ${knownSecret} ${shop.root}/src/app.ts /opt/private/host.txt ` +
+      'Bearer opaque-transport-key api_key="short-key" https://user:password@example.test/?token=secret ' +
+      'x'.repeat(300)
+    const llm = scriptedLlm(() => failingStream('INVALID_REQUEST', message))
+    const h = createHarness({ llm, workspaces: [workspace()], settings: serial })
+    const id = await runScan(h, { mode: 'quick' })
+    const gap = h.store.getScan(id)?.coverage?.gaps.find(g => g.includes('first:')) ?? ''
+    const event = h.events(id).find(e => e.type === 'worker-end')
+    const skipped = h.store.listTasks(id, ['skipped']).map(t => t.error?.message ?? '')
+    for (const text of [gap, event?.message ?? '', ...skipped]) {
+      expect(text).toContain('INVALID_REQUEST: 400 MissingSessionID')
+      for (const sensitive of [
+        knownSecret,
+        shop.root,
+        '/opt/private/host.txt',
+        'opaque-transport-key',
+        'short-key',
+        'user:password',
+        'token=secret',
+      ]) {
+        expect(text).not.toContain(sensitive)
+      }
+    }
+    const summary = gap.match(/\(first: (.*)\);/)?.[1] ?? ''
+    expect(summary.length).toBeGreaterThan(0)
+    expect(summary.length).toBeLessThanOrEqual(200)
+    expect(summary).toMatch(/…$/)
+    expect(JSON.stringify(event?.data)).not.toContain('MissingSessionID')
   })
 })
 

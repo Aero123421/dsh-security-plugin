@@ -47,6 +47,8 @@ export interface ModelRoute {
 /** Everything one worker run needs. */
 export interface WorkerSpec<T> {
   readonly id: string
+  /** Stable routing identity for this conversation; defaults to a fresh UUID per worker run. */
+  readonly sessionId?: string
   readonly role: string
   /** The LLM registry (`ctx.llm`); only `stream` is used. */
   readonly llm: Pick<LlmPort, 'stream'>
@@ -249,6 +251,7 @@ class WorkerRun<T> {
   private readonly allTools: readonly WorkerTool<unknown, T>[]
   private readonly terminalTools: readonly WorkerTool<unknown, T>[]
   private readonly maxChars: number
+  private readonly sessionId: string
   private readonly elided = new WeakSet<LlmRequestMessage>()
   private turns = 0
   private toolCalls = 0
@@ -258,6 +261,7 @@ class WorkerRun<T> {
   private llmCalls = 0
 
   constructor(private readonly spec: WorkerSpec<T>) {
+    this.sessionId = spec.sessionId ?? randomUUID()
     this.allTools = spec.tools
     this.terminalTools = spec.tools.filter(tool => tool.terminal)
     for (const tool of spec.tools) this.toolsByName.set(tool.name, tool)
@@ -356,6 +360,7 @@ class WorkerRun<T> {
     const options: LlmGenerateOptions = {
       provider: route.provider,
       model: route.model,
+      sessionId: this.sessionId,
       messages: this.messages.slice(),
       system,
       tools,

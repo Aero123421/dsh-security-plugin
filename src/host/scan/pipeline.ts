@@ -20,6 +20,7 @@ import type { AnalyzerStatus, Coverage, WorkerView } from '../../shared/contract
 import { type RoleName, SCAN_PHASES, type ScanPhase } from '../../shared/domain.ts'
 import type { ModelRef, SecuritySettings } from '../../shared/settings.ts'
 import { chainSubmitTool, chainSystem, chainTask } from '../agents/roles/chain.ts'
+import { clipLine } from '../agents/roles/common.ts'
 import {
   type HunterOutput,
   hunterSubmitTool,
@@ -134,6 +135,8 @@ export class ScanJob {
   private scan: ScanRecord
   private discarded = 0
   private blockedNotified = false
+  /** Only unopened hunt/review tasks are skipped; running workers and other routes are untouched. */
+  private readonly brokenRoutes = new Map<string, string>()
   private masker: { readonly key: string; readonly mask: PathMasker } | undefined
 
   constructor(
@@ -420,7 +423,7 @@ export class ScanJob {
       )
     }
     const tasks = this.deps.store.listTasks(this.scan.id).filter(t => HUNT_KINDS.has(t.kind))
-    await this.runPool(tasks, task => this.runHunter(task, route))
+    await this.runPool(tasks, route, task => this.runHunter(task, route))
     this.finishPhase('hunt')
   }
 
@@ -445,7 +448,7 @@ export class ScanJob {
     )
     for (const task of planned) this.ensure(task)
     const tasks = this.deps.store.listTasks(this.scan.id).filter(t => t.kind === 'review')
-    await this.runPool(tasks, task => this.runSkeptic(task, route))
+    await this.runPool(tasks, route, task => this.runSkeptic(task, route))
     this.finishPhase('review')
   }
 
@@ -670,7 +673,11 @@ export class ScanJob {
     this.completeTask(task, { verdict: updated.review?.verdict ?? 'inconclusive' })
   }
 
-  private async runPool(tasks: readonly TaskRecord[], run: (task: TaskRecord) => Promise<void>): Promise<void> {
+  private async runPool(
+    tasks: readonly TaskRecord[],
+    route: ModelRef,
+    run: (task: TaskRecord) => Promise<void>,
+  ): Promise<void> {
     const queue = tasks.filter(t => t.status === 'pending' || t.status === 'running')
     const total = tasks.length
     let done = tasks.length - queue.length
@@ -686,7 +693,19 @@ export class ScanJob {
           if (this.budget.exhausted()) return
           const task = queue[next++]
           if (!task) return
-          await run(task)
+          const broken = this.brokenRoutes.get(routeKey(route))
+          if (broken) {
+            this.deps.store.updateTask(task.id, {
+              status: 'skipped',
+              finishedAt: this.iso(),
+              error: {
+                code: 'provider-route-rejected',
+                message: `Skipped: this model route rejected its first request (${broken}).`,
+              },
+            })
+          } else {
+            await run(task)
+          }
           this.checkStopped()
           done++
           this.progress(done, total)
@@ -778,6 +797,8 @@ export class ScanJob {
     ]
     const outcome = await runWorker<T>({
       id: run.id,
+      // Task ids are unique per scan and survive resume; each task is a separate conversation.
+      sessionId: task.id,
       role: task.role,
       llm,
       route: {
@@ -829,10 +850,23 @@ export class ScanJob {
       toolCalls: result.toolCalls,
       state: result.status === 'submitted' ? 'done' : result.status === 'cancelled' ? 'cancelled' : 'failed',
     })
+    const failure = result.error ? this.shortFailure(result.error) : undefined
+    // `fatal` is the worker's classifyFailure verdict. Zero cumulative usage on
+    // turn one excludes accepted requests, content refusals, overflow and budgets.
+    if (
+      result.status === 'failed' &&
+      result.stopReason === 'fatal' &&
+      result.turns === 1 &&
+      result.usage.inputTokens + result.usage.outputTokens === 0 &&
+      failure &&
+      !this.brokenRoutes.has(routeKey(route))
+    ) {
+      this.brokenRoutes.set(routeKey(route), failure)
+    }
     this.event(
       result.status === 'submitted' ? 'info' : 'warn',
       'worker-end',
-      `${roleLabel(task.role)} ${result.status === 'submitted' ? 'finished' : `stopped (${result.status}${result.stopReason ? `: ${result.stopReason}` : ''})`}: ${task.title}`,
+      `${roleLabel(task.role)} ${result.status === 'submitted' ? 'finished' : `stopped (${result.status}${failure ? `: ${failure}` : result.stopReason ? `: ${result.stopReason}` : ''})`}: ${task.title}`,
       { runId: run.id, status: result.status, turns: result.turns },
     )
     if (result.status === 'blocked_by_provider' && !this.blockedNotified) {
@@ -931,7 +965,8 @@ export class ScanJob {
     const readByAi = new Set(runs.flatMap(r => r.filesRead))
     const discarded = tasks.reduce((n, t) => n + numberOf(t.outcome?.discarded), 0)
     const skipped = tasks.filter(t => t.status === 'skipped').length
-    const failed = tasks.filter(t => t.status === 'failed').length
+    const failedTasks = tasks.filter(t => t.status === 'failed')
+    const failed = failedTasks.length
     const endpoints = this.inScopeEndpoints()
     const gaps: string[] = []
     if (
@@ -951,8 +986,19 @@ export class ScanJob {
     }
     if (!this.aiEnabled())
       gaps.push('AI review was not used; logic flaws such as broken authorization are not covered.')
-    if (skipped > 0) gaps.push(`${skipped} review task(s) did not run (budget or task limit).`)
-    if (failed > 0) gaps.push(`${failed} review task(s) failed; see the activity log.`)
+    const rejected = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'provider-route-rejected')
+    if (skipped > rejected.length)
+      gaps.push(`${skipped - rejected.length} review task(s) did not run (budget or task limit).`)
+    if (rejected.length > 0)
+      gaps.push(
+        `${rejected.length} review task(s) did not run because their model route rejected requests; see the activity log.`,
+      )
+    if (failed > 0) {
+      const first = failedTasks.toSorted((a, b) => (a.finishedAt ?? '').localeCompare(b.finishedAt ?? ''))[0]?.error
+      gaps.push(
+        `${failed} review task(s) failed${first ? ` (first: ${this.shortFailure(first)})` : ''}; see the activity log.`,
+      )
+    }
     if (this.consentRevoked) gaps.push('AI review stopped early because sending code to models was turned off.')
     if (this.analysis.snapshot.truncated)
       gaps.push('Some files were not analyzed because the workspace exceeded the size limits.')
@@ -1056,6 +1102,21 @@ export class ScanJob {
     return this.masker.mask(text)
   }
 
+  /** Provider errors can echo requests: scrub before shortening, never put raw errors in event data. */
+  private shortFailure(error: { readonly code: string; readonly message: string }): string {
+    const scrubbed = this.mask(this.analysis.privacy.scrub(`${error.code}: ${error.message}`))
+      // Transport credentials need not be present in the workspace secret inventory.
+      .replace(/https?:\/\/[^\s"'<>]+/gi, '[url]')
+      .replace(/\b(?:Bearer|Basic)\s+[^\s"',;]+/gi, '[credential]')
+      .replace(
+        /\b(authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+)/gi,
+        '$1=[redacted]',
+      )
+      // The usual roots are masked above; omit any other absolute path a provider echoes.
+      .replace(/(?<![\w:/\\])(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"'<>()[\]{},;]+/g, '[path]')
+    return clipLine(firstLine(scrubbed), 200)
+  }
+
   private maskedAnalyzers(): AnalyzerStatus[] {
     return this.analysis.analyzers.map(a => (a.reason === undefined ? a : { ...a, reason: this.mask(a.reason) }))
   }
@@ -1089,6 +1150,10 @@ function severityAtLeastFor(
   const order = ['critical', 'high', 'medium', 'low', 'info']
   const effective = mode === 'research' ? 'low' : threshold
   return order.indexOf(severity) <= order.indexOf(effective)
+}
+
+function routeKey(route: ModelRef): string {
+  return JSON.stringify([route.provider, route.model])
 }
 
 function roleLabel(role: RoleName): string {
