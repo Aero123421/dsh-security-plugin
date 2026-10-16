@@ -47,7 +47,15 @@ export interface DshLayout {
 
 /** `ctx.get('uiWorkspace')` — optional. */
 export interface DshUiWorkspace {
-  startSession(workspaceId: string, options: { prompt: string; clearPreviousDraft?: boolean }): unknown
+  startSession?(workspaceId: string, options: { prompt: string; clearPreviousDraft?: boolean }): unknown
+  /** Host-native picker; cancellation resolves to null. */
+  pickDirectory?(): Promise<string | null>
+}
+
+/** `ctx.get('workspaces')` — optional, React-free Workspace Controller. */
+export interface DshWorkspaces {
+  /** Returns the created or already-registered workspace (not a result wrapper). */
+  create(input: { path: string }): Promise<{ readonly workspaceId: string }>
 }
 
 export interface DshClientContext {
@@ -64,7 +72,13 @@ export function asLayout(value: unknown): DshLayout | undefined {
 }
 
 export function asUiWorkspace(value: unknown): DshUiWorkspace | undefined {
-  return isObject(value) && typeof value.startSession === 'function' ? (value as unknown as DshUiWorkspace) : undefined
+  return isObject(value) && (typeof value.startSession === 'function' || typeof value.pickDirectory === 'function')
+    ? (value as unknown as DshUiWorkspace)
+    : undefined
+}
+
+export function asWorkspaces(value: unknown): DshWorkspaces | undefined {
+  return isObject(value) && typeof value.create === 'function' ? (value as unknown as DshWorkspaces) : undefined
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

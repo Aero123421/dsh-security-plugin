@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SecurityController } from '../../src/client/controller.ts'
 import type { DshClientContext } from '../../src/client/dsh.ts'
 import { apply, inject } from '../../src/client/index.ts'
 
@@ -6,7 +7,7 @@ afterEach(() => {
   document.head.innerHTML = ''
 })
 
-function fakeCtx() {
+function fakeCtx(services: Record<string, unknown> = {}) {
   const effects: { label: string | undefined; dispose: () => unknown }[] = []
   const registrations: { options: Record<string, unknown>; component: unknown }[] = []
   const injected: string[] = []
@@ -37,7 +38,7 @@ function fakeCtx() {
       isLoopback: true,
       rpc: { call: vi.fn(async () => ({ ok: false as const, error: { code: 'security/not-found', message: '' } })) },
     },
-    get: () => undefined,
+    get: name => services[name],
     on(event, listener) {
       listeners[event] = listener
       return () => {
@@ -64,6 +65,30 @@ function fakeCtx() {
 describe('plugin entry', () => {
   it('declares the required services', () => {
     expect(inject).toEqual(['slots', 'locale', 'connection'])
+  })
+
+  it('optionally obtains the real uiWorkspace and workspaces service keys without requiring chat', async () => {
+    const pickDirectory = vi.fn(async () => '/code/shop')
+    const create = vi.fn(async () => ({ workspaceId: 'ws-shop', path: '/code/shop', title: 'Shop' }))
+    const { ctx, registrations, effects } = fakeCtx({ uiWorkspace: { pickDirectory }, workspaces: { create } })
+    const call = vi.fn(async (_channel: string, endpoint: string) => ({
+      ok: true as const,
+      value: endpoint.endsWith('listWorkspaces') ? [{ id: 'ws-shop', title: 'Shop', displayPath: '/code/shop' }] : [],
+    }))
+    ctx.connection.rpc.call = call
+    apply(ctx)
+    try {
+      const main = registrations.find(r => r.options.name === 'main')!
+      const { controller } = (main.options.inject as () => { controller: SecurityController })()
+      expect(controller.canAddProject()).toBe(true)
+      expect(controller.canFixInChat()).toBe(false)
+      expect(await controller.addProjectFolder()).toEqual({ workspaceId: 'ws-shop' })
+      expect(create).toHaveBeenCalledWith({ path: '/code/shop' })
+      expect(controller.store.getState().workspaceId).toBe('ws-shop')
+      expect(call.mock.calls.length).toBeGreaterThan(0)
+    } finally {
+      for (const e of effects) e.dispose()
+    }
   })
 
   it('registers sidebar, main and settings slots and one style tag', () => {

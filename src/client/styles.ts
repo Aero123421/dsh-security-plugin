@@ -105,7 +105,10 @@ const frame = /* css */ `
   font-size: 20px; line-height: 32px; font-weight: 500; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.dshsec-head-project { grid-column: 1 / -1; min-width: 0; display: flex; }
+.dshsec-head-project { grid-column: 1 / -1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.dshsec-add-project { min-width: 0; max-width: 100%; }
+.dshsec-add-project .dshsec-btn { white-space: normal; text-align: start; }
+.dshsec-add-project .dshsec-hint { margin-top: 2px; }
 .dshsec-project {
   position: relative; display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: min(100%, 560px);
   height: 30px; padding: 0 8px; margin-left: -8px; border-radius: 8px; color: var(--dshsec-text3);

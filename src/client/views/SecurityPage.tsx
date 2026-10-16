@@ -9,6 +9,7 @@ import { TAB_IDS, type SecurityController, type TabId } from '../controller.ts'
 import { useElementWidth } from '../hooks.ts'
 import { errorText } from '../i18n.ts'
 import { IconChevronDown, IconFolder, IconPlus, IconRefresh } from '../icons.tsx'
+import { AddProjectFolder } from './AddProjectFolder.tsx'
 import { FindingsView, SPLIT_MIN_WIDTH } from './Findings.tsx'
 import { HistoryView } from './History.tsx'
 import { NewScanDialog } from './NewScanDialog.tsx'
@@ -110,11 +111,12 @@ function PageHeader() {
       >
         {tr.t('page.newScan')}
       </Button>
-      {workspaces.length ? (
-        <div className="dshsec-head-project">
+      <div className="dshsec-head-project">
+        {workspaces.length ? (
           <ProjectPicker workspaces={workspaces} value={workspaceId} onChange={controller.selectWorkspace} />
-        </div>
-      ) : null}
+        ) : null}
+        <AddProjectFolder onAdded={id => controller.openNewScan({ workspaceId: id })} showHint />
+      </div>
     </header>
   )
 }

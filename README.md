@@ -66,7 +66,8 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
    `dsh --profile web --dump-config` and look for a `# == dsh-security-plugin` layer.
 
    To update, add the newer tag the same way. The *Settings* tab shows the running version.
-2. **Open Security** in the DSH sidebar and choose a project. Scans run on projects that DSH already knows about.
+2. **Open Security** in the DSH sidebar and choose a project. Use **Add project folder…** (when available) to
+   register another folder in DSH’s project list and select it for scanning.
 3. **Pick models** under the page's *Settings* tab → *Models*. A *Default* model is enough; each role (Planner,
    Hunter, Skeptic, Chain analyst) can override it. A scan needs at least a Hunter model, either its own or the
    default.

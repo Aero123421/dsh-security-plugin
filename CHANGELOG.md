@@ -10,6 +10,8 @@ changes; they are called out explicitly.
 
 ### Added
 
+- Add a project folder from the Security page or New Scan dialog when DSH’s folder services are available.
+  The folder is registered in DSH’s project list and selected for scanning; the dialog always shows its project.
 - Python SAST rules detect explicitly disabled Secure flags on session/CSRF cookies and HttpOnly on session
   cookies, including Flask config assignments and `config.update(...)`. There are now 52 SAST rules.
 - Scan an optional subfolder (for example `packages/app`) without scanning an entire umbrella workspace.
