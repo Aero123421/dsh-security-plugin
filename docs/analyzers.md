@@ -197,6 +197,8 @@ the block-YAML subset lock files use, which falls back to the full YAML parser f
 
 ### OSV lookup (`src/host/analysis/osv.ts`)
 
+Lookup is off by default for privacy; New Scan links to the Privacy toggle, and Coverage calls out unchecked dependencies unless OSV-Scanner returned package results.
+
 When `privacy.allowDependencyLookup` is on, each unique **exact** version is sent to
 `<osvEndpoint>/v1/querybatch` (up to 1,000 per request), and advisory details come from `/v1/vulns/<id>` (at most
 300 fetches, 4 at a time, 30 s timeout per request, 32 MiB response cap, schema-validated). Only ecosystem, package

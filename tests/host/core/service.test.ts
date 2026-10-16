@@ -424,7 +424,7 @@ describe('scans and findings', () => {
   it('estimates a scan without touching the network or a model', async () => {
     const calls = llm.calls.length
     const deep = await invoke('estimateScan', { workspaceId: WS_ID, mode: 'deep' })
-    expect(deep).toMatchObject({ files: 17, endpoints: 15, truncated: false })
+    expect(deep).toMatchObject({ files: 17, endpoints: 15, truncated: false, dependencyManifests: 2 })
     expect(deep.frameworks).toContain('express')
     expect(deep.languages[0]).toMatchObject({ language: 'typescript' })
     expect(deep.plannedTasks).toBeGreaterThan(0)

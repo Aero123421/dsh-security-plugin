@@ -934,6 +934,21 @@ export class ScanJob {
     const failed = tasks.filter(t => t.status === 'failed').length
     const endpoints = this.inScopeEndpoints()
     const gaps: string[] = []
+    if (
+      this.analysis.dependencies.length > 0 &&
+      !this.scan.settings.privacy.allowDependencyLookup &&
+      !this.analysis.dependencyScannerChecked
+    ) {
+      const scanner = this.analysis.analyzers.find(a => a.id === 'osv-scanner')
+      const scannerGap = scanner?.available
+        ? 'OSV-Scanner returned no dependency results'
+        : scanner?.reason === 'osv-scanner is not installed'
+          ? 'OSV-Scanner is not installed'
+          : 'OSV-Scanner did not check dependencies'
+      gaps.push(
+        `${this.analysis.dependencies.length} dependencies were found but not checked for known vulnerabilities: OSV lookup is off and ${scannerGap}. Enable dependency lookup in Privacy settings or configure offline OSV-Scanner.`,
+      )
+    }
     if (!this.aiEnabled())
       gaps.push('AI review was not used; logic flaws such as broken authorization are not covered.')
     if (skipped > 0) gaps.push(`${skipped} review task(s) did not run (budget or task limit).`)

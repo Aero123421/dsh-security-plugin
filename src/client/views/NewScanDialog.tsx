@@ -96,7 +96,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
   const budget = settings.budgets?.[mode]?.maxTokens
   const noProviders = models.status === 'ready' && !providers.some(p => Array.isArray(p.models) && p.models.length)
 
-  const goToModels = () => {
+  const goToSettings = () => {
     controller.closeNewScan()
     controller.setTab('settings')
   }
@@ -243,6 +243,21 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
 
         <EstimatePanel estimate={estimate} budget={budget} ai={ai} />
 
+        {settings.privacy?.allowDependencyLookup !== true &&
+        (estimate.status !== 'ready' || estimate.value.dependencyManifests !== 0) ? (
+          <Callout
+            title={tr.t('newScan.dependencyLookupOff')}
+            live={false}
+            action={
+              <Button size="sm" variant="link" onClick={goToSettings}>
+                {tr.t('newScan.dependencySettings')}
+              </Button>
+            }
+          >
+            {tr.t('newScan.dependencyLookupHint')}
+          </Callout>
+        ) : null}
+
         {ai ? (
           <section className="dshsec-subsection" aria-labelledby={`${consentId}-models`}>
             <div className="dshsec-subhead">
@@ -250,7 +265,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
                 {configured ? tr.t('newScan.modelsTitle') : tr.t('newScan.chooseModel')}
               </h3>
               {configured ? (
-                <Button size="sm" variant="link" onClick={goToModels}>
+                <Button size="sm" variant="link" onClick={goToSettings}>
                   {tr.t('newScan.changeModels')}
                 </Button>
               ) : null}
@@ -356,7 +371,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
             tone={error.code === 'security/busy' ? 'info' : 'error'}
             action={
               error.code === 'security/no-model' ? (
-                <Button size="sm" variant="link" onClick={goToModels}>
+                <Button size="sm" variant="link" onClick={goToSettings}>
                   {tr.t('newScan.configureModels')}
                 </Button>
               ) : ai && (error.code === 'security/forbidden-remote' || error.code === 'security/consent-required') ? (

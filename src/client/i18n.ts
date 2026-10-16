@@ -82,6 +82,10 @@ const en = {
     'Finds leaked secrets, risky code patterns and known-vulnerable dependencies. Nothing is sent to a model.',
   'newScan.mode': 'Scan depth',
   'newScan.estimateTitle': 'What this scan covers',
+  'newScan.dependencyLookupOff': 'Dependency vulnerability lookup is off',
+  'newScan.dependencyLookupHint':
+    'If this project has dependencies, known vulnerabilities will not be checked unless offline OSV-Scanner returns results. Enable online lookup in Settings → Privacy to send only package names and versions, never code or paths.',
+  'newScan.dependencySettings': 'Open privacy settings',
   'newScan.estimating': 'Estimating…',
   'newScan.estimateFailed': 'Couldn’t estimate this scan. You can still start it.',
   'newScan.files': 'Files',
@@ -611,6 +615,10 @@ const ja = {
     '秘密情報の書き込み、危険なコードの書き方、既知の脆弱性がある依存パッケージを調べます。AI モデルには何も送りません。',
   'newScan.mode': 'スキャンの深さ',
   'newScan.estimateTitle': 'このスキャンで調べる範囲',
+  'newScan.dependencyLookupOff': '依存関係の脆弱性照会はオフです',
+  'newScan.dependencyLookupHint':
+    'このプロジェクトに依存関係がある場合、オフラインの OSV-Scanner が結果を返さない限り、既知の脆弱性は調べられません。設定 → プライバシーでオンライン照会を有効にすると、パッケージ名とバージョンだけを送信します。コードやパスは送りません。',
+  'newScan.dependencySettings': 'プライバシー設定を開く',
   'newScan.estimating': '見積もり中…',
   'newScan.estimateFailed': 'スキャン範囲を見積もれませんでした。このままスキャンを始めることはできます。',
   'newScan.files': 'ファイル数',
@@ -1135,6 +1143,10 @@ const zh = {
   'newScan.builtin.desc': '查找泄露的密钥、危险的代码模式和存在已知漏洞的依赖。不会向任何模型发送内容。',
   'newScan.mode': '扫描深度',
   'newScan.estimateTitle': '本次扫描的范围',
+  'newScan.dependencyLookupOff': '依赖漏洞查询已关闭',
+  'newScan.dependencyLookupHint':
+    '如果此项目包含依赖项，除非离线 OSV-Scanner 返回结果，否则不会检查已知漏洞。在设置 → 隐私中启用在线查询后，只会发送包名和版本号，不会发送代码或路径。',
+  'newScan.dependencySettings': '打开隐私设置',
   'newScan.estimating': '正在估算…',
   'newScan.estimateFailed': '无法估算本次扫描，但仍可开始扫描。',
   'newScan.files': '文件',

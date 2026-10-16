@@ -63,8 +63,13 @@ const reportSchema = z.object({
     .nullish(),
 })
 
+export interface OsvScannerRun extends AnalyzerRun {
+  /** In-snapshot packages with version results, including those with no advisories. */
+  readonly checkedDependencies?: number
+}
+
 /** Run osv-scanner over the workspace root and convert its results to signals. */
-export async function runOsvScanner(options: OsvScannerRunOptions): Promise<AnalyzerRun> {
+export async function runOsvScanner(options: OsvScannerRunOptions): Promise<OsvScannerRun> {
   const started = Date.now()
   const { tool } = options
   if (!tool) return unavailableRun('osv-scanner', 'osv-scanner is not installed', started)
@@ -118,8 +123,11 @@ export async function runOsvScanner(options: OsvScannerRunOptions): Promise<Anal
     return failedRun('osv-scanner', tool, `could not parse osv-scanner output: ${errorMessage(error)}`, started)
   }
   const warnings: string[] = []
-  const signals = parseOsvScannerReport(raw, options, warnings)
-  return completedRun('osv-scanner', tool, signals, started, warnings)
+  const parsed = parseReport(raw, options, warnings)
+  return {
+    ...completedRun('osv-scanner', tool, parsed.signals, started, warnings),
+    checkedDependencies: parsed.checkedDependencies,
+  }
 }
 
 /** Convert osv-scanner JSON output into signals (one per advisory per package version). */
@@ -128,14 +136,23 @@ export function parseOsvScannerReport(
   options: Pick<ExternalRunOptions, 'root' | 'snapshot'>,
   warnings: string[],
 ): Signal[] {
+  return parseReport(raw, options, warnings).signals
+}
+
+function parseReport(
+  raw: unknown,
+  options: Pick<ExternalRunOptions, 'root' | 'snapshot'>,
+  warnings: string[],
+): { signals: Signal[]; checkedDependencies: number } {
   const parsed = reportSchema.safeParse(raw)
   if (!parsed.success) {
     warnings.push('osv-scanner output had an unexpected shape')
-    return []
+    return { signals: [], checkedDependencies: 0 }
   }
   const signals: Signal[] = []
   const seen = new Set<string>()
   let packages = 0
+  let checkedDependencies = 0
   let malformed = 0
   for (const result of parsed.data.results ?? []) {
     const manifest = result.source?.path
@@ -151,6 +168,7 @@ export function parseOsvScannerReport(
         continue
       }
       const { name, version, ecosystem } = pkg.package
+      if (name && version && ecosystem) checkedDependencies++
       const ref: OsvPackageRef = {
         ecosystem,
         name,
@@ -173,7 +191,7 @@ export function parseOsvScannerReport(
     }
   }
   if (malformed > 0) warnings.push(`${malformed} osv-scanner advisories had an unexpected shape and were skipped`)
-  return signals
+  return { signals, checkedDependencies }
 }
 
 function offlineV1(options: OsvScannerRunOptions): string[] {

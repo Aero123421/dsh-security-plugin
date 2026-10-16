@@ -33,6 +33,8 @@ export interface AnalysisContext {
   readonly signals: readonly Signal[]
   readonly endpoints: readonly Endpoint[]
   readonly dependencies: readonly Dependency[]
+  /** OSV-Scanner returned package results (a clean result counts too). */
+  readonly dependencyScannerChecked: boolean
   readonly analyzers: readonly AnalyzerStatus[]
   readonly warnings: readonly string[]
   readonly astGrep?: AstGrepHandle
@@ -105,6 +107,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
 
   let endpoints: Endpoint[] = []
   let dependencies: Dependency[] = []
+  let dependencyScannerChecked = false
   if (!options.lightweight) {
     step('sast')
     collect(await runSast(snapshot, { ...(options.astGrep ? { astGrep: options.astGrep } : {}), signal }))
@@ -174,14 +177,15 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
       signal,
     }
     collect(await runGitleaks({ ...common, tool: await toolkit.resolveHandle('gitleaks') }))
-    collect(
-      await runOsvScanner({
-        ...common,
-        tool: await toolkit.resolveHandle('osv-scanner'),
-        // Without OSV consent the scanner must not reach the network.
-        offline: !settings.privacy.allowDependencyLookup,
-      }),
-    )
+    const scanner = await runOsvScanner({
+      ...common,
+      tool: await toolkit.resolveHandle('osv-scanner'),
+      // Without OSV consent the scanner must not reach the network.
+      offline: !settings.privacy.allowDependencyLookup,
+    })
+    collect(scanner)
+    dependencyScannerChecked =
+      (scanner.checkedDependencies ?? 0) > 0 || scanner.signals.some(s => s.kind === 'dependency')
     collect(
       await runSemgrep({
         ...common,
@@ -209,6 +213,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
     signals: redacted,
     endpoints,
     dependencies,
+    dependencyScannerChecked,
     analyzers,
     warnings,
     ...(astGrep ? { astGrep } : {}),
