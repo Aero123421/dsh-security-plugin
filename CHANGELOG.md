@@ -8,6 +8,11 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- The project picker now uses a themed dropdown in the page header and New Scan dialog instead of an OS-native
+  popup. Project titles and paths appear on separate lines, with keyboard navigation and the selected project marked.
+
 ## [0.2.0] - 2026-10-16
 
 This minor release contains breaking changes, as allowed before 1.0: the Host/client contract is now version 2

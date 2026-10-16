@@ -164,10 +164,11 @@ describe('New Scan dialog', () => {
 
   it('explains unchecked dependencies and opens Settings without changing consent', async () => {
     const { dialog, controller: c, container, api } = await openDialog()
-    const project = select(dialog, 'Project')
-    expect(project.value).toBe('ws-1')
+    const projectLabel = byText<HTMLLabelElement>(dialog, 'label', 'Project')
+    const project = document.getElementById(projectLabel.htmlFor) as HTMLButtonElement
+    expect(project.tagName).toBe('BUTTON')
     expect(project.disabled).toBe(true)
-    expect(project.selectedOptions[0]?.textContent).toBe('Demo — ~/demo')
+    expect(project.textContent).toBe('Demo~/demo')
     expect(dialog.textContent).toContain('Dependency vulnerability lookup is off')
     expect(dialog.textContent).toContain('unless offline OSV-Scanner returns results')
     expect(dialog.textContent).toContain('never code or paths')
@@ -180,6 +181,38 @@ describe('New Scan dialog', () => {
     expect(container.textContent).toContain('Look up known vulnerabilities online (OSV)')
     expect(api.callsOf('updateSettings')).toHaveLength(0)
     expect(api.callsOf('createScan')).toHaveLength(0)
+  })
+
+  it('selects a project through the themed field and reports its id to estimates and scan creation', async () => {
+    const shop = { id: 'ws-shop', title: 'Shop', displayPath: '~/code/shop' }
+    const { dialog, api } = await openDialog(
+      { listWorkspaces: () => ok([...WORKSPACES, shop]), createScan: () => ok({ scanId: 'shop-scan' }) },
+      makeBootstrap({ settings: consented }),
+    )
+    const label = byText<HTMLLabelElement>(dialog, 'label', 'Project')
+    const trigger = document.getElementById(label.htmlFor) as HTMLButtonElement
+    expect(trigger.tagName).toBe('BUTTON')
+    expect(trigger.classList.contains('dshsec-input')).toBe(true)
+    const hintId = trigger.getAttribute('aria-describedby')!
+    expect(document.getElementById(hintId)?.textContent).toContain('Projects are managed in DSH')
+    await click(trigger)
+    // The portal stays inside the dialog while escaping its scrolling form body.
+    const list = dialog.querySelector('[role="listbox"]')!
+    expect(list.closest('.dshsec-modal-body')).toBeNull()
+    await act(async () => {
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(document.querySelector('[role="dialog"]')).toBe(dialog)
+    expect(dialog.querySelector('[role="listbox"]')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    await click(trigger)
+    await click(byText(dialog, '[role="option"]', 'Shop'))
+    expect(dialog.querySelector('[role="listbox"]')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    expect(trigger.textContent).toContain('Shop')
+    expect(api.callsOf('estimateScan').at(-1)).toMatchObject({ workspaceId: shop.id })
+    await click(byText(dialog, 'button', 'Start scan'))
+    expect(api.callsOf('createScan')[0]).toMatchObject({ workspaceId: shop.id })
   })
 
   it('hides the dependency hint when lookup is enabled', async () => {
@@ -765,11 +798,11 @@ describe('page header', () => {
     expect(head.querySelector('.dshsec-btn--primary')?.textContent).toContain('New scan')
     expect(head.querySelector('.dshsec-project-title')?.textContent).toBe('Demo')
     expect(head.querySelector('.dshsec-project-path')?.textContent).toBe('~/code/demo')
-    const picker = head.querySelector<HTMLSelectElement>('select[aria-label="Project"]')!
-    await act(async () => {
-      picker.value = 'ws-2'
-      picker.dispatchEvent(new Event('change', { bubbles: true }))
-    })
+    const picker = head.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!
+    await click(picker)
+    const list = container.querySelector('[role="listbox"]')!
+    expect(list.querySelector('[role="option"][aria-selected="true"]')?.textContent).toBe('Demo~/code/demo')
+    await click(byText(list, '[role="option"]', 'Shop'))
     expect(c.store.getState().workspaceId).toBe('ws-2')
     expect(head.querySelector('.dshsec-project-title')?.textContent).toBe('Shop')
   })
@@ -777,13 +810,16 @@ describe('page header', () => {
   it('keeps a single project identity in the header and always shows the dialog Project field', async () => {
     const { container } = await renderPage(baseHandlers())
     expect(container.querySelector('.dshsec-project-title')?.textContent).toBe('Demo')
+    expect(container.querySelector('.dshsec-head button[aria-haspopup="listbox"]')).toBeNull()
+    expect(container.querySelector('[role="listbox"]')).toBeNull()
     await click(byText(container, 'button', 'New scan'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     const label = byText<HTMLLabelElement>(dialog, 'label', 'Project')
-    const project = document.getElementById(label.htmlFor) as HTMLSelectElement
+    const project = document.getElementById(label.htmlFor) as HTMLButtonElement
     expect(project.disabled).toBe(true)
-    expect(project.value).toBe('ws-1')
-    expect(project.selectedOptions[0]?.textContent).toContain('Demo — ~/demo')
+    expect(project.textContent).toContain('Demo~/demo')
+    expect(project.hasAttribute('aria-haspopup')).toBe(false)
+    expect(dialog.querySelector('[role="listbox"]')).toBeNull()
     expect(dialog.textContent).toContain('Projects are managed in DSH')
   })
 })
@@ -817,7 +853,7 @@ describe('add project folder', () => {
     expect(c.store.getState().workspaceId).toBe(shop.id)
     expect(c.store.getState().newScan).toEqual({ workspaceId: shop.id })
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
-    expect(dialog.querySelector<HTMLSelectElement>('select')?.value).toBe(shop.id)
+    expect(dialog.querySelector('.dshsec-projsel--field .dshsec-project-title')?.textContent).toBe(shop.title)
     expect(api.callsOf('createScan')).toHaveLength(0)
     await click(byText(dialog, 'button', 'Cancel'))
     expect(document.activeElement).toBe(add)
@@ -890,7 +926,7 @@ describe('add project folder', () => {
     const add = byText<HTMLButtonElement>(dialog, 'button', 'Add project folder…')
     await click(add)
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1)
-    expect(dialog.querySelector<HTMLSelectElement>('select')?.value).toBe(shop.id)
+    expect(dialog.querySelector('.dshsec-projsel--field .dshsec-project-title')?.textContent).toBe(shop.title)
     expect(dialog.querySelector<HTMLInputElement>('input[placeholder="packages/app"]')?.value).toBe('')
     expect(api.callsOf('estimateScan').at(-1)).toMatchObject({ workspaceId: shop.id })
     expect(api.callsOf('estimateScan').at(-1)).not.toHaveProperty('subpath')
