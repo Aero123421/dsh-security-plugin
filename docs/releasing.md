@@ -114,8 +114,14 @@ Repository configuration:
 
 ## Changing the supported DSH range
 
-The peer range in `package.json` (`@deepseek-ai/dsh: >=0.2.1-alpha.2 <0.3.0-0`) is checked by DSH at install and
-startup. Before widening it:
+The peer range in `package.json` (`@deepseek-ai/dsh: >=0.2.1-alpha.2 <0.3.0-0`) is checked when a profile boots.
+DSH skips the plugin when `semver.satisfies(runtime, range, { includePrerelease: true })` is false
+(`evaluatePluginCompatibility` in `@deepseek-ai/dsh-app-boot`). With that option the range matches
+`0.2.1-alpha.3`, later 0.2.x prereleases such as `0.2.2-alpha.1`, and stable 0.2.x. It does not match
+`0.2.1-alpha.1` or a `0.3.0` prerelease. The `@deepseek-ai/*` devDependencies stay on the minimum supported
+release, so `pnpm typecheck` covers that floor. `pnpm check:dsh` (CI job *DSH alpha compatibility*) resolves the
+npm dist-tag `alpha`, checks it the same way, typechecks the structural ports against that release, and boots a
+scratch web profile. Before widening the range:
 
 - update the `@deepseek-ai/*` devDependencies to the new DSH version;
 - re-check the structural DSH views in `src/host/dsh/ports.ts` and `src/client/dsh.ts` against the new DSH types,

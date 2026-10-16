@@ -205,6 +205,7 @@ pnpm lint                 # Biome
 pnpm typecheck
 pnpm test                 # Vitest: host (node) and client (happy-dom) projects
 pnpm check                # all of the above plus the package verification
+pnpm check:dsh            # latest DSH alpha (network): peer range, types, scratch web boot
 ```
 
 - To try a checkout in DSH, run `pnpm install && pnpm build` in it, then

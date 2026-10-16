@@ -140,6 +140,7 @@ pnpm lint                 # Biome
 pnpm typecheck
 pnpm test                 # Vitest: host（node）と client（happy-dom）の 2 プロジェクト
 pnpm check                # 上のすべて + パッケージの検証
+pnpm check:dsh            # 最新の DSH alpha（ネットワークが必要）: peer 範囲、型、捨てプロファイルでの起動
 ```
 
 - 手元のチェックアウトを DSH で試すには、そのディレクトリで `pnpm install && pnpm build` を実行してから `dsh plugin --profile web add /絶対パス/チェックアウト` を実行します。変更したら再ビルド（`pnpm build:watch`）して DSH を再起動してください。

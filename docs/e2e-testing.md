@@ -22,7 +22,9 @@ npx dsh --version                              # 0.2.1-alpha.2
 ```
 
 `dsh plugin` forwards to `pnpm` in the profile directory, so `pnpm` must be on `PATH`. To test against a newer DSH
-in the supported range (`>=0.2.1-alpha.2 <0.3.0-0`), install that version instead.
+in the supported range (`>=0.2.1-alpha.2 <0.3.0-0`), install that version instead. CI runs `pnpm check:dsh`
+against the npm dist-tag `alpha` (peer range, structural types, and a scratch web boot that calls `getBootstrap`).
+The steps below are the manual pass, including the scripted model.
 
 ## 2. Build and link the checkout
 

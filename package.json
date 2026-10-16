@@ -75,6 +75,7 @@
     "check": "npm run lint && npm run typecheck && npm run test && npm run build && node scripts/verify-package.mjs",
     "toolkit:pin": "node scripts/pin-toolkit.mjs",
     "check:lib": "node scripts/check-lib.mjs",
+    "check:dsh": "node scripts/check-dsh-alpha.mjs",
     "release:pack": "node scripts/release-pack.mjs"
   },
   "peerDependencies": {
