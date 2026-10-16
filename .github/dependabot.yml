@@ -8,11 +8,36 @@ updates:
     groups:
       dev-tooling:
         dependency-type: development
+        # Majors are handled deliberately per package (see ignore below),
+        # never bundled into the weekly grouped PR.
+        update-types:
+          - minor
+          - patch
         exclude-patterns:
           - '@deepseek-ai/*'
     ignore:
       # DSH packages follow the supported DSH range; bump them deliberately (docs/releasing.md).
       - dependency-name: '@deepseek-ai/*'
+      # The client bundle runs on the React DSH provides (18.3.1 across the
+      # supported peer range); React and its types must track DSH, not npm.
+      - dependency-name: 'react'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-dom'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@types/react'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@types/react-dom'
+        update-types: ['version-update:semver-major']
+      # @types/node must match engines (^22.19.0 || >=24.0.0), not the newest line.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # Toolchain majors need their own verified PRs, not a weekly bundle.
+      - dependency-name: 'typescript'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'vitest'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@vitest/coverage-v8'
+        update-types: ['version-update:semver-major']
   - package-ecosystem: github-actions
     directory: /
     schedule:
