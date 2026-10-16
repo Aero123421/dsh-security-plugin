@@ -4,8 +4,10 @@
  *
  * DSH boots a plugin only when every `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*`
  * peer range satisfies `semver.satisfies(runtime, range, { includePrerelease: true })`
- * (`evaluatePluginCompatibility` in `@deepseek-ai/dsh-app-boot`). A miss disables
- * the plugin before it loads.
+ * (`evaluatePluginCompatibility` in `@deepseek-ai/dsh-app-boot`; since alpha.4 an
+ * `engines.dsh` range in the plugin's package.json takes precedence when present —
+ * this plugin declares none, so the peer path applies). A miss disables the plugin
+ * before it loads.
  *
  *   node scripts/check-dsh-alpha.mjs [--skip-types] [--skip-boot]
  *
@@ -34,6 +36,7 @@ const sdkPackages = ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-client-connection
 const mustAdmit = [
   '0.2.1-alpha.2',
   '0.2.1-alpha.3',
+  '0.2.1-alpha.4',
   '0.2.1-alpha.10',
   '0.2.2-0',
   '0.2.2-alpha.1',
@@ -67,8 +70,8 @@ try {
 }
 
 function npmAlpha() {
-  const value = npmJson(['@deepseek-ai/dsh', 'dist-tags.alpha'])
-  if (typeof value !== 'string' || value.trim() === '') {
+  const value = npmString(['@deepseek-ai/dsh', 'dist-tags.alpha'])
+  if (value === undefined || value.trim() === '') {
     throw new Error(`npm dist-tag alpha for @deepseek-ai/dsh was ${JSON.stringify(value)}`)
   }
   return value
@@ -131,12 +134,12 @@ function satisfies(semver, runtime, range) {
 
 function typecheckAgainstAlpha(semver, alpha) {
   for (const name of sdkPackages) {
-    const published = npmJson([`${name}@${alpha}`, 'version'])
+    const published = npmString([`${name}@${alpha}`, 'version'])
     if (published !== alpha) {
       throw new Error(`${name}@${alpha} resolved to ${JSON.stringify(published)}`)
     }
   }
-  const cordisRange = npmJson([`@deepseek-ai/dsh@${alpha}`, 'dependencies.@deepseek-ai/cordis'])
+  const cordisRange = npmString([`@deepseek-ai/dsh@${alpha}`, 'dependencies.@deepseek-ai/cordis'])
   if (typeof cordisRange !== 'string') {
     throw new Error(`@deepseek-ai/dsh@${alpha} has no string @deepseek-ai/cordis dependency`)
   }
@@ -340,6 +343,13 @@ function signalGroup(child, signal) {
 
 function readPackage() {
   return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+}
+
+/** npm <= 11 returns a single value; npm 12 wraps it in a one-element array. */
+function npmString(viewArgs) {
+  const value = npmJson(viewArgs)
+  const single = Array.isArray(value) && value.length === 1 ? value[0] : value
+  return typeof single === 'string' ? single : undefined
 }
 
 function npmJson(viewArgs) {
