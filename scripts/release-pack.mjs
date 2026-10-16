@@ -29,7 +29,13 @@ const out = execFileSync(npm, ['pack', '--json', '--pack-destination', dir], {
   encoding: 'utf8',
   shell: process.platform === 'win32',
 })
-const [packed] = JSON.parse(out)
+// npm <= 11 prints an array with one entry; npm 12 prints an object keyed by package name.
+const packResult = JSON.parse(out)
+const packed = Array.isArray(packResult)
+  ? packResult[0]
+  : typeof packResult?.filename === 'string'
+    ? packResult
+    : Object.values(packResult ?? {})[0]
 const expected = `${pkg.name}-${pkg.version}.tgz`
 if (packed?.filename !== expected) {
   console.error(`release-pack: expected ${expected}, npm produced ${packed?.filename}`)
