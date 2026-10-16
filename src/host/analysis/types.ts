@@ -43,6 +43,7 @@ export type ExcludeReason =
   | 'outside-root'
   | 'limit-files'
   | 'limit-bytes'
+  | 'limit-entries'
   | 'unreadable'
 
 export interface SnapshotFile {
@@ -75,7 +76,13 @@ export interface Snapshot {
   readonly files: ReadonlyMap<string, SnapshotFile>
   readonly excluded: readonly ExcludedPath[]
   readonly totalBytes: number
-  /** A file/byte ceiling stopped the walk early. */
+  /** All visited excluded paths, even when the displayed exclusion list is capped. */
+  readonly excludedCount?: number
+  /** Known unvisited entries (lower bound; unopened directory descendants are unknown). */
+  readonly unvisitedEntries?: number
+  /** Queued directories not opened due to the walk budget (not a count of their files). */
+  readonly unvisitedDirectories?: number
+  /** A file/byte/entry ceiling limited coverage. */
   readonly truncated: boolean
   /** `HEAD` commit when the root is a git checkout. */
   readonly commit?: string
@@ -88,6 +95,8 @@ export interface SnapshotOptions {
   /** Extra gitignore-style patterns. */
   readonly excludeGlobs: readonly string[]
   readonly maxFiles: number
+  /** Entries visited, directories and excluded paths included; default 100,000. */
+  readonly maxEntries?: number
   readonly maxFileBytes: number
   readonly maxTotalBytes: number
   readonly signal?: AbortSignal

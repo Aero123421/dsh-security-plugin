@@ -33,7 +33,8 @@ from starting, and the reason is written to the DSH log.
 | `dataDir` | path | `$DSH_HOME/security` (bundle layer sets `!!js dshHomePath('security')`; if unset, `$DSH_HOME` or `~/.dsh`, plus `/security`) | non-empty | Where `security.db` and the managed `toolkit/` live. |
 | `maxParallelWorkers` | integer | `4` | 1–32 | Ceiling for AI workers running at once in one scan. The user's *Reviewers working at once* is clamped to it. |
 | `maxConcurrentScans` | integer | `1` | 1–8 | Scans running at once across all projects. Others wait in a FIFO queue. |
-| `maxFiles` | integer | `20000` | 1–1,000,000 | Files read into one snapshot. Beyond this the snapshot is truncated, and both a notice and a coverage gap say so. |
+| `maxFiles` | integer | `20000` | 1–1,000,000 | Files read into one snapshot. Further eligible files are counted as `limit-files` exclusions, within the entry-walk budget. |
+| `maxEntries` | integer | `100000` | 1–10,000,000 | Entries visited, including directories and excluded files. Bounds excluded-only trees and directory enumeration; exhausted walks record `limit-entries`. |
 | `maxFileBytes` | integer (bytes) | `1048576` (1 MiB) | 1–64 MiB | Largest single file read. Larger files are excluded as `too-large`, except dependency manifests and lock files, which may be up to 32 MiB (an oversized one is named in a scan warning). |
 | `maxTotalBytes` | integer (bytes) | `209715200` (200 MiB) | 1 B–4 GiB | Total bytes read into one snapshot. |
 | `maxTokensPerScan` | integer | `20000000` | 1–1,000,000,000 | Ceiling for every mode's *Tokens* budget. |
@@ -116,6 +117,12 @@ change is a partial patch with optimistic concurrency. If two pages edit at the 
 An AI scan needs a Hunter route (its own or Default). Without a Planner route the threat model is skipped; without a
 Skeptic route, independent review; without a Chain route, attack chains.
 
+Before snapshotting, scan creation resolves each distinct provider/model and rejects unknown models, unsupported
+reasoning efforts, and output caps above the reported combined context window with `security/no-model`.
+DSH's current public resolved-model API exposes `defaultMaxTokens`, not a maximum output capacity: the plugin does
+not treat that default as a ceiling. Provider-specific output limits below the context window are still enforced by
+the adapter/provider when requests run.
+
 ### Scanning
 
 | Setting | Default | Range | Meaning |
@@ -129,8 +136,22 @@ Skeptic route, independent review; without a Chain route, attack chains.
 ### Budgets
 
 Per mode (`budgets.quick`, `budgets.deep`, `budgets.research`). A scan stops starting new work as soon as it reaches
-any limit. `maxMinutes` is also a deadline: when it passes, model requests still in flight are aborted, and the scan
-completes with what it has and a time-budget notice.
+any limit. `maxMinutes` bounds all running work, including deterministic-only scans and external analyzer process
+trees. If it expires during analysis, the scan becomes `interrupted` with a `budget-time` error and an incomplete-analysis
+coverage gap; it does not silently complete with all AI work skipped. If analysis finished before the deadline, AI
+requests are aborted and the scan completes with its existing results and a time-budget notice.
+
+Resume recomputes deterministic analysis from the live workspace; its time counts against the original remaining
+budget. Analysis artifacts are not reused. An exhausted scan stays interrupted on resume; start a new scan with a
+larger time budget to make progress. Explicit resume of a paused/interrupted/failed scan retries failed AI tasks,
+up to **three worker runs per task in total**, including interrupted runs. Provider retries inside one worker run
+retain their separate four-attempts-per-turn bound. Crash recovery does not reset failed tasks. Completed scans with
+failed tasks remain completed with gaps; start a new scan to review them again.
+
+Pending tasks are replanned with current inputs/priority, including after a plugin version change. Tasks whose
+files/endpoints disappeared are skipped without a model request. Done/running task records are never rewritten;
+new endpoints in an already-completed group get a separate task. Only one queued/running scan is allowed per
+canonical workspace, including when resuming a different scan.
 
 | Setting | Quick | Deep | Research | Clamp |
 | --- | --- | --- | --- | --- |
@@ -141,8 +162,8 @@ completes with what it has and a time-budget notice.
 | `maxTasks` (review tasks) | 6 | 40 | 150 | UI: 1–1,000. The review phase may schedule up to `max(maxTasks, 10)`. |
 
 Clamping happens when settings are read and written. A stored value above a lowered operator ceiling is reduced the
-next time settings load. Each scan copies its settings and budget when it is created, with two exceptions (next
-section).
+next time settings load. Each scan copies its settings and budget when it is created, except the privacy settings
+below and `storage.keepTranscripts`, which is re-read when each worker finishes.
 
 ### Privacy
 
@@ -167,7 +188,7 @@ These two settings are not frozen into a scan:
 | Setting | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `storage.retentionDays` | `90` | 0–3650 | At startup, delete scans older than this (0 keeps everything). Queued, running and paused scans are kept. Triage decisions are kept regardless. |
-| `storage.keepTranscripts` | `true` | | Store each AI worker's full conversation (gzip) for audit. |
+| `storage.keepTranscripts` | `true` | | Store each AI worker's full conversation (gzip) for audit. Re-read at each worker completion: turning it off mid-scan stops subsequent saves, but does not delete transcripts already stored. |
 | `ui.language` | `auto` | auto / en / ja / zh | UI language. `auto` follows DSH's locale, then the browser's first choice among en/ja/zh. New scans ask models to write in this language. Markdown reports follow the scan language (English, Japanese or Simplified Chinese). |
 
 ## High-risk switches and the loopback rule
@@ -210,7 +231,15 @@ people who share the DSH credentials.
 
 | Mechanism | Effect |
 | --- | --- |
-| `.gitignore` files (nested, deepest match wins) | Not read into the snapshot at all. |
+| `.gitignore` files (nested, deepest match wins) | Matching paths are not read into the snapshot. Name lookup and ignore matching follow the platform default: case-insensitive on Windows/macOS, case-sensitive elsewhere. Custom case-sensitive macOS volumes can differ. |
 | Built-in ignores | `.git`, `node_modules`, `vendor`, `dist`, `build`, `out`, `target`, `coverage`, caches, IDE folders, Python virtualenvs, `.dsh-security`, minified bundles, source maps, binaries, symlinks. |
 | `scan.excludeGlobs` | Not read into the snapshot. Counted as `user-exclude`. |
 | `privacy.withheldGlobs` and built-in credential files | Read and scanned by the built-in analyzers (so secrets in them are still found), but never returned by the workers' tools and never quotable as evidence. Task messages show only the path and rule id of hits in them ([security-model.md](security-model.md)). |
+
+A file that does not fit `maxTotalBytes` is excluded, but walking continues so smaller later files can fit. The
+exclusion detail list is capped, while coverage counts all observed exclusions. Directories excluded as a whole
+count as one path, not an invented number of descendant files. At `maxEntries`, only a bounded prefix of a directory
+is enumerated; known unvisited entries and unopened queued directories are recorded separately as lower bounds.
+Descendant counts are unknown and are not expanded just to count them. A truncated snapshot always has a coverage
+gap. Generated-content detection uses a high long-line ratio rather than excluding a component for one long SVG/data
+literal; explicit generated headers and genuinely minified bundles remain excluded from source analysis.

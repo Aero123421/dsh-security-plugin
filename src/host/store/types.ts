@@ -54,7 +54,10 @@ export type ScanPatch = Partial<
 > & { readonly clearError?: boolean; readonly clearProgress?: boolean; readonly clearFinishedAt?: boolean }
 
 export type TaskPatch = Partial<
-  Pick<TaskRecord, 'status' | 'attempts' | 'error' | 'outcome' | 'startedAt' | 'finishedAt'>
+  Pick<
+    TaskRecord,
+    'status' | 'attempts' | 'error' | 'outcome' | 'startedAt' | 'finishedAt' | 'input' | 'priority' | 'title'
+  >
 >
 
 export type AgentRunPatch = Partial<

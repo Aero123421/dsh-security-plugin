@@ -242,6 +242,7 @@ export interface HarnessOptions {
   readonly allowRemoteHighRisk?: boolean
   readonly toolkit?: Toolkit
   readonly dataDir?: string
+  readonly pluginVersion?: string
 }
 
 export interface Harness {
@@ -279,7 +280,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     fetch: noNetwork,
     astGrep: options.astGrep ?? (async () => undefined),
     now: () => new Date(),
-    pluginVersion: '0.0.0-test',
+    pluginVersion: options.pluginVersion ?? '0.0.0-test',
     ...(options.dataDir ? { dataDir: options.dataDir } : {}),
   })
   const events = (scanId: string): EventRecord[] => {

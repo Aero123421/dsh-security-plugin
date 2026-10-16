@@ -11,10 +11,12 @@
  * exceptions that always follow the user's current settings: withdrawing
  * consent to send code stops the scan's AI work (at start, on resume, and
  * promptly while it runs), and withheld-file patterns added since creation
- * apply from the next start or resume. The time budget is a deadline: when
- * it passes, in-flight model requests are aborted.
+ * apply from the next start or resume. Transcript retention is re-read at each
+ * worker completion. The time deadline bounds analysis/tools as well as model
+ * requests; incomplete analysis remains interrupted rather than completing.
  */
 
+import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import type { AnalyzerStatus, Coverage, WorkerView } from '../../shared/contracts.ts'
 import { type RoleName, SCAN_PHASES, type ScanPhase } from '../../shared/domain.ts'
@@ -91,6 +93,8 @@ const HUNT_KINDS = new Set<TaskRecord['kind']>([
   'hunt-hypothesis',
 ])
 const MAX_HYPOTHESES = { quick: 0, deep: 8, research: 16 } as const
+/** Total worker runs per task, including interrupted runs and explicit resumes. */
+export const MAX_TASK_ATTEMPTS = 3
 const MAX_SHORT_ROLE_TURNS = 16
 const AI_PHASES = ['threat-model', 'hunt', 'review', 'chain'] as const satisfies readonly ScanPhase[]
 /** Longest delay `setTimeout` accepts; a later deadline is left to the budget checks. */
@@ -125,6 +129,8 @@ export class ScanJob {
   private readonly controller = new AbortController()
   /** Aborts model work only (consent withdrawn, time budget passed); the run itself continues. */
   private readonly aiController = new AbortController()
+  private readonly deadlineController = new AbortController()
+  private readonly analysisSignal = AbortSignal.any([this.controller.signal, this.deadlineController.signal])
   private readonly aiSignal = AbortSignal.any([this.controller.signal, this.aiController.signal])
   private consentRevoked = false
   private deadlineReached = false
@@ -188,6 +194,7 @@ export class ScanJob {
     this.event('info', 'run-start', `Scan ${resumed ? 'resumed' : 'started'}`)
     try {
       this.armDeadline()
+      this.checkAnalysisDeadline()
       await this.analyze()
       if (this.aiEnabled()) await this.aiPhases()
       this.phase('reconcile')
@@ -252,15 +259,16 @@ export class ScanJob {
     if (this.consentRevoked) throw new ConsentRevoked()
   }
 
-  /** Abort in-flight model requests when the time budget runs out; the scan then completes as over budget. */
+  /** Abort all timed work; incomplete analysis interrupts, while AI-only exhaustion can complete with gaps. */
   private armDeadline(): void {
-    if (this.scan.models.hunter === undefined) return
     const remaining = this.budget.remainingMs()
     if (remaining > MAX_TIMER_MS) return
     this.deadlineTimer = setTimeout(
       () => {
         this.deadlineReached = true
-        this.aiController.abort(new Error('the time budget was used up'))
+        const error = new Error('the time budget was used up')
+        this.aiController.abort(error)
+        this.deadlineController.abort(error)
       },
       Math.max(0, remaining),
     )
@@ -278,7 +286,11 @@ export class ScanJob {
     }
     if (!current) return frozen
     const withheldGlobs = [...new Set([...frozen.privacy.withheldGlobs, ...current.privacy.withheldGlobs])]
-    return { ...frozen, privacy: { ...frozen.privacy, withheldGlobs } }
+    return {
+      ...frozen,
+      storage: { ...frozen.storage, keepTranscripts: current.storage.keepTranscripts },
+      privacy: { ...frozen.privacy, withheldGlobs },
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -316,10 +328,14 @@ export class ScanJob {
       toolkit: this.deps.toolkit,
       fetch: this.deps.fetch,
       astGrep,
-      signal: this.signal,
-      onStep: step => this.phase(stepPhase[step]),
+      signal: this.analysisSignal,
+      onStep: step => {
+        this.checkAnalysisDeadline()
+        this.phase(stepPhase[step])
+      },
     })
     this.checkStopped()
+    this.checkAnalysisDeadline()
     const digest = snapshotDigest(this.analysis.snapshot.files.values())
     if (this.scan.snapshotDigest && this.scan.snapshotDigest !== digest) {
       this.notice(
@@ -575,6 +591,26 @@ export class ScanJob {
       this.event('info', `run-${request}`, request === 'pause' ? 'Scan paused' : 'Scan interrupted because DSH stopped')
       return
     }
+    if (this.deadlineReached || this.budget.remainingMs() <= 0) {
+      const message =
+        'The time budget was used up during analysis. Analysis is incomplete; this scan can be resumed, but its remaining time budget may already be exhausted. Start a new scan with a larger budget if needed.'
+      const coverage = this.scan.coverage ?? {
+        files: { total: 0, analyzed: 0, readByAi: 0, excluded: 0 },
+        endpoints: { total: 0, reviewed: 0 },
+        tasks: { planned: 0, completed: 0, failed: 0, skipped: 0 },
+        analyzers: this.scan.analyzers ?? [],
+        discardedUnverifiable: 0,
+        gaps: [],
+      }
+      this.scan = store.updateScan(this.scan.id, {
+        status: 'interrupted',
+        usage: this.budget.usage(),
+        error: { code: 'budget-time', message },
+        coverage: { ...coverage, gaps: [...new Set([...coverage.gaps, message])] },
+      })
+      this.notice('warn', 'budget-time', message)
+      return
+    }
     // The message reaches the browser (scan summary, activity log): never include an absolute Host path.
     const message = this.mask(error instanceof Error ? error.message : String(error))
     this.deps.logger.error('dsh-security: scan failed', error)
@@ -698,6 +734,7 @@ export class ScanJob {
     route: ModelRef,
     run: (task: TaskRecord) => Promise<void>,
   ): Promise<void> {
+    tasks = tasks.map(task => this.refreshTargets(task))
     const queue = tasks.filter(t => t.status === 'pending' || t.status === 'running')
     const total = tasks.length
     let done = tasks.length - queue.length
@@ -863,7 +900,7 @@ export class ScanJob {
       ...(result.stopReason ? { stopReason: result.stopReason } : {}),
       ...(result.error ? { error: { code: result.error.code, message: result.error.message } } : {}),
     })
-    if (this.scan.settings.storage.keepTranscripts) store.saveTranscript(run.id, result.transcript)
+    if (this.analysisSettings().storage.keepTranscripts) store.saveTranscript(run.id, result.transcript)
     this.deps.live.set(this.scan.id, {
       ...view,
       turns: result.turns,
@@ -877,6 +914,7 @@ export class ScanJob {
       result.status === 'failed' &&
       result.stopReason === 'fatal' &&
       result.turns === 1 &&
+      !result.receivedAnyStreamChunk &&
       result.usage.inputTokens + result.usage.outputTokens === 0 &&
       failure &&
       !this.brokenRoutes.has(routeKey(route))
@@ -918,7 +956,7 @@ export class ScanJob {
   // -------------------------------------------------------------------------
 
   private ensure(planned: PlannedTask): TaskRecord {
-    return this.deps.store.ensureTask({
+    const task = this.deps.store.ensureTask({
       id: newId(),
       scanId: this.scan.id,
       key: planned.key,
@@ -931,6 +969,66 @@ export class ScanJob {
       attempts: 0,
       createdAt: this.iso(),
     })
+    if (task.status === 'pending') {
+      const refreshed = this.deps.store.updateTask(task.id, {
+        input: planned.input,
+        priority: planned.priority,
+        title: planned.title,
+      })
+      return this.capAttempts(refreshed)
+    }
+    // Completed positional groups cannot claim newly added endpoints. Schedule a new identity,
+    // leaving the historical done/running record and its coverage untouched.
+    if (task.status === 'done' && planned.input.endpointIds?.some(id => !task.input.endpointIds?.includes(id))) {
+      const suffix = createHash('sha256').update(JSON.stringify(planned.input.endpointIds)).digest('hex').slice(0, 16)
+      return this.ensure({ ...planned, key: `${planned.key}:refresh:${suffix}` })
+    }
+    return task
+  }
+
+  private capAttempts(task: TaskRecord): TaskRecord {
+    return task.status === 'pending' && task.attempts >= MAX_TASK_ATTEMPTS
+      ? this.deps.store.updateTask(task.id, {
+          status: 'failed',
+          finishedAt: this.iso(),
+          error: {
+            code: 'retry-limit',
+            message: `Not retried: this task already started ${MAX_TASK_ATTEMPTS} worker runs.`,
+          },
+        })
+      : task
+  }
+
+  private refreshTargets(task: TaskRecord): TaskRecord {
+    task = this.capAttempts(task)
+    if (task.status !== 'pending') return task
+    const targetPaths = task.input.targetPaths.filter(path => this.analysis.snapshot.files.has(path))
+    const endpoints = new Set(this.analysis.endpoints.map(endpoint => endpoint.id))
+    const endpointIds = task.input.endpointIds?.filter(id => endpoints.has(id))
+    if (
+      (task.input.targetPaths.length > 0 && targetPaths.length === 0) ||
+      (task.input.endpointIds?.length && endpointIds?.length === 0)
+    ) {
+      return this.deps.store.updateTask(task.id, {
+        status: 'skipped',
+        finishedAt: this.iso(),
+        error: {
+          code: 'stale-target',
+          message: 'Skipped because the target files or endpoints no longer exist in this snapshot.',
+        },
+      })
+    }
+    return this.deps.store.updateTask(task.id, {
+      input: { ...task.input, targetPaths, ...(endpointIds ? { endpointIds } : {}) },
+    })
+  }
+
+  private checkAnalysisDeadline(): void {
+    if (this.budget.remainingMs() <= 0) {
+      this.deadlineReached = true
+      this.deadlineController.abort(new Error('the time budget was used up during analysis'))
+    }
+    this.analysisSignal.throwIfAborted()
   }
 
   private completeTask(task: TaskRecord, outcome: Readonly<Record<string, string | number | boolean>>): void {
@@ -1007,8 +1105,11 @@ export class ScanJob {
     if (!this.aiEnabled())
       gaps.push('AI review was not used; logic flaws such as broken authorization are not covered.')
     const rejected = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'provider-route-rejected')
-    if (skipped > rejected.length)
-      gaps.push(`${skipped - rejected.length} review task(s) did not run (budget or task limit).`)
+    const stale = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'stale-target').length
+    if (stale > 0)
+      gaps.push(`${stale} obsolete review task(s) were skipped because their files/endpoints no longer exist.`)
+    if (skipped > rejected.length + stale)
+      gaps.push(`${skipped - rejected.length - stale} review task(s) did not run (budget or task limit).`)
     if (rejected.length > 0)
       gaps.push(
         `${rejected.length} review task(s) did not run because their model route rejected requests; see the activity log.`,
@@ -1039,7 +1140,7 @@ export class ScanJob {
         total: this.analysis.snapshot.files.size,
         analyzed: [...this.analysis.snapshot.files.values()].filter(f => !f.isGenerated).length,
         readByAi: readByAi.size,
-        excluded: this.analysis.snapshot.excluded.length,
+        excluded: this.analysis.snapshot.excludedCount ?? this.analysis.snapshot.excluded.length,
       },
       endpoints: { total: endpoints.length, reviewed: endpoints.filter(e => reviewedEndpoints.has(e.id)).length },
       tasks: {

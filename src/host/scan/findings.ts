@@ -15,6 +15,7 @@ import {
   type Severity,
   severityRank,
   type Verification,
+  VERIFICATIONS,
 } from '../../shared/domain.ts'
 import type { ChainProposal } from '../agents/roles/chain.ts'
 import { isVerifiedCode, type VerifiedCitation } from '../agents/roles/common.ts'
@@ -234,6 +235,21 @@ export function recordHunterOutput(
   let assessed = 0
   let disputed = 0
   store.transaction(() => {
+    // Keep a transaction-local, ordered view. Point refreshes after updates preserve
+    // same-batch overlap precedence without decoding/sorting the entire table per item.
+    const findings = store.listFindings(ctx.scanId)
+    const cache = (finding: FindingRecord): void => {
+      const old = findings.findIndex(item => item.id === finding.id)
+      if (old >= 0) findings.splice(old, 1)
+      let low = 0
+      let high = findings.length
+      while (low < high) {
+        const mid = (low + high) >>> 1
+        if (compareCachedFindings(findings[mid]!, finding) <= 0) low = mid + 1
+        else high = mid
+      }
+      findings.splice(low, 0, finding)
+    }
     for (const finding of output.findings) {
       const verifiedSteps = finding.attackPath.filter(isVerifiedCode)
       const key = keyStep(finding.attackPath)
@@ -252,14 +268,16 @@ export function recordHunterOutput(
       ])
       const existing =
         store.findFindingByFingerprint(ctx.scanId, fingerprint) ??
-        overlapping(store.listFindings(ctx.scanId), key.location, finding.category, finding.cwe)
+        overlapping(findings, key.location, finding.category, finding.cwe)
       if (existing) {
         mergeHunterFinding(store, existing, finding, fingerprint, [...evidenceIds, ...defenseIds])
+        const updated = store.getFinding(ctx.scanId, existing.id)
+        if (updated) cache(updated)
         merged++
         continue
       }
       const at = ctx.now()
-      store.insertFinding({
+      const record: FindingRecord = {
         id: newId(),
         scanId: ctx.scanId,
         fingerprint,
@@ -284,7 +302,9 @@ export function recordHunterOutput(
         isNew: false,
         createdAt: at,
         updatedAt: at,
-      })
+      }
+      store.insertFinding(record)
+      cache(record)
       created++
     }
 
@@ -293,7 +313,7 @@ export function recordHunterOutput(
       if (!fingerprint) continue
       const target =
         store.findFindingByFingerprint(ctx.scanId, fingerprint) ??
-        store.listFindings(ctx.scanId).find(finding => finding.mergedFingerprints.includes(fingerprint))
+        findings.find(finding => finding.mergedFingerprints.includes(fingerprint))
       if (!target) continue
       assessed++
       const evidenceIds = assessment.evidence
@@ -330,6 +350,8 @@ export function recordHunterOutput(
       } else if (evidenceIds.length > 0) {
         store.updateFinding(target.id, { supportEvidenceIds: [...target.supportEvidenceIds, ...evidenceIds] })
       }
+      const updated = store.getFinding(ctx.scanId, target.id)
+      if (updated) cache(updated)
     }
   })
   return { created, merged, discarded, assessed, disputed }
@@ -576,6 +598,17 @@ function insertCitations(
     ids.push(record.id)
   }
   return ids
+}
+
+/** Same order as SecurityStore.listFindings: overlap ties must keep their existing precedence. */
+function compareCachedFindings(a: FindingRecord, b: FindingRecord): number {
+  const text = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0)
+  return (
+    severityRank(a.severity) - severityRank(b.severity) ||
+    VERIFICATIONS.indexOf(a.verification) - VERIFICATIONS.indexOf(b.verification) ||
+    text(a.title, b.title) ||
+    text(a.id, b.id)
+  )
 }
 
 /** An existing finding for the same place and kind of issue. */

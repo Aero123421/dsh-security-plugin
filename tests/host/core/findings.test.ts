@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChainProposal } from '../../../src/host/agents/roles/chain.ts'
 import type { VerifiedCitation } from '../../../src/host/agents/roles/common.ts'
 import type { HunterFinding, HunterOutput } from '../../../src/host/agents/roles/hunter.ts'
@@ -92,6 +92,22 @@ function insertFinding(overrides: Partial<FindingRecord> = {}): FindingRecord {
   store.insertFinding(finding)
   return finding
 }
+
+describe('hunter batch list caching', () => {
+  it('reads/sorts the existing list once while retaining same-batch overlap and evidence', () => {
+    const list = vi.spyOn(store, 'listFindings')
+    const findings = Array.from({ length: 30 }, (_, index) =>
+      hunterFinding({
+        title: `finding ${index}`,
+        attackPath: [cite('src/a.ts', index < 2 ? 10 : index * 10, `sink${index}(req.body)`)],
+      }),
+    )
+    const result = recordHunterOutput(store, hunterCtx(), hunterOutput(findings))
+    expect(result).toMatchObject({ created: 29, merged: 1 })
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(store.listFindings(SCAN).find(f => f.location?.startLine === 10)?.supportEvidenceIds).toHaveLength(2)
+  })
+})
 
 describe('sourceOfAnalyzer', () => {
   it('maps every analyzer to a finding source', () => {

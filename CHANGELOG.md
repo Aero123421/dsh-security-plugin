@@ -33,6 +33,28 @@ changes; they are called out explicitly.
 - Install the optional Python AST grammar alongside ast-grep, report Python fallback separately from JS/TS AST
   availability, and reject undeclared Host bundle runtime modules during package verification.
 - Run npm/pnpm/npx through their Windows command launchers in `check:dsh`.
+- Retry transient stream termination from bundled adapters without tripping the route-rejection breaker after
+  streamed content/reasoning/tool activity. Immediate zero-data request rejections still stop unopened same-route tasks.
+- Recognize bundled pi-ai Anthropic/OpenAI/Gemini refusal shapes without confusing structural `content` field errors
+  with policy refusals. Assemble delta-only replies, tolerate nonempty clean EOF, and never wait indefinitely for
+  iterator cleanup after a finish chunk.
+- Validate exact model routes, supported reasoning efforts, and reported context bounds before creating AI scans.
+  DSH does not expose a separate output ceiling through its public resolved-model API.
+- Explicit resume retries failed tasks within a three-worker-run total cap, refreshes pending task inputs, skips
+  vanished targets without model calls, and enforces the same per-project busy rule as new scans.
+- Apply the time deadline to deterministic analysis and external tool process trees, including analyzer-only scans.
+  Analysis interrupted by the deadline remains resumable with an explicit coverage gap; resume re-analysis still
+  consumes the original budget. Transcript storage follows the current setting at each worker completion.
+- Continue snapshot packing after non-fitting files, bound traversal (including excluded-only trees) with
+  `maxEntries`, count observed exclusions beyond the displayed list cap, respect platform-default ignore casing,
+  and keep hand-written components analyzable when only one line is unusually long.
+
+### Performance
+
+- Cache the ordered findings list within a hunter-output transaction instead of reloading and sorting it for every
+  finding; preserve same-batch overlap precedence and evidence updates.
+- Reuse per-function alias-state cursors for increasing taint-query offsets, retaining exact backward-query and
+  parameter-shadowing behavior without quadratic event replay.
 
 ## [0.2.1] - 2026-10-16
 

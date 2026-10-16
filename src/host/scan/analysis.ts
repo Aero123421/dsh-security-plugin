@@ -75,6 +75,7 @@ export async function snapshotWorkspace(
     ...(workspaceRoot ? { workspaceRoot } : {}),
     excludeGlobs: settings.scan.excludeGlobs,
     maxFiles: config.maxFiles,
+    maxEntries: config.maxEntries,
     maxFileBytes: config.maxFileBytes,
     maxTotalBytes: config.maxTotalBytes,
     signal,
@@ -92,7 +93,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   const snapshot = await snapshotWorkspace(options.root, settings, config, signal, options.workspaceRoot)
   if (snapshot.truncated) {
     warnings.push(
-      `The snapshot reached the configured size limit; ${snapshot.excluded.filter(e => e.reason === 'limit-files' || e.reason === 'limit-bytes').length} or more files were not analyzed.`,
+      `The snapshot reached the configured size limit; ${snapshot.excluded.filter(e => e.reason.startsWith('limit-')).length} or more files were not analyzed.`,
     )
   }
 
