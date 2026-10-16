@@ -76,7 +76,16 @@ export const ROOT_PLACEHOLDER = '<root>'
  * shorter than 2 characters after trimming separators (`/`, `C:`) are left
  * alone. Never changes line structure.
  */
-export function maskRoot(text: string, root: string): string {
+export function maskRoot(text: string, root: string | readonly (string | undefined)[]): string {
+  if (typeof root !== 'string') {
+    let out = text
+    for (const spelling of [...new Set(root.filter((r): r is string => r !== undefined))].sort(
+      (a, b) => b.length - a.length,
+    )) {
+      out = maskRoot(out, spelling)
+    }
+    return out
+  }
   const trimmed = root.replace(/[\\/]+$/, '')
   if (trimmed.length < 2 || /^[A-Za-z]:$/.test(trimmed)) return text
   const segments = trimmed
@@ -84,23 +93,30 @@ export function maskRoot(text: string, root: string): string {
     .split(/[\\/]/)
     .filter(Boolean).length
   const needsEndBoundary = segments < 2
-  const spellings = [...new Set([trimmed, trimmed.replace(/\\/g, '/'), trimmed.replace(/\//g, '\\')])]
-  let out = text
-  for (const spelling of spellings) {
-    if (!out.includes(spelling)) continue
-    let result = ''
-    let cursor = 0
-    for (let i = out.indexOf(spelling); i >= 0; i = out.indexOf(spelling, i + 1)) {
-      if (i < cursor) continue
-      if (i > 0 && isPathChar(out.charCodeAt(i - 1))) continue
-      const after = i + spelling.length
-      if (needsEndBoundary && after < out.length && isPathChar(out.charCodeAt(after))) continue
-      result += out.slice(cursor, i) + ROOT_PLACEHOLDER
-      cursor = after
-    }
-    out = result + out.slice(cursor)
+  const insensitive =
+    process.platform === 'win32' ||
+    process.platform === 'darwin' ||
+    /^[A-Za-z]:[\\/]|^[\\/]{2}|^\/(?:Users|Volumes|private|var)\//i.test(trimmed)
+  const leading = /^[\\/]*/.exec(trimmed)?.[0].length ?? 0
+  const body =
+    (leading ? `[\\\\/]{${leading}}` : '') +
+    trimmed
+      .slice(leading)
+      .split(/[\\/]+/)
+      .map(segment => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('[\\\\/]+')
+  const pattern = new RegExp(body, insensitive ? 'gi' : 'g')
+  let out = ''
+  let cursor = 0
+  for (const match of text.matchAll(pattern)) {
+    const i = match.index
+    if (i > 0 && isPathChar(text.charCodeAt(i - 1))) continue
+    const after = i + match[0].length
+    if (needsEndBoundary && after < text.length && isPathChar(text.charCodeAt(after))) continue
+    out += text.slice(cursor, i) + ROOT_PLACEHOLDER
+    cursor = after
   }
-  return out
+  return out + text.slice(cursor)
 }
 
 /** Characters that continue a file-name segment (so the root match is not at a boundary). */

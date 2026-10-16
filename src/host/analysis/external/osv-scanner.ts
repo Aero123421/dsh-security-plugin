@@ -12,12 +12,14 @@
  * `[[PackageOverrides]]` in the scanned project cannot hide advisories.
  */
 
-import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { z } from 'zod'
 import { type OsvPackageRef, osvVulnSchema, osvVulnToSignal } from '../osv.ts'
-import { redactText } from '../secrets.ts'
+import { isSensitivePath, redactText } from '../secrets.ts'
+import { isDependencyFileName } from '../dependencies.ts'
+import { normalizePath } from '../../evidence/normalize.ts'
 import type { AnalyzerRun, Signal } from '../types.ts'
 import {
   compareVersions,
@@ -39,6 +41,7 @@ export interface OsvScannerRunOptions extends ExternalRunOptions {
    * database exists the run reports the analyzer as unavailable.
    */
   readonly offline: boolean
+  readonly withheldGlobs?: readonly string[]
   /** Override for the local DB directory (`OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY`). */
   readonly localDbDir?: string
 }
@@ -68,7 +71,7 @@ export interface OsvScannerRun extends AnalyzerRun {
   readonly checkedDependencies?: number
 }
 
-/** Run osv-scanner over the workspace root and convert its results to signals. */
+/** Run osv-scanner over staged, non-withheld snapshot dependency files and map results back. */
 export async function runOsvScanner(options: OsvScannerRunOptions): Promise<OsvScannerRun> {
   const started = Date.now()
   const { tool } = options
@@ -79,18 +82,36 @@ export async function runOsvScanner(options: OsvScannerRunOptions): Promise<OsvS
     return unavailableRun('osv-scanner', 'offline mode is on and no local osv-scanner database was found', started)
   }
 
+  if (!options.snapshot) return unavailableRun('osv-scanner', 'a frozen snapshot is required', started)
+  const snapshot = options.snapshot
+  const files = new Map(
+    [...snapshot.files].filter(
+      ([path]) =>
+        normalizePath(path) === path &&
+        isDependencyFileName(basename(path)) &&
+        !isSensitivePath(path, options.withheldGlobs ?? []),
+    ),
+  )
   const v2 = tool.version === undefined || compareVersions(tool.version, V2) >= 0
   const work = await mkdtemp(join(tmpdir(), 'dsh-osv-scanner-'))
+  const stagedRoot = join(work, 'snapshot')
   let result: Awaited<ReturnType<typeof runTool>>
   try {
+    await mkdir(stagedRoot, { mode: 0o700 })
+    for (const [path, file] of files) {
+      options.signal?.throwIfAborted()
+      const target = join(stagedRoot, path)
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 })
+      await writeFile(target, file.content, { mode: 0o600 })
+    }
     const configPath = join(work, 'osv-scanner.toml')
     await writeFile(configPath, PLUGIN_CONFIG, { mode: 0o600 })
     const flags = ['--format', 'json', '--recursive', '--config', configPath]
     if (options.offline) flags.push('--offline')
     if (v2) flags.push('--no-resolve', '--no-call-analysis=all')
     const args = v2
-      ? ['scan', 'source', ...flags, options.root]
-      : ['--format', 'json', '-r', '--config', configPath, ...offlineV1(options), options.root]
+      ? ['scan', 'source', ...flags, stagedRoot]
+      : ['--format', 'json', '-r', '--config', configPath, ...offlineV1(options), stagedRoot]
     try {
       result = await runTool(tool.path, args, {
         cwd: work,
@@ -123,7 +144,8 @@ export async function runOsvScanner(options: OsvScannerRunOptions): Promise<OsvS
     return failedRun('osv-scanner', tool, `could not parse osv-scanner output: ${errorMessage(error)}`, started)
   }
   const warnings: string[] = []
-  const parsed = parseReport(raw, options, warnings)
+  // Staged paths already have workspace-relative prefixes; do not prepend the selected subfolder again.
+  const parsed = parseReport(raw, { root: stagedRoot, snapshot: { ...snapshot, files, pathPrefix: '' } }, warnings)
   return {
     ...completedRun('osv-scanner', tool, parsed.signals, started, warnings),
     checkedDependencies: parsed.checkedDependencies,

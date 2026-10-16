@@ -248,6 +248,47 @@ describe('SettingsService', () => {
     )
   })
 
+  it('reserves withheld changes and route changes while either side consents to upload', () => {
+    const { settings } = service({ allowRemoteHighRisk: false })
+    settings.update(
+      {
+        privacy: { sendCodeToModel: true, withheldGlobs: ['private/**'] },
+        models: { default: { provider: 'a', model: 'b' } },
+      },
+      0,
+      true,
+    )
+    for (const patch of [
+      { privacy: { withheldGlobs: [] } },
+      { privacy: { withheldGlobs: ['private/**', 'more/**'] } },
+      { models: { default: { provider: 'other', model: 'b' } } },
+      { models: { hunter: { provider: 'a', model: 'other' } } },
+      { models: { default: null } },
+      { privacy: { sendCodeToModel: false, withheldGlobs: [] } },
+    ]) {
+      expect(rpcCode(() => settings.update(patch, 1, false))).toBe('security/forbidden-remote')
+      expect(settings.get().revision).toBe(1)
+    }
+    // Re-sending consent/routes and changing execution parameters do not redirect disclosure.
+    settings.update(
+      {
+        models: { default: { provider: 'a', model: 'b', maxOutputTokens: 4096 } },
+        privacy: { withheldGlobs: ['private/**'] },
+      },
+      1,
+      false,
+    )
+    settings.update({ privacy: { withheldGlobs: [] }, models: { default: null } }, 2, true)
+    settings.update({ privacy: { sendCodeToModel: false } }, 3, false)
+    expect(
+      settings.update(
+        { privacy: { withheldGlobs: ['other/**'] }, models: { hunter: { provider: 'c', model: 'd' } } },
+        4,
+        false,
+      ).revision,
+    ).toBe(5)
+  })
+
   it('lets remote pages enable high-risk switches when the operator allows it', () => {
     const { settings } = service({ allowRemoteHighRisk: true })
     expect(settings.canEditHighRisk(false)).toBe(true)

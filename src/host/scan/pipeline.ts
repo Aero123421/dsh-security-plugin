@@ -83,6 +83,8 @@ export interface PipelineDeps {
    * patterns are re-read from here; without it the frozen settings apply.
    */
   readonly currentSettings?: () => SecuritySettings
+  /** Registered (possibly symlink-spelled) workspace root, used only for model-side masking. */
+  readonly registeredWorkspaceRoot?: (workspaceId: string) => string | undefined
 }
 
 const HUNT_KINDS = new Set<TaskRecord['kind']>([
@@ -323,6 +325,9 @@ export class ScanJob {
     this.analysis = await analyzeWorkspace({
       root: scope.root,
       workspaceRoot: scope.workspaceRoot,
+      ...(this.deps.registeredWorkspaceRoot?.(this.scan.workspaceId)
+        ? { registeredWorkspaceRoot: this.deps.registeredWorkspaceRoot(this.scan.workspaceId) }
+        : {}),
       settings: this.analysisSettings(),
       config: this.deps.config,
       toolkit: this.deps.toolkit,

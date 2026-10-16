@@ -305,6 +305,72 @@ describe('osv-scanner', () => {
     ],
   })
 
+  it.runIf(isPosix)(
+    'stages only non-withheld snapshot manifests, preserves npm/pnpm/requirements layout and maps paths back',
+    async () => {
+      const { dir, cleanup } = await makeTempDir()
+      try {
+        const capture = join(dir, 'capture.json')
+        // Excluded live files must not be available to the scanner, even when they were added after the snapshot.
+        await writeFile(join(dir, 'requirements.txt'), 'excluded-live-package==99.0.0')
+        const contents = {
+          'apps/web/package.json': '{"dependencies":{"public-npm":"1.0.0"}}',
+          'apps/web/package-lock.json':
+            '{"lockfileVersion":3,"packages":{"node_modules/public-npm":{"version":"1.0.0"}}}',
+          'apps/pnpm/pnpm-lock.yaml': "lockfileVersion: '9.0'\npackages:\n  public-pnpm@1.0.0: {}\n",
+          'apps/python/requirements.txt': 'public-python==1.0.0',
+          'private/package-lock.json': '{"private-package":"9.0.0"}',
+          '.aws/config': 'credential-package',
+          'apps/web/osv-scanner.toml': '[[IgnoredVulns]]',
+          'apps/web/source.ts': 'source-never-staged',
+        }
+        const tool = await fakeTool(
+          dir,
+          'osv-scanner',
+          `
+        const fs = require('node:fs'), path = require('node:path')
+        const args = process.argv.slice(2), root = args.at(-1), files = {}
+        function walk(dir) { for (const entry of fs.readdirSync(dir, {withFileTypes:true})) {
+          const p = path.join(dir, entry.name)
+          if (entry.isDirectory()) walk(p); else files[path.relative(root,p).replaceAll('\\\\','/')] = fs.readFileSync(p,'utf8')
+        } }
+        walk(root)
+        fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({args, cwd:process.cwd(), files}))
+        process.stdout.write(JSON.stringify({results:[{source:{path:path.join(root,'apps/web/package-lock.json')},packages:[{package:{name:'public-npm',version:'1.0.0',ecosystem:'npm'}}]}]}))
+      `,
+        )
+        const snapshot = { ...snapshotOf(contents, dir), pathPrefix: 'apps' }
+        const run = await runOsvScanner({
+          tool: { path: tool, source: 'path', version: '2.7.0' },
+          root: dir,
+          snapshot,
+          offline: false,
+          withheldGlobs: ['private/**'],
+        })
+        const { readFile } = await import('node:fs/promises')
+        const seen = JSON.parse(await readFile(capture, 'utf8'))
+        expect(seen.files).toEqual(
+          Object.fromEntries(
+            Object.entries(contents).filter(
+              ([path]) =>
+                /(?:package(?:-lock)?\.json|pnpm-lock\.yaml|requirements\.txt)$/.test(path) &&
+                !path.startsWith('private/'),
+            ),
+          ),
+        )
+        expect(seen.args).not.toContain(dir)
+        expect(seen.cwd).not.toBe(dir)
+        expect(JSON.stringify(seen.files)).not.toMatch(
+          /private-package|credential-package|source-never-staged|excluded-live-package/,
+        )
+        expect(run.checkedDependencies).toBe(1)
+        expect(run.status.available).toBe(true)
+      } finally {
+        await cleanup()
+      }
+    },
+  )
+
   it('parses JSON output into dependency signals', () => {
     const snapshot = snapshotOf(
       { 'package-lock.json': '{\n  "packages": {\n    "node_modules/minimist": {}\n' },
@@ -405,7 +471,9 @@ describe('osv-scanner', () => {
         const config = args[args.indexOf('--config') + 1]
         fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(args))
         fs.writeFileSync(${JSON.stringify(configCopy)}, fs.readFileSync(config, 'utf8'))
-        process.stdout.write(${JSON.stringify(JSON.stringify(report(dir)))})
+        const report = ${JSON.stringify(report(''))}
+        report.results[0].source.path = args.at(-1) + '/package-lock.json'
+        process.stdout.write(JSON.stringify(report))
         process.exit(1)
         `,
       )
@@ -415,6 +483,7 @@ describe('osv-scanner', () => {
         tool: { path: tool, source: 'path', version: '2.2.2' },
         root: dir,
         offline: false,
+        snapshot: snapshotOf({ 'package-lock.json': '{}' }, dir),
       })
       expect(run.status.available).toBe(true)
       expect(run.checkedDependencies).toBe(1)
@@ -428,12 +497,19 @@ describe('osv-scanner', () => {
       // The repository's osv-scanner.toml ([[IgnoredVulns]]) is overridden by a plugin-written, empty config.
       expect(args[args.indexOf('--config') + 1]).toMatch(/dsh-osv-scanner-[^/]+\/osv-scanner\.toml$/)
       expect(args[args.indexOf('--config') + 1]?.startsWith(dir)).toBe(false)
-      expect(args.indexOf('--config')).toBeLessThan(args.indexOf(dir))
+      expect(args).not.toContain(dir)
+      expect(args.at(-1)).toMatch(/dsh-osv-scanner-[^/]+\/snapshot$/)
+      expect(args.indexOf('--config')).toBeLessThan(args.length - 1)
       const seen = await readFile(configCopy, 'utf8')
       expect(seen).not.toContain('IgnoredVulns')
       expect(seen.replace(/#.*$/gm, '').trim()).toBe('')
 
-      await runOsvScanner({ tool: { path: tool, source: 'path', version: '1.9.2' }, root: dir, offline: false })
+      await runOsvScanner({
+        tool: { path: tool, source: 'path', version: '1.9.2' },
+        root: dir,
+        offline: false,
+        snapshot: snapshotOf({ 'package-lock.json': '{}' }, dir),
+      })
       const legacy = JSON.parse(await readFile(argsFile, 'utf8')) as string[]
       expect(legacy[legacy.indexOf('--config') + 1]).toMatch(/osv-scanner\.toml$/)
     } finally {

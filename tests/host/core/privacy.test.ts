@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -105,7 +105,46 @@ describe.skipIf(!isPosix)('withheld files never reach a model (full research sca
   })
 })
 
+it.runIf(isPosix)('masks a real registered symlink spelling in model-bound scan excerpts', async () => {
+  const app = await copyFixture('express-shop')
+  const aliases = await mkdtemp(join(tmpdir(), 'dsh-root-alias-'))
+  const registered = join(aliases, 'linked-project')
+  await symlink(app.root, registered, 'dir')
+  await writeFile(
+    join(app.root, 'src', 'root-alias.ts'),
+    `export function run(req) { return eval(req.query.code) } // ${registered}/src/a.ts ${app.root}/src/b.ts\n`,
+  )
+  const llm = await oracleLlm()
+  const h = createHarness({
+    llm,
+    workspaces: [{ id: 'linked', title: 'express-shop', path: registered }],
+    settings: AI_SETTINGS,
+  })
+  try {
+    const scan = await h.controller.create({ workspaceId: 'linked', mode: 'deep' })
+    expect(await h.settle(scan.id)).toBe('completed')
+    expect(llm.calls.length).toBeGreaterThan(0)
+    const requests = JSON.stringify(llm.calls.map(call => ({ system: call.system, messages: call.messages })))
+    expect(requests).not.toContain(registered)
+    expect(requests).not.toContain(app.root)
+  } finally {
+    await h.controller.dispose()
+    await app.cleanup()
+    await rm(aliases, { recursive: true, force: true })
+  }
+})
+
 describe('ModelPrivacy', () => {
+  it.each([
+    ['C:/Users/Alice/Project', 'C:/Users/Alice/Linked', 'c:/USERS/alice/project-old/a C:/users/ALICE/linked/b'],
+    ['/Users/Alice/Project', '/Users/Alice/Linked', '/users/ALICE/project-old/a /Users/alice/LINKED/b'],
+  ])('masks canonical and registered case variants in scrub and excerpt (%s)', (canonical, registered, text) => {
+    const snapshot = { ...snapshotOf({}, canonical), workspaceRoot: canonical, registeredWorkspaceRoot: registered }
+    const privacy = new ModelPrivacy({ snapshot, redactor: new Redactor([]), withheldGlobs: [] })
+    expect(privacy.scrub(text)).toBe('<root>-old/a <root>/b')
+    expect(privacy.excerpt('src/app.ts', text)).toBe('<root>-old/a <root>/b')
+  })
+
   async function privacyFor(files: Record<string, string>, withheldGlobs: string[] = []) {
     const snapshot = snapshotOf(files)
     const redactor = new Redactor(await scanSecrets(snapshot))
@@ -148,6 +187,12 @@ describe('ModelPrivacy', () => {
     expect(JSON.stringify(visible)).not.toContain(ENV_SECRET)
     expect(privacy.scrub(`prefix ${ENV_SECRET.slice(0, 12)}…`)).not.toContain(ENV_SECRET.slice(0, 12))
     expect(privacy.scrub('nothing to see here')).toBe('nothing to see here')
+  })
+
+  it('retains existing short known-value scrubbing in task text', async () => {
+    const short = 'q7L!p2'
+    const privacy = await privacyFor({ 'config.ts': `const db = "postgres://admin:${short}@db.internal/app"` })
+    expect(privacy.scrub(`copied credential ${short}`)).toBe('copied credential [REDACTED:database-url]')
   })
 
   it('only reviews findings with evidence outside withheld files', async () => {

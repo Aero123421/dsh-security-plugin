@@ -195,6 +195,35 @@ describe('scanSecrets / secretSignals', () => {
 })
 
 describe('Redactor', () => {
+  it('shares one deduplicated matcher, escapes literal values and ignores short cross-file values', () => {
+    const short = 'aB3!xY7'
+    const long = 'rT8!pL2@vM6#xN4$qK9%zB7'
+    const snapshot = snapshotOf({
+      'config.ts': `const password = "${long}"\nconst token = "${long}"\nconst db = "postgres://admin:${short}@internal/db"`,
+    })
+    const redactor = new Redactor(scanFileContent('config.ts', snapshot.files.get('config.ts')!.content))
+    expect(redactor.secretValues(path => snapshot.files.get(path)?.content).filter(s => s.value === long)).toHaveLength(
+      1,
+    )
+    expect(redactor.scrub(`ordinary ${long} ${short}`, snapshot)).toBe(`ordinary [REDACTED:generic-secret] ${short}`)
+    expect(redactor.scrub('export const count = 42', snapshot)).toBe('export const count = 42')
+  })
+
+  it('fails closed instead of dropping known values when the combined matcher exceeds its cap', () => {
+    const content = Array.from(
+      { length: 5000 },
+      (_, i) => `const token${i} = "${RANDOM40.repeat(5)}${i.toString(36).padStart(6, '0')}"`,
+    ).join('\n')
+    const snapshot = snapshotOf({ 'config.ts': content })
+    const matches = scanFileContent('config.ts', content)
+    expect(matches).toHaveLength(5000)
+    const redactor = new Redactor(matches)
+    expect(redactor.scrub('ordinary text', snapshot)).toBe('[REDACTED:secret-matcher-limit]')
+    expect(redactor.scrub('first\n\nlast\n', snapshot)).toBe(
+      '[REDACTED:secret-matcher-limit]\n\n[REDACTED:secret-matcher-limit]\n',
+    )
+  })
+
   const keyBody = [
     'MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2yPB',
     'aJ5mVVYQ3gdZq0tK8Z0Wv2xY4Xg1rQ7pP3yWnL8bQ1mK2nJ3oP4qR5sT6uV7wX8y',

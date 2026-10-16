@@ -62,6 +62,26 @@ const LODASH_VULN = {
 }
 
 describe('queryOsv', () => {
+  it('never queries dependencies from custom-withheld or built-in sensitive manifests', async () => {
+    const { fetch, requests } = fakeFetch(req => ({
+      json: { results: (req.body as { queries: unknown[] }).queries.map(() => ({})) },
+    }))
+    const result = await queryOsv(
+      [
+        dep({ name: 'public-package', version: '1.0.0' }),
+        dep({ name: 'private-package', version: '2.0.0', manifest: 'private/package-lock.json' }),
+        dep({ name: 'credential-package', version: '3.0.0', manifest: '.aws/config' }),
+      ],
+      { endpoint: ENDPOINT, fetch, withheldGlobs: ['private/**'] },
+    )
+    expect(result.queried).toBe(1)
+    expect(requests[0]?.body).toEqual({
+      queries: [{ package: { name: 'public-package', ecosystem: 'npm' }, version: '1.0.0' }],
+    })
+    expect(JSON.stringify(requests)).not.toContain('private-package')
+    expect(JSON.stringify(requests)).not.toContain('credential-package')
+  })
+
   it('queries exact versions in batches, fetches details, and maps signals', async () => {
     const { fetch, requests } = fakeFetch(req => {
       if (req.url === `${ENDPOINT}/v1/querybatch`) {

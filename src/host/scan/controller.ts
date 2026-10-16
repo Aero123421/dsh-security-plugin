@@ -302,6 +302,7 @@ export class ScanController {
     const job = new ScanJob(id, {
       ...this.deps,
       currentSettings: () => this.deps.settings.get().settings,
+      registeredWorkspaceRoot: workspaceId => this.deps.workspaces()?.get(workspaceId)?.path,
       live: {
         set: (scanId, view) => {
           let views = live.get(scanId)

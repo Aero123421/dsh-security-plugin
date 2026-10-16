@@ -15,7 +15,7 @@
 import type { FindingDetail, ReportLanguage } from '../shared/contracts.ts'
 import { formatCodeRef, isQuoteVerified } from '../shared/domain.ts'
 
-/** Longest title kept in the prompt heading. */
+/** Longest title kept in the untrusted report block. */
 export const MAX_FIX_PROMPT_TITLE = 200
 const MAX_INLINE = 300
 
@@ -98,7 +98,9 @@ export function buildFixPrompt(finding: FindingDetail, language: ReportLanguage)
     '',
     t.caution,
     '',
-    `## ${t.title}: ${singleLine(finding.title, MAX_FIX_PROMPT_TITLE)}`,
+    `## ${t.title}`,
+    `(${t.untrusted})`,
+    fence(singleLine(finding.title, MAX_FIX_PROMPT_TITLE), 'text'),
   ]
   if (finding.location) lines.push(`- ${t.where}: ${singleLine(formatCodeRef(finding.location), MAX_INLINE)}`)
   lines.push(`- ${t.severity}: ${finding.severity}`, `- ${t.status}: ${finding.verification}`)

@@ -18,7 +18,7 @@ import {
 } from '../shared/settings.ts'
 import type { LoggerPort } from './dsh/ports.ts'
 import { RpcError } from './rpc/errors.ts'
-import type { SecurityStore } from './store/types.ts'
+import { type SecurityStore, StoreError } from './store/types.ts'
 
 const modelRef = z
   .object({
@@ -141,12 +141,25 @@ export function applySettingsPatch(settings: SecuritySettings, patch: SettingsPa
   }
 }
 
-/** Paths of high-risk switches that the patch turns from off to on. */
+/** Settings changes that enable or redirect disclosure reserved for same-machine pages. */
 export function enabledHighRiskPaths(before: SecuritySettings, after: SecuritySettings): string[] {
-  return HIGH_RISK_SETTING_PATHS.filter(path => {
+  const paths: string[] = HIGH_RISK_SETTING_PATHS.filter(path => {
     const key = path.split('.')[1] as keyof SecuritySettings['privacy']
     return before.privacy[key] !== true && after.privacy[key] === true
   })
+  if (before.privacy.sendCodeToModel || after.privacy.sendCodeToModel) {
+    // Glob negation/order makes semantic containment unsafe to infer. Conservatively gate every change,
+    // including additions, while either the previous or resulting settings consent to code disclosure.
+    if (JSON.stringify(before.privacy.withheldGlobs) !== JSON.stringify(after.privacy.withheldGlobs)) {
+      paths.push('privacy.withheldGlobs')
+    }
+    for (const role of ['default', ...ROLE_NAMES] as const) {
+      const old = before.models[role]
+      const next = after.models[role]
+      if (old?.provider !== next?.provider || old?.model !== next?.model) paths.push(`models.${role}`)
+    }
+  }
+  return paths
 }
 
 /** The model a role uses: its own override, else the default route. */
@@ -169,11 +182,16 @@ export class SettingsService {
 
   /** Current settings (clamped) and revision. */
   get(): { readonly settings: SecuritySettings; readonly revision: number } {
-    const { value, revision } = this.store.readSettings()
+    let revision = 0
     let settings: SecuritySettings
     try {
-      settings = readStoredSettings(value)
+      const stored = this.store.readSettings()
+      revision = stored.revision
+      if (stored.unreadable) throw new Error('Stored settings JSON is corrupt')
+      settings = readStoredSettings(stored.value)
     } catch (error) {
+      // Disposal is not damaged settings: stale handlers must not revive a closed plugin with defaults.
+      if (error instanceof StoreError && error.code === 'io' && error.message === 'store is closed') throw error
       this.logger.warn('dsh-security: stored settings unreadable, using defaults', error)
       settings = DEFAULT_SETTINGS
     }
@@ -218,7 +236,7 @@ export class SettingsService {
     if (enabled.length > 0 && !this.canEditHighRisk(loopback)) {
       throw new RpcError(
         'security/forbidden-remote',
-        'These settings can only be turned on from the machine running DSH.',
+        'These disclosure settings can only be changed from the machine running DSH.',
         { paths: enabled },
       )
     }

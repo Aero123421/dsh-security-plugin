@@ -116,7 +116,7 @@ export interface SecurityStore {
 
   // Settings -----------------------------------------------------------------
   /** Stored settings JSON (unvalidated) and its revision; revision 0 when none were saved. */
-  readSettings(): { readonly value: unknown; readonly revision: number }
+  readSettings(): { readonly value: unknown; readonly revision: number; readonly unreadable?: boolean }
   /** Compare-and-set. Returns the new revision, or `undefined` when `expectedRevision` is stale. */
   writeSettings(value: SecuritySettings, expectedRevision: number): number | undefined
 

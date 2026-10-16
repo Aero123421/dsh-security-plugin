@@ -48,6 +48,19 @@ changes; they are called out explicitly.
 - Continue snapshot packing after non-fitting files, bound traversal (including excluded-only trees) with
   `maxEntries`, count observed exclusions beyond the displayed list cap, respect platform-default ignore casing,
   and keep hand-written components analyzable when only one line is unusually long.
+- When remote high-risk settings are reserved for same-machine pages, remote pages cannot change withheld-file
+  patterns or model provider/model routes while code upload is enabled before or after the change. Authenticated
+  remote pages may still start scans using existing consent.
+- Workspace tools now mask copies of all built-in detected secret values, including generic secrets copied into
+  documentation, header dictionaries, generated files and oversized files. Known-value matching is deduplicated,
+  bounded and fails closed at its limit; values shorter than eight characters still rely on spans and patterns.
+- OSV lookups omit withheld manifests. OSV-Scanner now scans staged, non-withheld snapshot dependency files instead
+  of the live workspace, so excluded and subsequently added files cannot disclose packages.
+- Corrupt settings JSON now falls back to defaults with a Host warning; a settings update repairs the row while
+  retaining optimistic revision checks.
+- Model requests and workspace tools mask both registered and canonical workspace root spellings, including
+  Windows/macOS-style case variants, without changing `<root>` suffix semantics.
+- Fix-in-chat drafts now fence the finding title as untrusted report text instead of including it in a heading.
 
 ### Performance
 

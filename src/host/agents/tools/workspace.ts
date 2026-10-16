@@ -12,7 +12,7 @@
 import { z } from 'zod'
 import type { AstGrepHandle } from '../../analysis/astgrep.ts'
 import { findSymbol, outlineFile } from '../../analysis/outline.ts'
-import { isSensitivePath, type Redactor, redactText } from '../../analysis/secrets.ts'
+import { isSensitivePath, type Redactor } from '../../analysis/secrets.ts'
 import type { Endpoint, Snapshot, SnapshotFile } from '../../analysis/types.ts'
 import { isEndpointVisible, yieldToEventLoop } from '../../analysis/types.ts'
 import { normalizePath } from '../../evidence/normalize.ts'
@@ -123,7 +123,10 @@ export function workspaceQuoteSource(
   const { snapshot, redactor } = view
   const masked = {
     redactFile: (path: string, content: string) =>
-      maskRoot(redactor.redactFile(path, content), snapshot.workspaceRoot ?? snapshot.root),
+      maskRoot(redactor.scrub(redactor.redactFile(path, content), snapshot), [
+        snapshot.workspaceRoot ?? snapshot.root,
+        snapshot.registeredWorkspaceRoot,
+      ]),
   }
   return snapshotQuoteSource(snapshot, masked, view.withheldGlobs)
 }
@@ -202,8 +205,8 @@ class Workspace {
     const cached = this.#redacted.get(file.path)
     if (cached !== undefined) return cached ?? file.content
     const text = maskRoot(
-      this.#view.redactor.redactFile(file.path, file.content),
-      this.snapshot.workspaceRoot ?? this.snapshot.root,
+      this.#view.redactor.scrub(this.#view.redactor.redactFile(file.path, file.content), this.snapshot),
+      [this.snapshot.workspaceRoot ?? this.snapshot.root, this.snapshot.registeredWorkspaceRoot],
     )
     this.#redacted.set(file.path, text === file.content ? null : text)
     return text
@@ -218,14 +221,17 @@ class Workspace {
     return count
   }
 
-  /** Final pass over every tool output: stateless redaction where needed and root masking. */
-  finish(text: string, isError = false, redact = false): ToolResult {
-    const safe = maskRoot(redact ? redactText(text) : text, this.snapshot.workspaceRoot ?? this.snapshot.root)
+  /** Final pass over every tool output: known-value and stateless redaction, then root masking. */
+  finish(text: string, isError = false): ToolResult {
+    const safe = maskRoot(this.#view.redactor.scrub(text, this.snapshot), [
+      this.snapshot.workspaceRoot ?? this.snapshot.root,
+      this.snapshot.registeredWorkspaceRoot,
+    ])
     return isError ? { text: safe, isError: true } : { text: safe }
   }
 
   error(text: string): ToolResult {
-    return this.finish(text, true, true)
+    return this.finish(text, true)
   }
 
   markRead(path: string): void {
@@ -631,7 +637,7 @@ function findSymbolTool(ws: Workspace) {
       if (hiddenTests > 0) {
         out.push(`(${hiddenTests} definition${hiddenTests === 1 ? '' : 's'} in test files not shown.)`)
       }
-      return ws.finish(out.join('\n'), false, true)
+      return ws.finish(out.join('\n'))
     },
   })
 }
@@ -661,8 +667,6 @@ function fileOutlineTool(ws: Workspace) {
       if (outline.imports.length === 0 && outline.symbols.length === 0) {
         return ws.finish(
           `${header}\nNo imports or symbols found (outlines cover JavaScript/TypeScript and Python). Use read_file instead.`,
-          false,
-          true,
         )
       }
       const out = [header]
@@ -677,7 +681,7 @@ function fileOutlineTool(ws: Workspace) {
           symbol.startLine === symbol.endLine ? `${symbol.startLine}` : `${symbol.startLine}-${symbol.endLine}`
         out.push(`  ${range} ${symbol.kind} ${symbol.name}${symbol.exported ? ' (exported)' : ''}`)
       }
-      return ws.finish(clipOutput(out), false, true)
+      return ws.finish(clipOutput(out))
     },
   })
 }
@@ -746,7 +750,7 @@ function listEndpointsTool(ws: Workspace) {
       for (const endpoint of matched.slice(0, max)) out.push(formatEndpoint(endpoint))
       if (matched.length > max)
         out.push(`… ${matched.length - max} more not shown; raise limit or filter with under/method.`)
-      return ws.finish(clipOutput(out), false, true)
+      return ws.finish(clipOutput(out))
     },
   })
 }

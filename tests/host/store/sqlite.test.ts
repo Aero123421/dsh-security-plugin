@@ -877,7 +877,7 @@ describe('openSecurityStore (files)', () => {
       store.close()
     })
 
-    it('rejects corrupt tasks, events, transcripts, and settings', () => {
+    it('rejects corrupt tasks, events and transcripts, but keeps the revision for repairable settings JSON', () => {
       let store = tamper("UPDATE tasks SET data = json_set(data, '$.kind', 'dance') WHERE id = 'task_1'")
       expectCorrupt(() => store.getTask('task_1'), 'tasks', 'task_1', 'kind')
       store.close()
@@ -888,7 +888,10 @@ describe('openSecurityStore (files)', () => {
       expectCorrupt(() => store.loadTranscript('run_1'), 'transcripts', 'run_1', 'gzip')
       store.close()
       store = tamper("UPDATE settings SET json = '{nope'")
-      expectCorrupt(() => store.readSettings(), 'settings')
+      expect(store.readSettings()).toEqual({ value: undefined, revision: 1, unreadable: true })
+      expect(store.writeSettings(DEFAULT_SETTINGS, 0)).toBeUndefined()
+      expect(store.writeSettings(DEFAULT_SETTINGS, 1)).toBe(2)
+      expect(store.readSettings()).toEqual({ value: DEFAULT_SETTINGS, revision: 2 })
       store.close()
     })
   })

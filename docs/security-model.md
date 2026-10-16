@@ -100,10 +100,15 @@ the provider the user chose. The next section covers how that content is reduced
   replaced with `[REDACTED:<rule-id>]` in everything a worker sees. `Redactor.redactFile` uses the recorded spans
   and verifies each span by hash before replacing it. A stateless pass (`redactText`) then applies every
   high-confidence pattern again to all tool output, snippets and error messages. Replacements keep line counts, so
-  citations still line up.
+  citations still line up. Tools also scrub exact values from every built-in match across the snapshot (including
+  generic rules) wherever they occur, even in generated files and files over the secret scanner's 2 MiB limit.
+  One deduplicated, longest-first matcher per snapshot covers values of at least eight characters. It is bounded
+  to 20,000 values and 1,000,000 pattern characters; exceeding either limit withholds text instead of dropping values.
 - **No secret values at rest.** Secret findings store a SHA-256 fingerprint and a masked preview (at most the first
   4 characters), never the value. SAST snippets mask hard-coded literals. Gitleaks runs with `--redact`, and its
-  excerpts are redacted again.
+  excerpts are redacted again. Gitleaks' redacted report does not provide reliable plaintext secret values for
+  cross-file matching; an external-only secret unknown to the built-in rules can therefore still appear elsewhere.
+  Its reported line/column information is not treated as an exact secret span (it can describe the whole match).
 - **Withheld files** (built-in credential files such as `.env*`, keys, certificates, `.npmrc`, `.pypirc`, `.netrc`,
   `.git-credentials`, `.pgpass`, `.htpasswd`, cloud and container client credentials (`.aws/credentials`,
   `.aws/config`, `.docker/config.json`, `.kube/config`, `kubeconfig`), service-account JSON, Terraform state, plus the
@@ -119,10 +124,14 @@ the provider the user chose. The next section covers how that content is reduced
   excerpts, finding text) passes through the scan's `Redactor` (every secret value the built-in scan found, wherever
   it occurs, including SAST and external-analyzer snippets) and `redactText`, and the whole task message is scrubbed
   once more before it is sent.
-- **Root masking.** The absolute snapshot root is replaced in every tool output, so the model does not learn the
-  user's home path or user name from tool output.
+- **Root masking.** The canonical workspace root and its registered spelling (which can name a symlink) are
+  replaced with `<root>` in model-bound text and every tool output. Windows and macOS-style roots also match case
+  variants. Existing suffix semantics are retained: a multi-segment `/home/user/project-old` becomes `<root>-old`.
 - **Limits.** Redaction is pattern-based. A credential in an unknown format, in a file not on the withheld list,
-  can reach the provider. Users should add such files to `withheldGlobs`.
+  can reach the provider. Generic-format values found only in generated or oversized files skipped by the built-in
+  secret scan have no known-value match; only the non-generic stateless patterns protect them. Tool outputs rely on
+  spans and patterns for values shorter than eight characters; task text retains its earlier short known-value
+  scrubbing. Users should add such files to `withheldGlobs`.
 
 ## Evidence integrity
 
@@ -174,9 +183,14 @@ the provider the user chose. The next section covers how that content is reduced
   messages report a count, not the attacker's key names. Any other exception becomes `security/internal` with a
   generic message and is logged on the Host. Responses carry `cache-control: no-store` and
   `x-content-type-options: nosniff`.
-- **High-risk switches.** Turning on code upload, OSV lookups or external analyzers, and installing managed tools,
-  can be restricted to same-machine pages (`allowRemoteHighRiskSettings: false`). The rule is enforced on the Host;
-  the UI lock only explains it. It is a **policy for browser pages, not a security boundary**:
+- **High-risk settings.** Turning on code upload, OSV lookups or external analyzers, and installing managed tools,
+  can be restricted to same-machine pages (`allowRemoteHighRiskSettings: false`). While code upload is enabled in
+  either the old or resulting settings, changing any `models.*` provider/model route (including clearing an override)
+  or changing `privacy.withheldGlobs` is also restricted. All withheld-glob changes are gated, even additions: gitignore
+  negation and ordering make semantic containment unsafe to infer. Identical values and model execution parameters
+  that do not change the provider/model route remain editable. The rule is enforced on the Host; the UI lock only
+  explains it. Authenticated remote pages can still create, start and resume scans with already-consented settings;
+  scan creation does not grant new consent and is not loopback-only. It is a **policy for browser pages, not a security boundary**:
   - "Same machine" is decided from the request's `Host` header (`rpc/loopback.ts`). Browsers cannot forge `Host`,
     so a page opened through a LAN address, a tunnel or a reverse proxy counts as remote; `Forwarded` and
     `X-Forwarded-*` are ignored, so a proxy header cannot make it local.
@@ -218,7 +232,7 @@ the provider the user chose. The next section covers how that content is reduced
 *Fix in chat* hands a draft to the user's normal coding agent, which is more privileged than the review workers (it
 edits files and usually runs commands). Most of the draft was written by a model that read hostile code, and the
 snippets are repository content, so `fix-prompt.ts` keeps the title on one line (at most 200 characters), puts the
-summary, impact, attack-path descriptions, recommendation and every snippet in fenced blocks labelled as untrusted
+title, summary, impact, attack-path descriptions, recommendation and every snippet in fenced blocks labelled as untrusted
 (each fence is longer than any backtick run inside it, so the text cannot close it), and tells the agent, in the
 scan's language, to treat that text as data: not to run commands or open URLs it contains, and to verify every claim
 against the code. The user reviews the draft before sending it.
@@ -231,6 +245,8 @@ against the code. The user reviews the draft before sending it.
   (if `keepTranscripts`) full worker transcripts. Transcripts contain redacted code excerpts and model output, so
   treat the database like the source code itself. Deleting a scan removes its transcripts. Triage survives on
   purpose.
+- Unreadable settings fall back to defaults with a Host warning. Corrupt JSON retains its settings revision, so
+  bootstrap works and a validated compare-and-set update can repair the row without bypassing stale-write checks.
 - Schema migrations are append-only. A database from a newer plugin version is refused instead of being
   downgraded.
 
@@ -270,7 +286,13 @@ against the code. The user reviews the draft before sending it.
   `go` toolchain directive, and Rust's would run `build.rs`) and with transitive resolution disabled. It gets an
   empty, plugin-written config with `--config`, which replaces every `osv-scanner.toml` in the repository, so
   `[[IgnoredVulns]]` and `[[PackageOverrides]]` there cannot hide advisories. It runs `--offline` unless the user
-  enabled OSV lookups.
+  enabled OSV lookups. Both OSV clients apply the same withheld-file classification as worker tools. The built-in
+  client queries only dependencies whose manifest is non-withheld. OSV-Scanner gets a private staging tree containing
+  only non-withheld manifest/lock files included in the frozen snapshot, with workspace-relative layout preserved;
+  it never walks the live root. Results map back to those staged snapshot paths. Staging covers the built-in
+  dependency-file allowlist, tested for npm (`package.json`/`package-lock.json`), pnpm (`pnpm-lock.yaml`) and Python
+  (`requirements*.txt`). Ecosystems needing additional source files or workspace metadata not on that allowlist may
+  have reduced detection; source files, repository configs and excluded/withheld files are not copied to restore it.
 - **Semgrep** runs only with an operator-configured local rules path, `--metrics=off`, `--disable-version-check` and
   `--disable-nosem`, so `nosemgrep` comments in the repository cannot silence a rule. It never uses `--config auto` or
   the registry.

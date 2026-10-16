@@ -52,6 +52,7 @@ export type AnalysisStep = 'snapshot' | 'inventory' | 'secrets' | 'sast' | 'rout
 export interface AnalysisOptions {
   readonly root: string
   readonly workspaceRoot?: string
+  readonly registeredWorkspaceRoot?: string
   readonly settings: SecuritySettings
   readonly config: Config
   readonly toolkit: Toolkit | undefined
@@ -90,7 +91,10 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   const signals: Signal[] = []
 
   step('snapshot')
-  const snapshot = await snapshotWorkspace(options.root, settings, config, signal, options.workspaceRoot)
+  const snapshot: Snapshot = {
+    ...(await snapshotWorkspace(options.root, settings, config, signal, options.workspaceRoot)),
+    ...(options.registeredWorkspaceRoot ? { registeredWorkspaceRoot: options.registeredWorkspaceRoot } : {}),
+  }
   if (snapshot.truncated) {
     warnings.push(
       `The snapshot reached the configured size limit; ${snapshot.excluded.filter(e => e.reason.startsWith('limit-')).length} or more files were not analyzed.`,
@@ -139,7 +143,12 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
     analyzers.push({ id: 'dependencies', available: true, source: 'builtin' })
 
     if (settings.privacy.allowDependencyLookup) {
-      const osv = await queryOsv(deps.dependencies, { endpoint: config.osvEndpoint, fetch: options.fetch, signal })
+      const osv = await queryOsv(deps.dependencies, {
+        endpoint: config.osvEndpoint,
+        fetch: options.fetch,
+        signal,
+        withheldGlobs: settings.privacy.withheldGlobs,
+      })
       signals.push(...osv.signals)
       warnings.push(...osv.warnings.slice(0, 10))
       analyzers.push({ id: 'osv', available: true, source: 'builtin' })
@@ -190,6 +199,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
       tool: await toolkit.resolveHandle('osv-scanner'),
       // Without OSV consent the scanner must not reach the network.
       offline: !settings.privacy.allowDependencyLookup,
+      withheldGlobs: settings.privacy.withheldGlobs,
     })
     collect(scanner)
     dependencyScannerChecked =

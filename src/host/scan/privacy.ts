@@ -13,7 +13,7 @@
  */
 
 import type { FindingRecord } from '../core/model.ts'
-import { isSensitivePath, type Redactor, redactKnownSecrets, redactText } from '../analysis/secrets.ts'
+import { isSensitivePath, type Redactor, redactKnownSecrets } from '../analysis/secrets.ts'
 import { type Endpoint, isEndpointVisible, type Signal, type Snapshot } from '../analysis/types.ts'
 import { maskRoot } from '../evidence/text.ts'
 
@@ -46,6 +46,7 @@ export class ModelPrivacy {
   readonly #globs: readonly string[]
   readonly #withheld = new Map<string, boolean>()
   #secrets: { readonly value: string; readonly ruleId: string }[] | undefined
+  #shortSecrets: { readonly value: string; readonly ruleId: string }[] | undefined
 
   constructor(options: ModelPrivacyOptions) {
     this.#snapshot = options.snapshot
@@ -67,10 +68,12 @@ export class ModelPrivacy {
   scrub(text: string): string {
     if (text === '') return text
     this.#secrets ??= this.#redactor.secretValues(path => this.#snapshot.files.get(path)?.content)
-    return maskRoot(
-      redactText(redactKnownSecrets(text, this.#secrets)),
-      this.#snapshot.workspaceRoot ?? this.#snapshot.root,
-    )
+    this.#shortSecrets ??= this.#secrets.filter(secret => secret.value.length >= 4 && secret.value.length < 8)
+    // Keep the pre-existing short-value protection for task text; tools deliberately use the eight-character floor.
+    let safe = redactKnownSecrets(this.#redactor.scrub(text, this.#snapshot), this.#shortSecrets)
+    // Preserve the clipped-excerpt backstop without scanning a potentially large value list for every task.
+    if (/…\s*$/.test(safe)) safe = redactKnownSecrets(safe, this.#secrets)
+    return maskRoot(safe, [this.#snapshot.workspaceRoot ?? this.#snapshot.root, this.#snapshot.registeredWorkspaceRoot])
   }
 
   /** An excerpt taken from `path`: the placeholder when the file is withheld, otherwise scrubbed. */
