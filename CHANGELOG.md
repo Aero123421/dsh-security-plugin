@@ -8,6 +8,20 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- Python SAST rules detect explicitly disabled Secure flags on session/CSRF cookies and HttpOnly on session
+  cookies, including Flask config assignments and `config.update(...)`. There are now 52 SAST rules.
+
+### Fixed
+
+- Generic secret detection no longer reports high-entropy natural-language messages dominated by non-ASCII
+  letters, including Japanese and Chinese message catalogs. Opaque tokens in the same files remain detectable.
+- Secrets in test, fixture and example files remain visible but now have severity capped at Low, matching SAST;
+  their confidence downgrade is unchanged.
+- A generic secret and a specific secret/SAST credential rule covering the same sensitive span now produce one
+  finding, preserving both observations as evidence and the merged fingerprint. Adjacent credentials stay separate.
+
 ### Changed
 
 - Managed analyzer downloads now pin Gitleaks 8.30.1 (was 8.28.0) and OSV-Scanner 2.7.0 (was 2.2.2) in

@@ -3,6 +3,8 @@ import type { ChainProposal } from '../../../src/host/agents/roles/chain.ts'
 import type { VerifiedCitation } from '../../../src/host/agents/roles/common.ts'
 import type { HunterFinding, HunterOutput } from '../../../src/host/agents/roles/hunter.ts'
 import type { SkepticOutput } from '../../../src/host/agents/roles/skeptic.ts'
+import { runSast } from '../../../src/host/analysis/sast/engine.ts'
+import { scanSecrets, secretSignals } from '../../../src/host/analysis/secrets.ts'
 import type { FindingRecord } from '../../../src/host/core/model.ts'
 import {
   applySkepticOutput,
@@ -17,6 +19,7 @@ import {
 import { openSecurityStore } from '../../../src/host/store/sqlite.ts'
 import type { SecurityStore } from '../../../src/host/store/types.ts'
 import type { Severity } from '../../../src/shared/domain.ts'
+import { snapshotOf } from '../analysis/helpers.ts'
 import { findingRecord, insertScan, signalOf } from './factories.ts'
 
 const SCAN = 'scan-1'
@@ -139,6 +142,102 @@ describe('recordSignalFindings', () => {
     signalOf({ kind: 'sink', fingerprintParts: ['sink'] }),
     signalOf({ kind: 'info', fingerprintParts: ['info'] }),
   ]
+
+  it.each([false, true])('merges a generic secret into the specific SAST finding (reverse=%s)', async reverse => {
+    const snapshot = snapshotOf({ 'app/config.py': 'SECRET_KEY = "kR8vN2pQ7xL4mT9wB3zY6cH1jF5gD0sA8eU2iO7q"' })
+    const generic = secretSignals(await scanSecrets(snapshot), snapshot)
+    const specific = (await runSast(snapshot)).signals
+    expect(generic.map(s => s.ruleId)).toEqual(['generic-secret'])
+    expect(specific.map(s => s.ruleId)).toEqual(['py.hardcoded-secret-key'])
+    const all = reverse ? [...specific, ...generic] : [...generic, ...specific]
+    expect(recordSignalFindings(store, SCAN, all, now).created).toBe(1)
+    const [finding] = store.listFindings(SCAN)
+    expect(finding).toMatchObject({
+      ruleId: 'py.hardcoded-secret-key',
+      severity: 'high',
+      mergedFingerprints: [signalFingerprint(generic[0]!)],
+    })
+    const evidence = store.getEvidence(SCAN, finding!.supportEvidenceIds)
+    expect(evidence.map(e => e.claim.split(':')[0])).toEqual(['py.hardcoded-secret-key', 'generic-secret'])
+    expect(recordSignalFindings(store, SCAN, all, now).created).toBe(0)
+    expect(store.listFindings(SCAN)).toHaveLength(1)
+    const assessment = recordHunterOutput(
+      store,
+      hunterCtx({ signalIds: new Map([['S1', signalFingerprint(generic[0]!)]]) }),
+      hunterOutput([], [{ id: 'S1', verdict: 'true_positive', reason: 'The framework key is embedded in source.' }]),
+    )
+    expect(assessment.assessed).toBe(1)
+  })
+
+  it.each(['\n', '; '])('does not merge different secrets separated by %j', async separator => {
+    const snapshot = snapshotOf({
+      'app/config.py':
+        'SECRET_KEY = "kR8vN2pQ7xL4mT9wB3zY6cH1jF5gD0sA8eU2iO7q"' +
+        separator +
+        'token = "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5"',
+    })
+    const generic = secretSignals(await scanSecrets(snapshot), snapshot)
+    const specific = (await runSast(snapshot)).signals
+    expect(generic).toHaveLength(2)
+    expect(recordSignalFindings(store, SCAN, [...generic, ...specific], now).created).toBe(2)
+    expect(
+      store
+        .listFindings(SCAN)
+        .map(f => f.ruleId)
+        .sort(),
+    ).toEqual(['generic-secret', 'py.hardcoded-secret-key'])
+  })
+
+  it('prefers a specific secrets rule but preserves higher severity and both observations', () => {
+    const common = { secretStart: 10, secretEnd: 50 }
+    const generic = signalOf({
+      analyzer: 'secrets',
+      ruleId: 'generic-secret',
+      kind: 'secret',
+      category: 'secrets',
+      severity: 'high',
+      metadata: common,
+      fingerprintParts: ['generic'],
+    })
+    const specific = signalOf({
+      analyzer: 'secrets',
+      ruleId: 'google-api-key',
+      kind: 'secret',
+      category: 'secrets',
+      severity: 'medium',
+      metadata: common,
+      fingerprintParts: ['specific'],
+    })
+    expect(recordSignalFindings(store, SCAN, [generic, specific], now).created).toBe(1)
+    expect(store.listFindings(SCAN)[0]).toMatchObject({
+      ruleId: 'google-api-key',
+      severity: 'high',
+      mergedFingerprints: [signalFingerprint(generic)],
+    })
+  })
+
+  it('keeps unrelated categories and dependencies even at the same location', () => {
+    const at = { secretStart: 10, secretEnd: 50 }
+    const all = [
+      signalOf({ metadata: at }),
+      signalOf({
+        analyzer: 'osv',
+        kind: 'dependency',
+        category: 'dependency',
+        metadata: at,
+        fingerprintParts: ['dep'],
+      }),
+      signalOf({
+        analyzer: 'secrets',
+        ruleId: 'generic-secret',
+        kind: 'secret',
+        category: 'secrets',
+        metadata: at,
+        fingerprintParts: ['generic'],
+      }),
+    ]
+    expect(recordSignalFindings(store, SCAN, all, now).created).toBe(3)
+  })
 
   it('creates one finding with observed evidence per reportable signal', () => {
     const result = recordSignalFindings(store, SCAN, signals, now)

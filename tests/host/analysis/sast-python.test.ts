@@ -203,6 +203,45 @@ if __name__ == '__main__':
 `,
   },
   {
+    rule: 'py.cookie-insecure',
+    name: 'explicit False session/CSRF settings, class attributes, dict assignments and config.update',
+    path: 'app/config.py',
+    code: `
+import os
+SESSION_COOKIE_SECURE = False  # VULN
+CSRF_COOKIE_SECURE = False  # VULN
+class ProductionConfig:
+    SESSION_COOKIE_SECURE = False  # VULN
+app.config['SESSION_COOKIE_SECURE'] = False  # VULN
+app.config.update(SESSION_COOKIE_SECURE=False)  # VULN
+settings.CSRF_COOKIE_SECURE = False  # VULN
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = os.environ.get('COOKIE_SECURE') == '1'
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('COOKIE_SECURE')
+app.config.update(SESSION_COOKIE_SECURE=True)
+app.config.update(SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE'))
+SESSION_COOKIE_SECURE = 'False'
+UNRELATED_COOKIE_SECURE = False
+`,
+  },
+  {
+    rule: 'py.cookie-without-httponly',
+    name: 'only explicit False session HttpOnly settings, not CSRF cookies',
+    code: `
+SESSION_COOKIE_HTTPONLY = False  # VULN
+class ProductionConfig:
+    SESSION_COOKIE_HTTPONLY = False  # VULN
+app.config['SESSION_COOKIE_HTTPONLY'] = False  # VULN
+app.config.update(SESSION_COOKIE_HTTPONLY=False)  # VULN
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_HTTPONLY = os.getenv('COOKIE_HTTPONLY')
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config.update(SESSION_COOKIE_HTTPONLY=os.getenv('COOKIE_HTTPONLY'))
+CSRF_COOKIE_HTTPONLY = False
+`,
+  },
+  {
     rule: 'py.tls-verification-disabled',
     name: 'verify=False',
     code: `

@@ -252,6 +252,18 @@ const EXAMPLES: Readonly<Record<string, Example>> = {
     kind: 'vulnerability',
     negative: "INSTALLED_APPS = []\nALLOWED_HOSTS = ['example.com', '.example.com']\n",
   },
+  'py.cookie-insecure': {
+    path: 'app/config.py',
+    positive: 'class ProductionConfig:\n    SESSION_COOKIE_SECURE = False\n',
+    kind: 'vulnerability',
+    negative: 'SESSION_COOKIE_SECURE = True\nCSRF_COOKIE_SECURE = os.getenv("CSRF_COOKIE_SECURE")\n',
+  },
+  'py.cookie-without-httponly': {
+    path: 'app/config.py',
+    positive: 'app.config.update(SESSION_COOKIE_HTTPONLY=False)\n',
+    kind: 'vulnerability',
+    negative: 'SESSION_COOKIE_HTTPONLY = True\napp.config["SESSION_COOKIE_HTTPONLY"] = os.getenv("COOKIE_HTTPONLY")\n',
+  },
   'py.hardcoded-secret-key': {
     path: 'mysite/settings.py',
     positive: "INSTALLED_APPS = []\nSECRET_KEY = 'x8f7s6d5f4g3h2j1k0l9m8n7'\n",

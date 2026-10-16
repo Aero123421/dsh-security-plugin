@@ -12,8 +12,8 @@
       "path": "app/config.py",
       "line": 29,
       "anchor": "SESSION_COOKIE_SECURE = False",
-      "detectableBy": ["ai"],
-      "notes": "ProductionConfig sets SESSION_COOKIE_SECURE = False, so the browser also sends the Flask session cookie over plain HTTP where it can be intercepted (session hijacking on a downgraded or mixed-content request). Impact is limited by HTTPS deployment and SameSite=Lax. No built-in SAST rule covers Flask config attributes. Fix: set it to True in production."
+      "detectableBy": ["sast", "ai"],
+      "notes": "ProductionConfig sets SESSION_COOKIE_SECURE = False, so the browser also sends the Flask session cookie over plain HTTP where it can be intercepted (session hijacking on a downgraded or mixed-content request). Impact is limited by HTTPS deployment and SameSite=Lax. The py.cookie-insecure SAST rule detects the explicit False config attribute. Fix: set it to True in production."
     }
   ],
   "negatives": [

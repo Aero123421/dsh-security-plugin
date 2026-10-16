@@ -14,7 +14,8 @@ medium when it arrives through a local alias or a route parameter. Otherwise the
 or nothing.
 
 Files that look generated (`@generated`, `DO NOT EDIT`, minified) are skipped. Test, fixture and example files
-are scanned with severity capped at **Low** and confidence **low**.
+are scanned with severity capped at **Low**. SAST confidence becomes **low**; secret confidence drops one level
+(high → medium, medium → low). Findings remain visible.
 
 | Analyzer id | Kind | Network | Default |
 | --- | --- | --- | --- |
@@ -28,8 +29,13 @@ are scanned with severity capped at **Low** and confidence **low**.
 ## Secrets (`src/host/analysis/secrets.ts`)
 
 25 rules. The same rules drive redaction of everything shown to models. Generic rules (`generic-secret`,
-`env-secret`) are scan-only and use entropy, placeholder and key-name filters. Known example values (AWS docs keys,
-the jwt.io sample, the Azurite key) and template values are ignored. Every secret finding is CWE-798.
+`env-secret`) are scan-only and use entropy, placeholder and key-name filters. `generic-secret` also excludes prose
+values dominated by non-ASCII letters, which can have high entropy without being tokens. Known example values (AWS
+docs keys, the jwt.io sample, the Azurite key) and template values are ignored. Every secret finding is CWE-798.
+
+When a specific secret rule or a CWE-798 SAST rule covers the same sensitive span as `generic-secret`, they produce
+one finding under the specific rule. Both rule observations remain as supporting evidence, and the generic
+fingerprint is retained for matching across scans. Different credentials, even on the same line, stay separate.
 
 | Rule id | Detects | Severity | Confidence |
 | --- | --- | --- | --- |
@@ -61,7 +67,7 @@ the jwt.io sample, the Azurite key) and template values are ignored. Every secre
 
 ## Pattern rules (SAST, `src/host/analysis/sast/`)
 
-50 rules. JS/TS and Python files are modeled with the native tree-sitter engine (`@ast-grep/napi`) when it is
+52 rules. JS/TS and Python files are modeled with the native tree-sitter engine (`@ast-grep/napi`) when it is
 available, and with a built-in tokenizer otherwise. Both modes run the same rules and are tested side by side.
 Template and config rules match text. "Sink severity" is the severity of the `sink` variant; rules without one only
 report when request data reaches them.
@@ -118,6 +124,8 @@ Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .
 | `py.open-redirect` | Open redirect | CWE-601 | medium | low |
 | `py.debug-enabled` | Debug mode enabled | CWE-489 | medium | – |
 | `py.allowed-hosts-wildcard` | Django `ALLOWED_HOSTS` allows any host | CWE-16 | low | – |
+| `py.cookie-insecure` | Explicit `False` for session/CSRF cookie Secure settings | CWE-614 | low | – |
+| `py.cookie-without-httponly` | Explicit `False` for session cookie HttpOnly settings | CWE-1004 | low | – |
 | `py.hardcoded-secret-key` | Hard-coded framework secret key | CWE-798 | high | – |
 | `py.tls-verification-disabled` | TLS certificate verification disabled | CWE-295 | medium | – |
 | `py.jwt-unverified` | JWT signature not verified | CWE-347 | high | – |
@@ -125,6 +133,11 @@ Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .
 | `py.insecure-random` | Predictable random value used as a secret | CWE-330 | medium | low |
 | `py.mass-assignment` | Mass assignment from request data | CWE-915 | medium | – |
 | `py.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
+
+Cookie rules cover top-level/class assignments, member or dict-style assignments (such as
+`app.config['SESSION_COOKIE_SECURE'] = False`), and keyword arguments to `app.config.update(...)`. Only the explicit
+Python literal `False` fires; `True` and environment-derived values do not. `CSRF_COOKIE_HTTPONLY = False` is not
+reported because JavaScript may need to read the CSRF cookie.
 
 ### Containers and Kubernetes (`config.ts`)
 
