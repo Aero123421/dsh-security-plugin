@@ -43,7 +43,37 @@ export function Modal(props: {
         (dialog ? focusableWithin(dialog).find(el => !el.classList.contains('dshsec-modal-x')) : undefined) ||
         dialog)
     target?.focus()
+    if (!dialog) return
+
+    let lastFocused = target
+    let parked: HTMLElement | undefined
+    const onFocus = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement && dialog.contains(event.target) && event.target !== dialog) {
+        lastFocused = event.target
+        parked = undefined
+      }
+    }
+    dialog.addEventListener('focusin', onFocus)
+    // Browsers can blur a newly disabled button to body without a focus event.
+    // Remember the control before that happens, and park focus on the dialog so
+    // Tab/Escape still reach its handlers while an RPC is pending.
+    const observer = new MutationObserver(() => {
+      const active = document.activeElement
+      if (lastFocused?.matches(':disabled') && (active === lastFocused || !dialog.contains(active))) {
+        parked = lastFocused
+        dialog.focus()
+      } else if (parked && active === dialog && (!dialog.contains(parked) || !parked.matches(':disabled'))) {
+        const restore = dialog.contains(parked)
+          ? parked
+          : focusableWithin(dialog).find(el => !el.classList.contains('dshsec-modal-x'))
+        parked = undefined
+        restore?.focus()
+      }
+    })
+    observer.observe(dialog, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] })
     return () => {
+      observer.disconnect()
+      dialog.removeEventListener('focusin', onFocus)
       if (opener?.isConnected) opener.focus()
     }
   }, [initialFocusRef])
@@ -64,10 +94,13 @@ export function Modal(props: {
     const first = items[0]!
     const last = items[items.length - 1]!
     const active = document.activeElement
-    if (event.shiftKey && (active === first || !dialogRef.current.contains(active))) {
+    if (event.shiftKey && (active === first || active === dialogRef.current || !dialogRef.current.contains(active))) {
       event.preventDefault()
       last.focus()
-    } else if (!event.shiftKey && (active === last || !dialogRef.current.contains(active))) {
+    } else if (
+      !event.shiftKey &&
+      (active === last || active === dialogRef.current || !dialogRef.current.contains(active))
+    ) {
       event.preventDefault()
       first.focus()
     }

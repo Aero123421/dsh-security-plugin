@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FindingSummary, ScanSummary } from '../../shared/contracts.ts'
 import { FINDING_SOURCES, type FindingSource, SEVERITIES, TRIAGE_STATES } from '../../shared/domain.ts'
 import { Button } from '../components/Button.tsx'
@@ -15,6 +15,7 @@ import { AvailabilityGate, EmptyState, FindingRow, LoadError, Loading, ViewingBa
 const IDLE: Loadable<readonly FindingSummary[]> = { status: 'idle' }
 /** Main-area width at which list and detail sit side by side, each scrolling on its own. */
 export const SPLIT_MIN_WIDTH = 960
+export const FINDINGS_PAGE_SIZE = 200
 
 export function FindingsView() {
   return (
@@ -67,7 +68,8 @@ function ScanFindings(props: { readonly scan: ScanSummary }) {
   const { scan } = props
   const entry = useSecurity(s => s.findings[scan.id] ?? IDLE)
   const filter = useSecurity(s => s.filter)
-  const selectedId = useSecurity(s => s.selectedFindingId)
+  const selection = useSecurity(s => s.selectedFinding)
+  const selectedId = selection?.scanId === scan.id ? selection.findingId : undefined
   const split = usePageWidth() >= SPLIT_MIN_WIDTH
   const listRef = useRef<HTMLUListElement>(null)
   const detailRef = useRef<HTMLDivElement>(null)
@@ -82,10 +84,20 @@ function ScanFindings(props: { readonly scan: ScanSummary }) {
 
   const all = entry.value
   const visible = useMemo(() => (all ? filterFindings(all, filter) : []), [all, filter])
+  const [page, setPage] = useState({ findings: visible, limit: FINDINGS_PAGE_SIZE })
+  const limit = page.findings === visible ? page.limit : FINDINGS_PAGE_SIZE
+  const rendered = useMemo(() => visible.slice(0, limit), [visible, limit])
+
+  useEffect(() => {
+    if (selection && (selection.scanId !== scan.id || (all && !all.some(f => f.id === selection.findingId)))) {
+      controller.selectFinding(undefined)
+    }
+  }, [controller, selection, scan.id, all])
+
   const activeId =
-    (cursorId && visible.some(f => f.id === cursorId) && cursorId) ||
-    (selectedId && visible.some(f => f.id === selectedId) && selectedId) ||
-    visible[0]?.id
+    (cursorId && rendered.some(f => f.id === cursorId) && cursorId) ||
+    (selectedId && rendered.some(f => f.id === selectedId) && selectedId) ||
+    rendered[0]?.id
 
   // Keep the selected row in view, and start the detail pane at its top, when the selection changes.
   useEffect(() => {
@@ -95,13 +107,13 @@ function ScanFindings(props: { readonly scan: ScanSummary }) {
     if (split) detailRef.current?.scrollTo?.({ top: 0 })
   }, [selectedId, split])
 
-  const focusRow = (id: string | undefined) => {
+  const focusRow = useCallback((id: string | undefined) => {
     requestAnimationFrame(() => {
       const row = rowsOf(listRef.current).find(el => el.dataset.findingRow === id)
       row?.focus()
       row?.scrollIntoView?.({ block: 'nearest' })
     })
-  }
+  }, [])
 
   const back = () => {
     const id = selectedId
@@ -112,11 +124,16 @@ function ScanFindings(props: { readonly scan: ScanSummary }) {
   }
 
   /** Show a finding. From the keyboard (Enter) focus moves into the detail; a click keeps it on the list. */
-  const open = (id: string, moveFocus: boolean) => {
-    setCursorId(id)
-    controller.selectFinding(id)
-    setFocusToken(moveFocus ? t => t + 1 : 0)
-  }
+  const open = useCallback(
+    (id: string, moveFocus: boolean) => {
+      setCursorId(id)
+      controller.selectFinding(id, scan.id)
+      setFocusToken(moveFocus ? t => t + 1 : 0)
+    },
+    [controller, scan.id],
+  )
+
+  const selectRow = useCallback((finding: FindingSummary) => open(finding.id, !split), [open, split])
 
   /** Esc inside the detail pane returns to the list row (split layout). */
   const onDetailKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -125,34 +142,37 @@ function ScanFindings(props: { readonly scan: ScanSummary }) {
     focusRow(activeId)
   }
 
-  const onRowKeyDown = (event: KeyboardEvent<HTMLButtonElement>, finding: FindingSummary) => {
-    const index = visible.findIndex(f => f.id === finding.id)
-    let next = -1
-    if (event.key === 'ArrowDown') next = Math.min(visible.length - 1, index + 1)
-    else if (event.key === 'ArrowUp') next = Math.max(0, index - 1)
-    else if (event.key === 'Home') next = 0
-    else if (event.key === 'End') next = visible.length - 1
-    else if (event.key === 'Enter' || event.key === ' ') {
+  const onRowKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>, finding: FindingSummary) => {
+      const index = rendered.findIndex(f => f.id === finding.id)
+      let next = -1
+      if (event.key === 'ArrowDown') next = Math.min(rendered.length - 1, index + 1)
+      else if (event.key === 'ArrowUp') next = Math.max(0, index - 1)
+      else if (event.key === 'Home') next = 0
+      else if (event.key === 'End') next = rendered.length - 1
+      else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        open(finding.id, true)
+        return
+      } else if (event.key === 'Escape' && split && controller.store.getState().selectedFinding) {
+        event.preventDefault()
+        controller.selectFinding(undefined)
+        return
+      }
+      if (next < 0) return
       event.preventDefault()
-      open(finding.id, true)
-      return
-    } else if (event.key === 'Escape' && split && selectedId) {
-      event.preventDefault()
-      controller.selectFinding(undefined)
-      return
-    }
-    if (next < 0) return
-    event.preventDefault()
-    const target = visible[next]
-    if (!target) return
-    setCursorId(target.id)
-    // Side by side, the detail follows the keyboard like a mail list.
-    if (split) {
-      controller.selectFinding(target.id)
-      setFocusToken(0)
-    }
-    focusRow(target.id)
-  }
+      const target = rendered[next]
+      if (!target) return
+      setCursorId(target.id)
+      // Side by side, the detail follows the keyboard like a mail list.
+      if (split) {
+        controller.selectFinding(target.id, scan.id)
+        setFocusToken(0)
+      }
+      focusRow(target.id)
+    },
+    [controller, rendered, split, open, focusRow, scan.id],
+  )
 
   if (!all && entry.status === 'error' && entry.error) {
     return <LoadError error={entry.error} onRetry={() => void controller.loadFindings(scan.id, true)} />
@@ -166,7 +186,7 @@ function ScanFindings(props: { readonly scan: ScanSummary }) {
     <div className={`dshsec-findings${split ? ' is-split' : ''}`}>
       {!listHidden ? (
         <div className="dshsec-findings-list">
-          <FilterBar total={all.length} shown={visible.length} />
+          <FilterBar total={all.length} shown={rendered.length} />
           {all.length === 0 ? (
             <p className="dshsec-muted">{tr.t('findings.emptyScan')}</p>
           ) : visible.length === 0 ? (
@@ -186,18 +206,23 @@ function ScanFindings(props: { readonly scan: ScanSummary }) {
                 aria-describedby={`${scan.id}-kbd`}
                 ref={listRef}
               >
-                {visible.map(finding => (
+                {rendered.map(finding => (
                   <li key={finding.id} data-finding-id={finding.id}>
                     <FindingRow
                       finding={finding}
                       selected={split && finding.id === selectedId}
                       tabIndex={finding.id === activeId ? 0 : -1}
-                      onSelect={() => open(finding.id, !split)}
-                      onKeyDown={event => onRowKeyDown(event, finding)}
+                      onSelect={selectRow}
+                      onKeyDown={onRowKeyDown}
                     />
                   </li>
                 ))}
               </ul>
+              {rendered.length < visible.length ? (
+                <Button size="sm" onClick={() => setPage({ findings: visible, limit: limit + FINDINGS_PAGE_SIZE })}>
+                  {tr.t('findings.showMore')}
+                </Button>
+              ) : null}
               <p className="dshsec-visually-hidden" id={`${scan.id}-kbd`}>
                 {tr.t('findings.keyboardHint')}
               </p>

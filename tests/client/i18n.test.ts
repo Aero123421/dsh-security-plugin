@@ -110,3 +110,13 @@ describe('translator', () => {
     expect(noticeText(zh, { key: 'something-new', text: 'English fallback' })).toBe('English fallback')
   })
 })
+
+it.each([
+  ['en', 'future scans', 'turn it off in Settings'],
+  ['ja', '今後のスキャン', '「設定」でオフにするまで'],
+  ['zh', '今后的扫描', '在设置中将其关闭'],
+] as const)('discloses consent persistence and where to turn it off in %s', (language, future, revoke) => {
+  const copy = getTranslator(language).t('consent.checkbox')
+  expect(copy).toContain(future)
+  expect(copy).toContain(revoke)
+})

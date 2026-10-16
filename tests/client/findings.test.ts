@@ -93,3 +93,20 @@ describe('helpers', () => {
     expect(ids(topOpenFindings(findings, 2))).toEqual(['b', 'a'])
   })
 })
+
+it('precomputes lowercase search fields once per immutable findings array', () => {
+  let reads = 0
+  const finding = makeFinding()
+  Object.defineProperty(finding, 'summary', {
+    get: () => {
+      reads++
+      return 'Unique SUMMARY'
+    },
+  })
+  const list = [finding]
+  expect(filterFindings(list, { ...DEFAULT_FINDINGS_FILTER, text: 'unique' })).toHaveLength(1)
+  expect(filterFindings(list, { ...DEFAULT_FINDINGS_FILTER, text: 'SUMMARY users.ts' })).toHaveLength(1)
+  expect(reads).toBe(1)
+  expect(filterFindings([...list], { ...DEFAULT_FINDINGS_FILTER, text: 'unique' })).toHaveLength(1)
+  expect(reads).toBe(2)
+})

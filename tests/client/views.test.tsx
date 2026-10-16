@@ -1,4 +1,6 @@
 import { act } from 'react'
+import { ConfirmDialog } from '../../src/client/components/ConfirmDialog.tsx'
+import { ControllerProvider } from '../../src/client/context.tsx'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createController, type SecurityController } from '../../src/client/controller.ts'
 import { DETAIL_SECTIONS } from '../../src/client/views/FindingDetail.tsx'
@@ -752,10 +754,10 @@ describe('findings list keyboard navigation', () => {
     await key(rows()[2]!, 'ArrowUp')
     expect(document.activeElement).toBe(rows()[1])
     // Narrow layout: moving does not open anything.
-    expect(c.store.getState().selectedFindingId).toBeUndefined()
+    expect(c.store.getState().selectedFinding?.findingId).toBeUndefined()
     await key(rows()[1]!, 'Enter')
     await flush(10)
-    expect(c.store.getState().selectedFindingId).toBe('f-2')
+    expect(c.store.getState().selectedFinding?.findingId).toBe('f-2')
     expect(document.activeElement?.classList.contains('dshsec-detail-title')).toBe(true)
     // Back returns focus to the row that opened the detail.
     await click(byText(document.body, 'button', 'Back to findings'))
@@ -771,7 +773,7 @@ describe('findings list keyboard navigation', () => {
     expect(container.querySelector('.dshsec-page--split')).not.toBeNull()
     rows()[0]!.focus()
     await key(rows()[0]!, 'ArrowDown')
-    expect(c.store.getState().selectedFindingId).toBe('f-2')
+    expect(c.store.getState().selectedFinding?.findingId).toBe('f-2')
     expect(rows()[1]?.getAttribute('aria-current')).toBe('true')
     expect(rows()[1]?.classList.contains('is-selected')).toBe(true)
     // Focus stays in the list while browsing.
@@ -1155,4 +1157,224 @@ describe('settings version & updates', () => {
     expect(section.textContent).toContain('手動で更新する')
     expect([...section.querySelectorAll('code')].map(c => c.textContent)).toEqual([SPEC, CLI])
   })
+})
+
+describe('B6 findings scope and scale', () => {
+  it('clears selection when latest results change without loading a foreign finding', async () => {
+    let scans = [makeScan()]
+    const {
+      controller: c,
+      container,
+      api,
+    } = await renderPage(
+      baseHandlers({
+        listScans: () => ok(scans),
+        getScan: () => ok(makeDetail()),
+        listFindings: p => ok([makeFinding({ scanId: p.scanId, id: p.scanId === 'scan-1' ? 'f-1' : 'f-2' })]),
+        getFinding: p => ok(makeFindingDetail({ scanId: p.scanId, id: p.findingId })),
+      }),
+    )
+    await act(async () => c.setTab('findings'))
+    await flush(10)
+    await click(container.querySelector('[data-finding-row="f-1"]'))
+    scans = [makeScan({ id: 'scan-2', createdAt: '2026-10-02T10:00:00Z' }), ...scans]
+    await act(async () => {
+      await c.refreshScans()
+    })
+    await flush(10)
+    expect(container.querySelector('.dshsec-findings-detail')).toBeNull()
+    expect(container.querySelector('[data-finding-row="f-2"]')).not.toBeNull()
+    expect(api.callsOf('getFinding')).not.toContainEqual({ scanId: 'scan-2', findingId: 'f-1' })
+  })
+
+  it('keeps reading the previous results during a rescan and when explicitly viewing history', async () => {
+    let scans = [makeScan()]
+    const { controller: c, container } = await renderPage(
+      baseHandlers({
+        listScans: () => ok(scans),
+        getScan: () => ok(makeDetail()),
+        listFindings: () => ok([makeFinding()]),
+        getFinding: () => ok(makeFindingDetail()),
+        createScan: () => {
+          scans = [makeScan({ id: 'scan-2', status: 'running', createdAt: '2026-10-02T10:00:00Z' }), ...scans]
+          return ok({ scanId: 'scan-2' })
+        },
+      }),
+    )
+    await act(async () => c.setTab('findings'))
+    await flush(10)
+    await click(container.querySelector('[data-finding-row="f-1"]'))
+    await act(async () => {
+      await c.startScan({ workspaceId: 'ws-1', mode: 'quick', aiReview: false })
+    })
+    await flush(10)
+    expect(container.querySelector('.dshsec-detail-title')?.textContent).toContain('SQL injection')
+    await act(async () => c.viewScan('scan-1'))
+    await flush()
+    await click(container.querySelector('[data-finding-row="f-1"]'))
+    scans = scans.map(s => ({ ...s, status: 'completed' as const }))
+    await act(async () => {
+      await c.refreshScans()
+    })
+    await flush(10)
+    expect(container.querySelector('.dshsec-detail-title')?.textContent).toContain('SQL injection')
+  })
+
+  it('caps 1000 findings at 200 rows, shows more, and filters all results', async () => {
+    const findings = Array.from({ length: 1000 }, (_, i) =>
+      makeFinding({ id: `f-${i}`, title: `Problem ${String(i).padStart(4, '0')}` }),
+    )
+    const { controller: c, container } = await renderPage(
+      baseHandlers({
+        listScans: () => ok([makeScan()]),
+        getScan: () => ok(makeDetail()),
+        listFindings: () => ok(findings),
+      }),
+    )
+    await act(async () => c.setTab('findings'))
+    await flush(10)
+    expect(container.querySelectorAll('[data-finding-row]')).toHaveLength(200)
+    await click(byText(container, 'button', 'Show more'))
+    expect(container.querySelectorAll('[data-finding-row]')).toHaveLength(400)
+    await act(async () => c.setFilter(f => ({ ...f, text: '0999' })))
+    expect(container.querySelectorAll('[data-finding-row]')).toHaveLength(1)
+    expect(container.querySelector('[data-finding-row]')?.textContent).toContain('Problem 0999')
+  })
+})
+
+describe('B6 modal busy focus', () => {
+  it('parks disabled confirm focus inside the dialog and restores it after an RPC failure; Escape works', async () => {
+    let resolve!: (value: ReturnType<typeof fail>) => void
+    const request = new Promise<ReturnType<typeof fail>>(done => {
+      resolve = done
+    })
+    controller = createController({ api: fakeApi(), storage: null })
+    const close = vi.fn()
+    mounted = mount(
+      <ControllerProvider controller={controller}>
+        <ConfirmDialog
+          title="Delete scan?"
+          body="Cannot undo"
+          confirmLabel="Delete"
+          onConfirm={() => request}
+          onClose={close}
+        />
+      </ControllerProvider>,
+    )
+    const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]')!
+    const submit = byText<HTMLButtonElement>(dialog, 'button', 'Delete')
+    submit.focus()
+    await click(submit)
+    expect(submit.disabled).toBe(true)
+    expect(document.activeElement).toBe(dialog)
+    await act(async () => resolve(fail('security/transport')))
+    await flush()
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    expect(document.activeElement).toBe(submit)
+    await act(async () =>
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    )
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('keeps keyboard focus in New Scan after create fails', async () => {
+    let resolve!: (value: ReturnType<typeof fail>) => void
+    const request = new Promise<ReturnType<typeof fail>>(done => {
+      resolve = done
+    })
+    const { controller: c, container } = await renderPage(baseHandlers({ createScan: () => request }))
+    await click(byText(container, 'button', 'Start a scan'))
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    await click(dialog.querySelector('input[name="dshsec-newscan-approach"][value="builtin"]'))
+    const submit = byText<HTMLButtonElement>(dialog, 'button', 'Start built-in checks')
+    submit.focus()
+    await click(submit)
+    expect(document.activeElement).toBe(dialog)
+    await act(async () => resolve(fail('security/transport')))
+    await flush(10)
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    await act(async () =>
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    )
+    expect(c.store.getState().newScan).toBeUndefined()
+  })
+})
+
+it('memoizes unchanged finding rows while the keyboard selection moves', async () => {
+  let untouchedReads = 0
+  const untouched = makeFinding({ id: 'third', severity: 'low' })
+  Object.defineProperty(untouched, 'title', {
+    get: () => {
+      untouchedReads++
+      return 'Untouched row'
+    },
+  })
+  const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1400 } as DOMRect)
+  try {
+    const { controller: c, container } = await renderPage(
+      baseHandlers({
+        listScans: () => ok([makeScan()]),
+        getScan: () => ok(makeDetail()),
+        listFindings: () =>
+          ok([makeFinding({ id: 'first', severity: 'critical' }), makeFinding({ id: 'second' }), untouched]),
+        getFinding: p => ok(makeFindingDetail({ id: p.findingId })),
+      }),
+    )
+    await act(async () => c.setTab('findings'))
+    await flush(10)
+    expect(container.querySelector('.dshsec-findings.is-split')).not.toBeNull()
+    untouchedReads = 0
+    const row = container.querySelector<HTMLElement>('[data-finding-row="first"]')!
+    row.focus()
+    await act(async () => row.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })))
+    await flush(10)
+    expect(c.store.getState().selectedFinding?.findingId).toBe('second')
+    expect(untouchedReads).toBe(0)
+  } finally {
+    rect.mockRestore()
+  }
+})
+
+it('traps Shift+Tab from the parked dialog container while a confirm request is busy', async () => {
+  let resolve!: (value: ReturnType<typeof fail>) => void
+  const request = new Promise<ReturnType<typeof fail>>(done => {
+    resolve = done
+  })
+  controller = createController({ api: fakeApi(), storage: null })
+  const close = vi.fn()
+  mounted = mount(
+    <ControllerProvider controller={controller}>
+      <ConfirmDialog
+        title="Delete scan?"
+        body="Cannot undo"
+        confirmLabel="Delete"
+        onConfirm={() => request}
+        onClose={close}
+      />
+    </ControllerProvider>,
+  )
+  const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]')!
+  const submit = byText<HTMLButtonElement>(dialog, 'button', 'Delete')
+  submit.focus()
+  await act(async () => {
+    submit.click()
+    // Simulate the browser dropping a disabled control's focus to body.
+    document.body.tabIndex = -1
+    document.body.focus()
+  })
+  await flush()
+  expect(document.activeElement).toBe(dialog)
+  await act(async () =>
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true })),
+  )
+  expect(dialog.contains(document.activeElement)).toBe(true)
+  expect(document.activeElement).not.toBe(dialog)
+  await act(async () => resolve(fail('security/transport')))
+  await flush()
+  // Do not steal focus back from the safe choice the keyboard user selected.
+  expect(document.activeElement).toBe(byText(dialog, 'button', 'Cancel'))
+  await act(async () =>
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+  )
+  expect(close).toHaveBeenCalledOnce()
 })

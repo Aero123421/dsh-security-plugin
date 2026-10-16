@@ -27,11 +27,12 @@ import { copyText, downloadFile } from './download.ts'
 import { type DshLayout, type DshUiWorkspace, type DshWorkspaces, SECURITY_SLOT_ID } from './dsh.ts'
 import { DEFAULT_FINDINGS_FILTER, type FindingsFilter } from './findings.ts'
 import { type Language, type MessageKey, resolveLanguage } from './i18n.ts'
-import { isPollableStatus, mergeSummary, sortScans } from './selectors.ts'
+import { isPollableStatus, mergeSummary, resultsScan, sortScans } from './selectors.ts'
 import {
   buildPatch,
   draftFromSettings,
   enforceHighRisk,
+  isDraftDirty,
   isPatchEmpty,
   rebaseDraft,
   type SettingsDraft,
@@ -97,7 +98,7 @@ export interface SecurityState {
   readonly findings: Readonly<Record<string, Loadable<readonly FindingSummary[]>>>
   /** Keyed by `findingKey(scanId, findingId)`. */
   readonly findingDetails: Readonly<Record<string, Loadable<FindingDetail>>>
-  readonly selectedFindingId: string | undefined
+  readonly selectedFinding: { readonly scanId: string; readonly findingId: string } | undefined
   readonly filter: FindingsFilter
   readonly tab: TabId
   readonly newScan: NewScanRequest | undefined
@@ -136,6 +137,7 @@ export const POLL_VISIBLE_MS = 1500
 export const POLL_HIDDEN_MS = 10_000
 export const MAX_EVENTS = 200
 const FLASH_MS = 6000
+export const ESTIMATE_TTL_MS = 30_000
 /** Showing the page again refreshes scans at most this often. */
 export const REVALIDATE_MS = 3000
 const WORKSPACE_KEY = 'dsh-security:workspace'
@@ -198,7 +200,7 @@ export interface SecurityController {
   selectWorkspace(workspaceId: string): void
   setTab(tab: TabId): void
   viewScan(scanId: string | undefined): void
-  selectFinding(findingId: string | undefined): void
+  selectFinding(findingId: string | undefined, scanId?: string): void
   setFilter(update: FindingsFilter | ((prev: FindingsFilter) => FindingsFilter)): void
   openFindingFromOverview(scanId: string, findingId: string): void
 
@@ -271,7 +273,7 @@ export function createController(options: ControllerOptions): SecurityController
     events: {},
     findings: {},
     findingDetails: {},
-    selectedFindingId: undefined,
+    selectedFinding: undefined,
     filter: DEFAULT_FINDINGS_FILTER,
     tab: 'overview',
     newScan: undefined,
@@ -291,7 +293,12 @@ export function createController(options: ControllerOptions): SecurityController
   let flashSeq = 0
   let flashTimer: ReturnType<typeof setTimeout> | undefined
   const watchers = new Map<string, Watcher>()
-  const estimateCache = new Map<string, ScanEstimate>()
+  const estimateCache = new Map<string, { readonly value: ScanEstimate; readonly at: number }>()
+  let estimateGeneration = 0
+  function invalidateEstimates(): void {
+    estimateGeneration++
+    estimateCache.clear()
+  }
   const inflight = new Map<string, { readonly gen: number; readonly promise: Promise<unknown> }>()
   const generations = new Map<string, number>()
   /**
@@ -399,6 +406,7 @@ export function createController(options: ControllerOptions): SecurityController
     await once(
       'workspaces',
       async isCurrent => {
+        invalidateEstimates()
         set(s => ({ ...s, workspaces: loading(s.workspaces) }))
         const result = await api.call('listWorkspaces', {})
         if (!isCurrent()) return
@@ -531,7 +539,7 @@ export function createController(options: ControllerOptions): SecurityController
   function selectWorkspace(workspaceId: string): void {
     if (get().workspaceId === workspaceId) return
     writeStorage(storage, WORKSPACE_KEY, workspaceId)
-    set(s => ({ ...s, workspaceId, viewScanId: undefined, selectedFindingId: undefined }))
+    set(s => ({ ...s, workspaceId, viewScanId: undefined, selectedFinding: undefined }))
     void refreshScans(workspaceId)
   }
 
@@ -540,11 +548,16 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   function viewScan(scanId: string | undefined): void {
-    set(s => ({ ...s, viewScanId: scanId, selectedFindingId: undefined }))
+    set(s => ({ ...s, viewScanId: scanId, selectedFinding: undefined }))
   }
 
-  function selectFinding(findingId: string | undefined): void {
-    set(s => (s.selectedFindingId === findingId ? s : { ...s, selectedFindingId: findingId }))
+  function selectFinding(findingId: string | undefined, scanId?: string): void {
+    set(s => {
+      const list = s.workspaceId ? (s.scans[s.workspaceId]?.value ?? []) : []
+      const selectedScanId = scanId ?? resultsScan(list, s.viewScanId)?.id
+      const selectedFinding = findingId && selectedScanId ? { scanId: selectedScanId, findingId } : undefined
+      return { ...s, selectedFinding }
+    })
   }
 
   function setFilter(update: FindingsFilter | ((prev: FindingsFilter) => FindingsFilter)): void {
@@ -556,7 +569,7 @@ export function createController(options: ControllerOptions): SecurityController
       const list = s.workspaceId ? (s.scans[s.workspaceId]?.value ?? []) : []
       const latestCompleted = list.find(scan => scan.status === 'completed')
       const viewScanId = s.viewScanId ?? (latestCompleted?.id === scanId ? undefined : scanId)
-      return { ...s, tab: 'findings', selectedFindingId: findingId, viewScanId }
+      return { ...s, tab: 'findings', selectedFinding: { scanId, findingId }, viewScanId }
     })
   }
 
@@ -575,9 +588,12 @@ export function createController(options: ControllerOptions): SecurityController
   async function estimate(workspaceId: string, mode: ScanMode, signal?: AbortSignal, subpath?: string) {
     const key = `${workspaceId}\u0000${mode}\u0000${subpath ?? ''}`
     const cached = estimateCache.get(key)
-    if (cached) return { ok: true, value: cached } as const
+    if (cached && Date.now() - cached.at <= ESTIMATE_TTL_MS) return { ok: true, value: cached.value } as const
+    const generation = estimateGeneration
     const result = await api.call('estimateScan', { workspaceId, mode, ...(subpath ? { subpath } : {}) }, signal)
-    if (result.ok) estimateCache.set(key, result.value)
+    if (result.ok && !disposed && !signal?.aborted && generation === estimateGeneration) {
+      estimateCache.set(key, { value: result.value, at: Date.now() })
+    }
     return result
   }
 
@@ -593,9 +609,13 @@ export function createController(options: ControllerOptions): SecurityController
    * retrying once after a revision conflict. `done` says whether the server
    * copy already satisfies the patch (so a retry after reload can be skipped).
    */
-  async function patchBeforeScan(patch: SettingsPatch, done: () => boolean): Promise<RpcResult<unknown>> {
+  async function patchBeforeScan(
+    patch: SettingsPatch,
+    done: () => boolean,
+    onPatched?: (revision: number) => void,
+  ): Promise<RpcResult<unknown>> {
     if (done()) return { ok: true, value: undefined }
-    let result: RpcResult<unknown> = await updateSettings(patch)
+    let result = await updateSettings(patch)
     if (!result.ok && result.error.code === 'security/conflict') {
       noteServerRevision(result.error)
       const reloaded = await reloadBootstrap({ force: true })
@@ -603,6 +623,7 @@ export function createController(options: ControllerOptions): SecurityController
       if (done()) return { ok: true, value: undefined }
       result = await updateSettings(patch)
     }
+    if (result.ok) onPatched?.(result.value.revision)
     return result
   }
 
@@ -617,10 +638,14 @@ export function createController(options: ControllerOptions): SecurityController
       })
       if (!saved.ok) return saved
     }
+    let consentRevision: number | undefined
     if (aiReview && input.consent) {
       const granted = await patchBeforeScan(
         { privacy: { sendCodeToModel: true } },
         () => settings()?.privacy?.sendCodeToModel === true,
+        revision => {
+          consentRevision = revision
+        },
       )
       if (!granted.ok) return granted
     }
@@ -631,13 +656,22 @@ export function createController(options: ControllerOptions): SecurityController
       language: get().language,
       ...(aiReview ? {} : { aiReview: false }),
     })
+    if (!result.ok && consentRevision !== undefined) {
+      // Only undo our own grant. A concurrent settings write makes this CAS fail
+      // rather than overwriting another viewer's newer privacy decision.
+      const restored = await api.call('updateSettings', {
+        patch: { privacy: { sendCodeToModel: false } },
+        expectedRevision: consentRevision,
+      })
+      if (restored.ok) applySettings(restored.value.settings, restored.value.revision)
+    }
     if (result.ok || result.error.code === 'security/busy') {
-      estimateCache.clear()
+      invalidateEstimates()
       set(s => ({
         ...s,
         workspaceId: input.workspaceId,
         viewScanId: undefined,
-        selectedFindingId: s.workspaceId === input.workspaceId ? s.selectedFindingId : undefined,
+        selectedFinding: s.workspaceId === input.workspaceId ? s.selectedFinding : undefined,
       }))
       writeStorage(storage, WORKSPACE_KEY, input.workspaceId)
       await refreshScans(input.workspaceId)
@@ -680,14 +714,19 @@ export function createController(options: ControllerOptions): SecurityController
   async function loadScanDetail(scanId: string, force = false): Promise<void> {
     const prev = get().details[scanId]
     if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
-    await once(`detail:${scanId}`, async () => {
-      set(s => ({ ...s, details: { ...s.details, [scanId]: loading(s.details[scanId]) } }))
-      const result = await api.call('getScan', { scanId })
-      if (result.ok && result.value && typeof result.value === 'object') storeDetail(scanId, result.value)
-      else if (!result.ok) {
-        set(s => ({ ...s, details: { ...s.details, [scanId]: errored(s.details[scanId], result.error) } }))
-      }
-    })
+    await once(
+      `detail:${scanId}`,
+      async isCurrent => {
+        set(s => ({ ...s, details: { ...s.details, [scanId]: loading(s.details[scanId]) } }))
+        const result = await api.call('getScan', { scanId })
+        if (!isCurrent()) return
+        if (result.ok && result.value && typeof result.value === 'object') storeDetail(scanId, result.value)
+        else if (!result.ok) {
+          set(s => ({ ...s, details: { ...s.details, [scanId]: errored(s.details[scanId], result.error) } }))
+        }
+      },
+      force,
+    )
   }
 
   async function pollEvents(scanId: string, signal: AbortSignal): Promise<void> {
@@ -740,8 +779,9 @@ export function createController(options: ControllerOptions): SecurityController
     watcher.abort = abort
     let next = pollDelay()
     try {
+      const generation = generations.get(`detail:${scanId}`)
       const result = await api.call('getScan', { scanId }, abort.signal)
-      if (watcher.stopped) return
+      if (watcher.stopped || generation !== generations.get(`detail:${scanId}`)) return
       if (!result.ok) {
         if (result.error.code === 'security/not-found') {
           stopWatcher(scanId)
@@ -870,34 +910,44 @@ export function createController(options: ControllerOptions): SecurityController
   async function loadFindings(scanId: string, force = false): Promise<void> {
     const prev = get().findings[scanId]
     if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
-    await once(`findings:${scanId}`, async () => {
-      set(s => ({ ...s, findings: { ...s.findings, [scanId]: loading(s.findings[scanId]) } }))
-      const result = await api.call('listFindings', { scanId })
-      set(s => ({
-        ...s,
-        findings: {
-          ...s.findings,
-          [scanId]: settleLoadable(
-            s.findings[scanId],
-            result.ok ? { ok: true, value: asList<FindingSummary>(result.value) } : result,
-          ),
-        },
-      }))
-    })
+    await once(
+      `findings:${scanId}`,
+      async isCurrent => {
+        set(s => ({ ...s, findings: { ...s.findings, [scanId]: loading(s.findings[scanId]) } }))
+        const result = await api.call('listFindings', { scanId })
+        if (!isCurrent()) return
+        set(s => ({
+          ...s,
+          findings: {
+            ...s.findings,
+            [scanId]: settleLoadable(
+              s.findings[scanId],
+              result.ok ? { ok: true, value: asList<FindingSummary>(result.value) } : result,
+            ),
+          },
+        }))
+      },
+      force,
+    )
   }
 
   async function loadFinding(scanId: string, findingId: string, force = false): Promise<void> {
     const key = findingKey(scanId, findingId)
     const prev = get().findingDetails[key]
     if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
-    await once(`finding:${key}`, async () => {
-      set(s => ({ ...s, findingDetails: { ...s.findingDetails, [key]: loading(s.findingDetails[key]) } }))
-      const result = await api.call('getFinding', { scanId, findingId })
-      set(s => ({
-        ...s,
-        findingDetails: { ...s.findingDetails, [key]: settleLoadable(s.findingDetails[key], result) },
-      }))
-    })
+    await once(
+      `finding:${key}`,
+      async isCurrent => {
+        set(s => ({ ...s, findingDetails: { ...s.findingDetails, [key]: loading(s.findingDetails[key]) } }))
+        const result = await api.call('getFinding', { scanId, findingId })
+        if (!isCurrent()) return
+        set(s => ({
+          ...s,
+          findingDetails: { ...s.findingDetails, [key]: settleLoadable(s.findingDetails[key], result) },
+        }))
+      },
+      force,
+    )
   }
 
   async function setTriage(input: { scanId: string; findingId: string; triage: TriageState; note?: string }) {
@@ -1074,38 +1124,30 @@ export function createController(options: ControllerOptions): SecurityController
       set(st => {
         const current = st.bootstrap.value
         if (!current) return st
-        if (!fresh) {
-          // A newer revision arrived while saving; show it rather than our older write.
-          const base = draftFromSettings(current.settings)
-          return {
-            ...st,
-            form: {
-              base,
-              draft: base,
-              revision: current.settingsRevision,
-              saving: false,
-              result: { tone: 'success', key: 'settings.saved' },
-            },
-          }
+        const base = draftFromSettings(fresh ? result.value.settings : current.settings)
+        // Only edits made since submission survive; unchanged fields take the
+        // saved server value. A newer bootstrap may have rebased the draft too.
+        const nextDraft = rebaseDraft(form.draft, base, st.form?.draft ?? form.draft)
+        const savedForm: SettingsFormState = {
+          base,
+          draft: nextDraft,
+          revision: fresh ? result.value.revision : current.settingsRevision,
+          saving: false,
+          ...(!isDraftDirty(base, nextDraft) ? { result: { tone: 'success', key: 'settings.saved' } as const } : {}),
         }
-        const base = draftFromSettings(result.value.settings)
+        // A newer revision arrived while saving: keep it rather than our older write.
+        if (!fresh) return { ...st, form: savedForm }
         return {
           ...st,
           bootstrap: {
             status: 'ready',
             value: { ...current, settings: result.value.settings, settingsRevision: result.value.revision },
           },
-          form: {
-            base,
-            draft: base,
-            revision: result.value.revision,
-            saving: false,
-            result: { tone: 'success', key: 'settings.saved' },
-          },
+          form: savedForm,
           language: resolveLanguage(result.value.settings?.ui?.language, st.dshLocale),
         }
       })
-      estimateCache.clear()
+      invalidateEstimates()
       return result
     }
     if (result.error.code === 'security/conflict') {
