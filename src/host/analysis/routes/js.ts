@@ -12,8 +12,8 @@
 
 import { resolveRelativeImport } from '../outline.ts'
 import type { CallFact, FileModel, FnFact, Span } from '../sast/model.ts'
-import { callAt } from '../sast/taint.ts'
-import { type RawRoute, type RouteFileContext, refOf, refString, type UseArg } from './common.ts'
+import { callAt, Expr } from '../sast/taint.ts'
+import { AUTH_HINT, type RawRoute, type RouteFileContext, refOf, refString, type UseArg } from './common.ts'
 
 const HTTP_METHODS: ReadonlySet<string> = new Set([
   'get',
@@ -206,7 +206,10 @@ const SERVER_MODULE_IMPORT =
 
 /** Front-end code: a `'use client'` module, or one that imports UI or HTTP-client libraries but no server framework. */
 function looksLikeClientCode(model: FileModel): boolean {
-  if (/^\s*(?:\/\/[^\n]*\n\s*|\/\*[\s\S]*?\*\/\s*)*['"]use client['"]/.test(model.source)) return true
+  // The lexer already skips leading whitespace/comments in one pass. A repeated
+  // lazy block-comment regex can repartition a non-matching header exponentially.
+  const first = model.tokens[0]
+  if (first?.type === 'str' && /^['"]use client['"]$/.test(first.value)) return true
   return model.imports.some(imp =>
     /^(?:react|react-dom|vue|svelte|@angular\/[\w-]+|preact|solid-js|axios|ky|swr|@tanstack\/[\w-]+|next\/(?:router|navigation|link))$/.test(
       imp.source,
@@ -309,7 +312,35 @@ function routeChain(ctx: RouteFileContext, call: CallFact, receivers: Map<string
   const path = m[3]!
   const framework = receivers.get(receiver)?.framework ?? guessFramework(ctx.model)
   const method = call.name.toLowerCase()
-  addCallRoute(ctx, call, receiver, framework, method === 'all' ? 'ANY' : method.toUpperCase(), path, [...call.args])
+  const priorAll = ctx.model.calls.filter(
+    c => c.name === 'all' && c.start === call.start && c.end < call.end && c.receiver.includes('.route('),
+  )
+  const middleware = priorAll.flatMap(c => c.args.flatMap(a => middlewareNames(ctx, a)))
+  // all(auth) links register middleware. Keep ANY only for a terminal
+  // handler (or a terminal named handler, as in ordinary route modeling).
+  if (method === 'all') {
+    const last = call.args.at(-1)
+    const text = last ? ctx.ex.text(last).trim() : ''
+    const fn = last
+      ? ctx.model.fns.find(f => (f.start >= last.start && f.end <= last.end) || f.name === text)
+      : undefined
+    const terminal =
+      fn && fn.params.length < 3 && /\.(?:send|json|end|redirect|sendFile|download)\s*\(/.test(ctx.ex.text(fn.body))
+    const follows = ctx.model.calls.some(
+      c => c.start === call.start && c.end > call.end && HTTP_METHODS.has(c.name.toLowerCase()),
+    )
+    if (!terminal && (follows || call.args.length === 0 || AUTH_HINT.test(text))) return
+  }
+  addCallRoute(
+    ctx,
+    call,
+    receiver,
+    framework,
+    method === 'all' ? 'ANY' : method.toUpperCase(),
+    path,
+    [...call.args],
+    middleware,
+  )
 }
 
 function addCallRoute(
@@ -650,7 +681,7 @@ function nextRoutes(ctx: RouteFileContext): void {
   const info = nextRouteOf(file.path, snapshot)
   if (!info) return
   const guard = nextMiddlewarePath(info.root, snapshot)
-  const extra = guard ? ['next-middleware'] : []
+  const extra = guard && nextMiddlewareGuards(ctx, guard, info.route) ? ['next-middleware'] : []
   const base = {
     framework: 'next',
     path: info.route,
@@ -739,6 +770,85 @@ function nextMiddlewarePath(root: string, snapshot: RouteFileContext['snapshot']
     }
   }
   return undefined
+}
+
+/** Conservative hints, not proof: require executable auth-ish code and static coverage. */
+function nextMiddlewareGuards(ctx: RouteFileContext, path: string, route: string): boolean {
+  const file = ctx.snapshot.files.get(path)
+  const model = file ? ctx.modelOf(file) : undefined
+  if (!model) return false
+  const ex = new Expr(model)
+  const handlers = model.fns.filter(
+    fn => fn.name === 'middleware' || fn.name === 'proxy' || fn === defaultExportFn(model),
+  )
+  const authCheck =
+    handlers.some(fn => {
+      const calls = model.calls.filter(c => c.start >= fn.body.start && c.end <= fn.body.end)
+      const authNames = new Set(['auth', 'isAuthenticated', 'authorization', 'session', 'token', 'user'])
+      for (const assign of model.assigns) {
+        if (
+          assign.fn === fn &&
+          calls.some(
+            c => /^(?:getToken|getSession)$/.test(c.name) && c.start >= assign.value.start && c.end <= assign.value.end,
+          )
+        ) {
+          for (const target of assign.targets) authNames.add(target.name)
+        }
+      }
+      const [start, end] = ex.range(fn.body)
+      let authConditional = false
+      for (let i = start; i < end; i++) {
+        if (model.tokens[i]?.value !== 'if' || model.tokens[i + 1]?.value !== '(') continue
+        const close = model.match[i + 1]!
+        if (close < i + 2 || close >= end) continue
+        // An auth property merely logged elsewhere, comments and '/auth'
+        // strings must not turn an unrelated locale redirect into an auth hint.
+        if (model.tokens.slice(i + 2, close).some(t => t.type === 'ident' && authNames.has(t.value)))
+          authConditional = true
+      }
+      return (
+        calls.some(
+          c =>
+            /^(?:auth|withAuth|verifyToken|verifySession|isAuthenticated)$/.test(c.name) ||
+            /\bjwt\.verify$/.test(c.callee),
+        ) ||
+        (authConditional && calls.some(c => /^(?:redirect|json)$/.test(c.name)))
+      )
+    }) ||
+    model.calls.some(
+      c =>
+        /^(?:auth|withAuth)$/.test(c.name) &&
+        /^\s*export\s+default\s*$/.test(model.source.slice(Math.max(0, c.start - 30), c.start)),
+    )
+  if (!authCheck) return false
+  const config = model.vars.find(v => v.name === 'config' && (v.exported || model.exportedNames.has('config')))
+  if (!config) return !model.exportedNames.has('config') && !/\bexport\s*\{[^}]*\bconfig\b/.test(model.source)
+  if (
+    !ex.isObjectLiteral(config.value) ||
+    ex.objectEntries(config.value).some(e => e.spread) ||
+    ex.objectEntries(config.value).filter(e => e.key === 'matcher').length > 1 ||
+    model.memberAssigns.some(a => a.target.startsWith('config.'))
+  )
+    return false
+  const matcher = ex.prop(config.value, 'matcher')
+  if (!matcher) return true
+  const spans = ex.isArrayLiteral(matcher) ? ex.elements(matcher) : [matcher]
+  const literals = spans.map(s => ex.literal(s))
+  if (literals.length === 0 || literals.some(s => s === undefined)) return false
+  return literals.some(pattern => nextMatcherCovers(pattern!, route))
+}
+
+/** Literal segments and named parameters only; regex/object/dynamic matchers never imply blanket coverage. */
+function nextMatcherCovers(pattern: string, route: string): boolean {
+  if (!pattern.startsWith('/') || /[^\w/:*.-]/.test(pattern)) return false
+  const p = pattern.split('/').filter(Boolean)
+  const r = route.split('/').filter(Boolean)
+  for (let i = 0; i < p.length; i++) {
+    const seg = p[i]!
+    if (/^:\w+\*$/.test(seg)) return i === p.length - 1
+    if (r[i] === undefined || r[i]!.endsWith('*') || (seg !== r[i] && !/^:\w+$/.test(seg))) return false
+  }
+  return p.length === r.length
 }
 
 function defaultExportFn(model: FileModel): FnFact | undefined {

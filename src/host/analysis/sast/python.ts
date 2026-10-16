@@ -431,6 +431,7 @@ export function pyTemplateRules(ctx: FileContext): void {
 
 function sqlInjection(chk: Checker, call: CallFact): void {
   let query: Span | undefined
+  let queryBuilderText = false
   if (SQL_EXEC.test(call.name) && call.receiver !== '') {
     if (call.name === 'extra')
       query = chk.keyword(call, 'where') ?? chk.keyword(call, 'select') ?? chk.positional(call, 0)
@@ -456,14 +457,31 @@ function sqlInjection(chk: Checker, call: CallFact): void {
     /^(?:sqlalchemy\.text|text|sqlalchemy\.sql\.text)$/.test(chk.qualify(call.callee)) &&
     chk.imports(/^sqlalchemy/)
   ) {
-    // Parent `.execute()` handles the call when it exists.
-    return
+    // Execute sinks unwrap text() themselves. Query-builder predicates also
+    // execute raw text, even when it contains no full SELECT statement.
+    const parent = chk.model.calls.find(
+      p =>
+        /^(?:filter|where|having)$/.test(p.name) &&
+        p.receiver !== '' &&
+        p.args.some(a => a.start <= call.start && call.end <= a.end),
+    )
+    if (!parent) return
+    queryBuilderText = true
+    query = chk.positional(call, 0)
+    if (!query) return
   } else return
   const values = chk.values(query)
   const built = values.some(v => chk.ex.isStringBuilt(v) && !chk.ex.isConstant(v))
   if (!built) return
   const text = values.map(v => chk.text(v)).join(' ')
-  if (!SQL_WORDS.test(text) && !SQL_RECEIVER.test(call.receiver) && call.name !== 'raw' && call.name !== 'extra') return
+  if (
+    !SQL_WORDS.test(text) &&
+    !SQL_RECEIVER.test(call.receiver) &&
+    call.name !== 'raw' &&
+    call.name !== 'extra' &&
+    !queryBuilderText
+  )
+    return
   const taint = chk.ex.taintResolved(query)
   chk.check(SQLI, call, taint, true)
 }

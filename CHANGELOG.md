@@ -62,6 +62,17 @@ changes; they are called out explicitly.
   Windows/macOS-style case variants, without changing `<root>` suffix semantics.
 - Fix-in-chat drafts now fence the finding title as untrusted report text instead of including it in a heading.
 
+- Remove exponential regex backtracking from leading JavaScript comment headers and Express response chains.
+- Disable Semgrep's Git-aware target discovery so repository-local fsmonitor hooks cannot execute. Gitleaks ignores
+  inline suppression comments and terminates over-limit report writers instead of allowing unbounded report growth.
+- Extract DRF router CRUD endpoints at Django include mounts, with resolvable ViewSet permission hints and warnings
+  for unresolved routers. Follow split requirements and snapshot-confined requirement includes, reporting missing
+  targets, cycles and depth limits.
+- Detect SQLAlchemy raw text in query-builder predicates and TypeORM/Sequelize string SQL sinks without treating
+  parameter bindings or object filters as SQL strings.
+- Apply Express route-chain `.all(...)` middleware to subsequent method routes. Next.js middleware auth hints now
+  require an auth-ish check and a statically covering matcher, rather than middleware presence alone.
+
 ### Performance
 
 - Cache the ordered findings list within a hunter-output transaction instead of reloading and sorting it for every

@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 export interface RunToolOptions {
@@ -16,6 +17,8 @@ export interface RunToolOptions {
   readonly maxOutputBytes: number
   /** Variables added to the scrubbed environment. */
   readonly env?: Readonly<Record<string, string>>
+  /** Poll a private report while running; kill immediately when it grows past the cap. */
+  readonly report?: { readonly path: string; readonly maxBytes: number }
 }
 
 export interface RunToolResult {
@@ -27,6 +30,7 @@ export interface RunToolResult {
   readonly timedOut: boolean
   /** Some stdout or stderr was discarded because of `maxOutputBytes`. */
   readonly truncated: boolean
+  readonly reportLimitExceeded: boolean
 }
 
 /** Variables inherited from the Host; everything else (tokens, proxies, NODE_OPTIONS, …) is dropped. */
@@ -77,6 +81,9 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
     let settled = false
     let timedOut = false
     let aborted = false
+    let reportLimitExceeded = false
+    let checkingReport = false
+    let reportTimer: NodeJS.Timeout | undefined
     let killTimer: NodeJS.Timeout | undefined
     let fallbackTimer: NodeJS.Timeout | undefined
 
@@ -84,6 +91,7 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
       clearTimeout(timeoutTimer)
       clearTimeout(killTimer)
       clearTimeout(fallbackTimer)
+      clearInterval(reportTimer)
       signal?.removeEventListener('abort', onAbort)
     }
     const finish = (code: number | null, exitSignal: NodeJS.Signals | null): void => {
@@ -101,6 +109,7 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
         stderr: stderr.toString(),
         timedOut,
         truncated: stdout.truncated || stderr.truncated,
+        reportLimitExceeded,
       })
     }
     const terminate = (): void => {
@@ -128,6 +137,28 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
     }, options.timeoutMs)
     timeoutTimer.unref()
     signal?.addEventListener('abort', onAbort, { once: true })
+    const report = options.report
+    if (report) {
+      reportTimer = setInterval(async () => {
+        if (settled || checkingReport || reportLimitExceeded) return
+        checkingReport = true
+        try {
+          const info = await stat(report.path)
+          if (!settled && info.size > report.maxBytes) {
+            reportLimitExceeded = true
+            clearInterval(reportTimer)
+            // Do not give an over-limit writer a grace period to fill the disk.
+            terminate()
+            if (child.pid !== undefined) killTree(child.pid, 'SIGKILL')
+          }
+        } catch {
+          // Not created yet; final readReport still validates size/readability.
+        } finally {
+          checkingReport = false
+        }
+      }, 25)
+      reportTimer.unref()
+    }
 
     child.once('error', error => {
       if (settled) return

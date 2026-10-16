@@ -65,6 +65,7 @@ export async function runGitleaks(options: ExternalRunOptions): Promise<Analyzer
     const common = [
       '--no-banner',
       '--redact',
+      '--ignore-gitleaks-allow',
       '--report-format',
       'json',
       '--report-path',
@@ -86,6 +87,7 @@ export async function runGitleaks(options: ExternalRunOptions): Promise<Analyzer
         cwd: work,
         timeoutMs: options.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS,
         maxOutputBytes: options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+        report: { path: reportPath, maxBytes: MAX_REPORT_BYTES },
         ...(options.signal ? { signal: options.signal } : {}),
       })
 
@@ -99,6 +101,8 @@ export async function runGitleaks(options: ExternalRunOptions): Promise<Analyzer
       if (options.signal?.aborted) throw error
       return failedRun('gitleaks', tool, `could not start gitleaks: ${errorMessage(error)}`, started)
     }
+    if (result.reportLimitExceeded)
+      return failedRun('gitleaks', tool, 'gitleaks report exceeded the size limit', started)
     if (result.timedOut) return failedRun('gitleaks', tool, 'gitleaks timed out', started)
     if (result.code !== 0) {
       const detail = firstLine(redactText(result.stderr)) || `exit code ${result.code ?? result.signal}`

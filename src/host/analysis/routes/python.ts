@@ -282,6 +282,16 @@ function djangoPattern(ctx: RouteFileContext, call: CallFact): DjangoPattern | u
 function djangoRoutes(ctx: RouteFileContext): void {
   const { model, ex } = ctx
   const patterns = model.calls.map(call => djangoPattern(ctx, call)).filter((p): p is DjangoPattern => !!p)
+  // DRF also commonly exposes `urlpatterns = router.urls` without include().
+  for (const assign of model.assigns) {
+    if (!assign.targets.some(t => t.name === 'urlpatterns')) continue
+    const router = /^([A-Za-z_]\w*)\.urls$/.exec(ex.text(assign.value).trim())?.[1]
+    if (router && !drfRouterRoutes(ctx, router, '', assign)) {
+      ctx.sink.warnings.push(
+        `${refString(model, assign)}: include(${router}.urls) at '/' was not followed; routes it defines are listed without this prefix.`,
+      )
+    }
+  }
   // `path('api/', include([path('users/', ...), ...]))`: inline lists prefix the patterns inside them.
   const inline: { span: Span; prefix: string }[] = []
   for (const p of patterns) {
@@ -340,6 +350,16 @@ function djangoInclude(ctx: RouteFileContext, call: CallFact, include: CallFact,
   const target = arg ? ex.literal(arg) : undefined
   const text = target !== undefined ? `'${target}'` : ex.text(arg ?? include).trim()
   const unresolved = `${refString(model, call)}: include(${text}) at '${pattern}' was not followed; routes it defines are listed without this prefix.`
+  const router = target === undefined ? /^([A-Za-z_][\w.]*)\.urls$/.exec(text)?.[1] : undefined
+  const routerUsage =
+    router &&
+    (/router$/i.test(router) ||
+      model.calls.some(c => c.receiver === router && c.name === 'register') ||
+      (/rest_framework/.test(model.source) && model.vars.some(v => v.name === router)))
+  if (router && routerUsage) {
+    if (!drfRouterRoutes(ctx, router, prefix, call)) ctx.sink.warnings.push(unresolved)
+    return
+  }
   if (target !== undefined) {
     const resolved = resolveRelativeImport(model.path, target, snapshot)
     if (!resolved) {
@@ -367,15 +387,91 @@ function djangoInclude(ctx: RouteFileContext, call: CallFact, include: CallFact,
   })
 }
 
+/** Resolve the common URLconf-local DRF router registration shape without executing Python. */
+function drfRouterRoutes(ctx: RouteFileContext, router: string, prefix: string, mount: Span): boolean {
+  const { model, ex } = ctx
+  const value =
+    model.vars.find(v => v.name === router)?.value ??
+    model.assigns.find(a => a.op === '=' && a.targets.some(t => t.name === router))?.value
+  const ctor = value ? callAt(model, value) : undefined
+  if (!ctor || !/(?:^|\.)(?:DefaultRouter|SimpleRouter)$/.test(ctor.callee)) return false
+  const registrations = model.calls.filter(c => c.receiver === router && c.name === 'register')
+  let complete = registrations.length > 0
+  for (const register of registrations) {
+    const args = register.args.filter(a => !a.keyword)
+    const pathArg = args[0] ?? keyword(register, 'prefix')
+    const viewArg = args[1] ?? keyword(register, 'viewset')
+    const path = pathArg ? ex.literal(pathArg) : undefined
+    const view = viewArg ? ex.text(viewArg).trim() : ''
+    const name = /(?:^|\.)([A-Za-z_]\w*)$/.exec(view)?.[1]
+    if (path === undefined || !name) {
+      complete = false
+      continue
+    }
+    const resolved = resolveDjangoView(ctx, view, name)
+    const base = joinRoute(prefix, path.startsWith('/') ? path : `/${path}`)
+    const actions = resolved ? drfActions(resolved.model, resolved.view) : undefined
+    for (const [method, detail, action] of [
+      ['GET', false, 'list'],
+      ['POST', false, 'create'],
+      ['GET', true, 'retrieve'],
+      ['PUT', true, 'update'],
+      ['PATCH', true, 'partial_update'],
+      ['DELETE', true, 'destroy'],
+    ] as const) {
+      if (actions && !actions.has(action)) continue
+      ctx.sink.routes.push({
+        framework: 'django',
+        method,
+        path: detail ? joinRoute(base, ':pk') : base,
+        file: model.path,
+        receiver: ANY_RECEIVER,
+        declaredAt: refOf(model, register),
+        ...(resolved ? { handler: resolved.ref } : {}),
+        middleware: resolved?.middleware ?? [],
+        offset: mount.start,
+      })
+    }
+  }
+  return complete
+}
+
+/** Known DRF base classes/mixins and methods constrain the standard router mappings. */
+function drfActions(model: FileModel, view: FnFact | ClassFact): Set<string> | undefined {
+  if ('kind' in view) return undefined
+  const bases = view.bases.map(b => b.replace(/^.*\./, ''))
+  if (bases.includes('ModelViewSet')) return undefined // all six standard actions
+  const actions = new Set(
+    model.fns
+      .filter(f => f.className === view.name && view.body.start <= f.start && f.end <= view.body.end)
+      .map(f => f.name ?? ''),
+  )
+  if (bases.includes('ReadOnlyModelViewSet')) {
+    actions.add('list')
+    actions.add('retrieve')
+  }
+  for (const [base, methods] of [
+    ['ListModelMixin', ['list']],
+    ['CreateModelMixin', ['create']],
+    ['RetrieveModelMixin', ['retrieve']],
+    ['UpdateModelMixin', ['update', 'partial_update']],
+    ['DestroyModelMixin', ['destroy']],
+  ] as const)
+    if (bases.includes(base)) for (const method of methods) actions.add(method)
+  return actions.size > 0 || bases.some(b => /^(?:ViewSet|GenericViewSet|ReadOnlyModelViewSet)$/.test(b))
+    ? actions
+    : undefined
+}
+
 /** Find a view by simple name in this file, an imported module, or the sibling `views.py`. */
 function resolveDjangoView(
   ctx: RouteFileContext,
   viewText: string,
   name: string,
-): { ref: ReturnType<typeof refOf>; middleware: string[] } | undefined {
+): { ref: ReturnType<typeof refOf>; middleware: string[]; model: FileModel; view: FnFact | ClassFact } | undefined {
   const { model, snapshot } = ctx
   const local = findView(model, name)
-  if (local) return { ref: refOf(model, local), middleware: viewMiddleware(model, local) }
+  if (local) return { ref: refOf(model, local), middleware: viewMiddleware(model, local), model, view: local }
   const qualifier = /^([A-Za-z_]\w*)\./.exec(viewText)?.[1]
   const candidates: string[] = []
   for (const imp of model.imports) {
@@ -400,7 +496,8 @@ function resolveDjangoView(
     const other = ctx.modelOf(file)
     if (!other) continue
     const target = findView(other, name)
-    if (target) return { ref: refOf(other, target), middleware: viewMiddleware(other, target) }
+    if (target)
+      return { ref: refOf(other, target), middleware: viewMiddleware(other, target), model: other, view: target }
   }
   return undefined
 }

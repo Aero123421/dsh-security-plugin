@@ -106,6 +106,10 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 | `js.regex-injection` | Regular expression built from user input (ReDoS) | CWE-1333 | medium | – |
 | `js.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
 
+SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string construction and Sequelize
+`literal(...)` (including named imports). Static placeholder predicates with separate parameter objects and
+object filters are not SQL text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
+
 ### Python (`python.ts`)
 
 Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .tmpl .tpl` (`|safe`,
@@ -134,6 +138,10 @@ Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .
 | `py.mass-assignment` | Mass assignment from request data | CWE-915 | medium | – |
 | `py.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
 
+SQLAlchemy `text(...)` is also checked inside `filter(...)`, `where(...)` and `having(...)`. Request data
+interpolated or concatenated into a predicate is a SQL injection sink; constant text with bound parameters is not.
+Standalone text construction, without a recognized execution/query-builder context, is not reported.
+
 Cookie rules cover top-level/class assignments, member or dict-style assignments (such as
 `app.config['SESSION_COOKIE_SECURE'] = False`), and keyword arguments to `app.config.update(...)`. Only the explicit
 Python literal `False` fires; `True` and environment-derived values do not. `CSRF_COOKIE_HTTPONLY = False` is not
@@ -161,15 +169,15 @@ levels), declaring file and line, handler range, middleware, **auth hints** and 
 
 | Framework | What is recognized |
 | --- | --- |
-| Express | `app.METHOD`, `router.METHOD`, `router.route(path).get(…)` chains, `app.use(prefix, …mw, router)` mounts across files, ordered `router.use(mw)` (applies only to later routes) |
+| Express | `app.METHOD`, `router.METHOD`, `router.route(path).get(…)` chains (preceding `.all(mw)` applies to subsequent methods, without a phantom ANY route), `app.use(prefix, …mw, router)` mounts across files, ordered `router.use(mw)` (applies only to later routes) |
 | Fastify | Shorthand methods, `fastify.route({ … })`, `onRequest`/`preHandler`/`preValidation`/`preParsing` hooks (route options and `addHook`), `register(plugin, { prefix })` |
 | Koa | `@koa/router` / `koa-router` / `koa-tree-router` methods and nested routers |
 | Hono | `app.METHOD`, `app.all`, `app.route(prefix, sub)` |
 | NestJS | `@Controller(prefix)` + `@Get/@Post/…` methods, `@UseGuards` as middleware |
-| Next.js | App Router `route.ts` exports (`GET`, `POST`, …, including `export { h as GET }`), Pages Router `pages/api/**` default exports, route groups, dynamic and catch-all segments, root `middleware.ts` as an auth hint |
+| Next.js | App Router `route.ts` exports (`GET`, `POST`, …, including `export { h as GET }`), Pages Router `pages/api/**` default exports, route groups, dynamic and catch-all segments, middleware/proxy auth checks as hints only for statically covered paths |
 | Flask | `@app.route` / `@bp.route` / `@app.get` …, `add_url_rule`, blueprint `url_prefix` via `register_blueprint` |
 | FastAPI | `@app.get` / `@router.post` …, `include_router(prefix=…, dependencies=[…])`, `Depends(…)` / `Security(…)` parameters and decorators |
-| Django | `urlpatterns` with `path`, `re_path`, `url`, `include(...)` (followed within the snapshot), class-based `as_view()` |
+| Django | `urlpatterns` with `path`, `re_path`, `url`, `include(...)` (followed within the snapshot), class-based `as_view()`, URLconf-local DRF `DefaultRouter`/`SimpleRouter` registrations (CRUD list/detail routes; literal prefixes with or without basename) |
 
 Auth hints are middleware, guard, decorator or dependency names that match
 `auth|login|session|jwt|token|passport|guard|protect|require(User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin|role|current_user|signed_in|logged_in|api_key|passes_test|staff|superuser`.
@@ -178,20 +186,32 @@ Names that also say rate limiting, throttling or logging (`limit`, `throttl`, `s
 They are hints for ranking and for the model, not proof of protection. Mounts or includes that cannot be resolved
 in the snapshot produce warnings, and a scan that finds no endpoints records a coverage gap.
 
+Next.js middleware must contain an auth-ish check, not just exist. An exported literal `config.matcher` string
+or array grants a hint only to covered paths; simple literal segments and named parameters (including a final
+`:path*`) are supported. Dynamic, object and regex matchers, spread configs and unreadable middleware do not grant
+a blanket hint. Without a matcher, an auth-ish middleware check can cover all routes in that Next.js project.
+DRF router endpoints inherit cheaply resolved ViewSet permission/authentication class names as hints; known
+read-only bases, CRUD mixins and explicit action methods constrain the emitted CRUD methods. Unresolved router
+includes produce the existing unresolved-mount warning. Custom DRF actions and runtime router generation are not
+expanded.
+
 ## Dependencies (`src/host/analysis/dependencies.ts`)
 
 | Ecosystem | Files |
 | --- | --- |
 | npm | `package-lock.json` / `npm-shrinkwrap.json` (v1–v3), `pnpm-lock.yaml` (v6–v9), `yarn.lock` (v1 and Berry), `package.json` (only when no lock file is next to it; ranges are recorded but not queried) |
-| PyPI | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` (also parsed next to a lock, since pip-compile output is often what gets deployed) |
+| PyPI | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `requirements*.txt` and `requirements/**/*.txt` (also parsed next to a lock); `-r`/`--requirement` includes follow snapshot files only, to a maximum depth of 16 |
 | Go | `go.mod` (`require` blocks, `// indirect`) |
 | crates.io | `Cargo.lock` |
 
 Parsers are tolerant: a malformed file yields a warning and whatever could be read. Lock files win over manifests.
 Names are normalized (PEP 503 for PyPI). Direct, transitive and dev dependencies are tracked.
+Requirement include cycles, missing/excluded files, depth-limit exhaustion and paths outside the snapshot produce
+warnings. Includes never fetch URLs or read files from the live filesystem.
 
-The files in this table are exempt from `maxFileBytes` up to 32 MiB each (they still count toward `maxTotalBytes`),
-because real lock files often exceed 1 MiB. A larger one is left out of the snapshot with a scan warning naming it.
+Conventional manifest/lock basenames in this table are exempt from `maxFileBytes` up to 32 MiB each (they still
+count toward `maxTotalBytes`), because real lock files often exceed 1 MiB. Other split requirements/include targets
+retain the ordinary snapshot limits. A larger one is left out of the snapshot with a scan warning naming it.
 Parsing is linear in file size and yields to the event loop: pnpm and Yarn Berry locks are read by a reader for
 the block-YAML subset lock files use, which falls back to the full YAML parser for anything else.
 
@@ -216,9 +236,21 @@ directory, and under `externalTimeoutMs`. Their results are limited to files in 
 
 | Tool | How it runs | Produces |
 | --- | --- | --- |
-| **Gitleaks** (8.19+ uses `gitleaks dir`, older uses `detect --no-git`) | Plugin-written config with the default rules (the repository's `.gitleaks.toml` and ignore file have no effect), `--redact`, max target 10 MB per file | `secret` signals (critical for private keys, medium/low for generic rules, high otherwise) |
-| **OSV-Scanner** (v2 preferred, v1 supported) | `scan source --recursive --no-resolve --no-call-analysis=all --config <empty plugin-written file>` (the repository's `osv-scanner.toml` ignores have no effect), plus `--offline` unless OSV lookups are on. Offline with no local database → reported unavailable. | `dependency` signals, same shape as the built-in OSV lookup |
-| **Semgrep** | Only if `semgrepConfig` is set: `semgrep scan --json --metrics=off --disable-version-check --disable-nosem --config <path>`, 2 MB per file, 30 s per rule. Registry rules are never used; `nosemgrep` comments are ignored, but a `.semgrepignore` file in the project still applies. | `vulnerability` signals, categorized from CWE metadata |
+| **Gitleaks** (8.19+ uses `gitleaks dir`, older uses `detect --no-git`) | Plugin-written config with the default rules (the repository's `.gitleaks.toml` and ignore file have no effect), `--redact`, `--ignore-gitleaks-allow` (inline suppression disabled), max target 10 MB per file; a private JSON report is checked every 25 ms and the process tree is killed immediately once observed over 128 MiB (the final read rechecks the cap) | `secret` signals (critical for private keys, medium/low for generic rules, high otherwise) |
+| **OSV-Scanner** (v2 preferred, v1 supported) | Targets only staged, non-withheld snapshot dependency files, never the live repository. `scan source --recursive --no-resolve --no-call-analysis=all --config <empty plugin-written file>` (the repository's `osv-scanner.toml` ignores have no effect), plus `--offline` unless OSV lookups are on. Offline with no local database → reported unavailable. | `dependency` signals, same shape as the built-in OSV lookup |
+| **Semgrep** | Only if `semgrepConfig` is set: `semgrep scan --json --metrics=off --disable-version-check --disable-nosem --no-git-ignore --config <path>`, 2 MB per file, 30 s per rule. Registry rules are never used; `nosemgrep` comments are ignored, but a `.semgrepignore` file in the project still applies. | `vulnerability` signals, categorized from CWE metadata |
+
+Semgrep's `--no-git-ignore` avoids git-aware target discovery: repository-local `core.fsmonitor` must not run.
+The flag is present in [Semgrep 0.40.0](https://github.com/semgrep/semgrep/blob/v0.40.0/semgrep/semgrep/cli.py),
+predating the `scan` CLI used here, and was exercised with Semgrep 1.181.0. Unsupported older tools fail closed;
+there is no retry without the safety flag. Local rules, disabled metrics and disabled version checks remain in force.
+Gitleaks' suppression flag was verified with the pinned 8.30.1 binary; versions that reject it fail rather than
+retrying with suppression enabled. Gitleaks directory mode (and legacy `--no-git`) do not scan git history.
+OSV-Scanner 1.9.2 reads repository state with go-git rather than invoking Git; 2.7.0 source scanning was also checked
+against a repository fsmonitor hook. No equivalent Git-command execution reproduced in these runners. OSV's
+staged target contains no repository Git configuration; disabled package-manager resolution and call/build analysis
+remain defense in depth in both runner versions. Report polling bounds ongoing growth, but
+writes between polls can exceed the threshold briefly; the oversized report is never parsed.
 
 Builtin and external results for the same location and category are de-duplicated (the first one wins).
 

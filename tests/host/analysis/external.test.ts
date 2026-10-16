@@ -222,6 +222,37 @@ describe('gitleaks', () => {
     expect(signals).toEqual([])
   })
 
+  it.runIf(isPosix)('stops a tool whose report exceeds the cap while still running', async () => {
+    const { dir, cleanup } = await makeTempDir()
+    try {
+      const tool = await fakeTool(
+        dir,
+        'oversized-gitleaks',
+        `
+        const fs = require('node:fs')
+        const args = process.argv.slice(2)
+        const report = args[args.indexOf('--report-path') + 1]
+        const fd = fs.openSync(report, 'w')
+        fs.ftruncateSync(fd, 128 * 1024 * 1024 + 1)
+        fs.closeSync(fd)
+        process.on('SIGTERM', () => {})
+        setInterval(() => {}, 1000)
+      `,
+      )
+      const start = Date.now()
+      const run = await runGitleaks({
+        root: dir,
+        tool: { path: tool, source: 'path', version: '8.30.1' },
+        timeoutMs: 10_000,
+      })
+      expect(run.signals).toEqual([])
+      expect(run.status.reason).toMatch(/report.*size limit/)
+      expect(Date.now() - start).toBeLessThan(5000)
+    } finally {
+      await cleanup()
+    }
+  })
+
   it('reports unavailable when no tool is resolved', async () => {
     const run = await runGitleaks({ tool: undefined, root })
     expect(run.status).toMatchObject({ id: 'gitleaks', available: false })
@@ -250,6 +281,8 @@ describe('gitleaks', () => {
       const args = JSON.parse(await readFile(argsFile, 'utf8')) as string[]
       expect(args[0]).toBe('dir')
       expect(args).toContain('--redact')
+      expect(args).toContain('--ignore-gitleaks-allow')
+      expect(args).not.toContain('git')
       expect(args).toContain('--no-banner')
       expect(args[args.indexOf('--exit-code') + 1]).toBe('0')
       expect(args[args.indexOf('--config') + 1]).toMatch(/gitleaks\.toml$/)
@@ -493,6 +526,8 @@ describe('osv-scanner', () => {
       expect(args.slice(0, 2)).toEqual(['scan', 'source'])
       expect(args).toEqual(expect.arrayContaining(['--format', 'json', '--recursive', '--no-resolve']))
       expect(args).not.toContain('--offline')
+      expect(args).not.toContain('--include-git-root')
+      expect(args).not.toContain('--call-analysis')
       expect(args).toContain('--no-call-analysis=all')
       // The repository's osv-scanner.toml ([[IgnoredVulns]]) is overridden by a plugin-written, empty config.
       expect(args[args.indexOf('--config') + 1]).toMatch(/dsh-osv-scanner-[^/]+\/osv-scanner\.toml$/)
@@ -512,6 +547,10 @@ describe('osv-scanner', () => {
       })
       const legacy = JSON.parse(await readFile(argsFile, 'utf8')) as string[]
       expect(legacy[legacy.indexOf('--config') + 1]).toMatch(/osv-scanner\.toml$/)
+      expect(legacy).toContain('--no-call-analysis=all')
+      expect(legacy).not.toContain('--docker')
+      expect(legacy).not.toContain(dir)
+      expect(legacy.at(-1)).toMatch(/dsh-osv-scanner-[^/]+\/snapshot$/)
     } finally {
       await cleanup()
     }
@@ -596,7 +635,13 @@ describe('semgrep', () => {
       const { args, metrics } = JSON.parse(await readFile(argsFile, 'utf8')) as { args: string[]; metrics: string }
       expect(args[0]).toBe('scan')
       expect(args).toEqual(
-        expect.arrayContaining(['--json', '--metrics=off', '--disable-version-check', '--disable-nosem']),
+        expect.arrayContaining([
+          '--json',
+          '--metrics=off',
+          '--disable-version-check',
+          '--disable-nosem',
+          '--no-git-ignore',
+        ]),
       )
       expect(args[args.indexOf('--config') + 1]).toBe(rules)
       expect(args).not.toContain('auto')

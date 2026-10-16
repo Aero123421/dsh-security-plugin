@@ -4,6 +4,7 @@
  * Lock files win over their sibling manifests because they pin exact versions.
  */
 
+import { posix } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { type Dependency, type Ecosystem, type Snapshot, type SnapshotFile, yieldToEventLoop } from './types.ts'
 
@@ -16,6 +17,7 @@ interface ParseContext {
   readonly sibling: (name: string) => SnapshotFile | undefined
   readonly add: (dep: DepDraft) => void
   readonly warn: (message: string) => void
+  readonly include?: (target: string, line: number) => Promise<void>
 }
 
 const NPM_LOCKS = ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock'] as const
@@ -55,17 +57,24 @@ export async function parseDependencies(
     }
   }
 
-  for (const file of snapshot.files.values()) {
+  const parsed = new Set<string>()
+  const active = new Set<string>()
+  const parseFile = async (file: SnapshotFile, requirements = false, depth = 0): Promise<void> => {
+    if (parsed.has(file.path)) return
     if (++count % YIELD_EVERY === 0) await yieldToEventLoop()
     const name = baseName(file.path)
     const dir = dirName(file.path)
     const sibling = (n: string): SnapshotFile | undefined => snapshot.files.get(dir === '' ? n : `${dir}/${n}`)
-    const parser = pickParser(name, n => sibling(n) !== undefined)
-    if (!parser) continue
+    const parser =
+      requirements || /(?:^|\/)requirements\/.*\.txt$/i.test(file.path)
+        ? parseRequirements
+        : pickParser(name, n => sibling(n) !== undefined)
+    if (!parser) return
     if (file.content.length > DEPENDENCY_FILE_MAX_BYTES) {
       warnings.push(`${file.path}: skipped, file too large to parse`)
-      continue
+      return
     }
+    active.add(file.path)
     const ctx: ParseContext = {
       file,
       sibling,
@@ -85,13 +94,45 @@ export async function parseDependencies(
         if (existing.line === undefined && dep.line !== undefined) existing.line = dep.line
       },
       warn: message => warnings.push(`${file.path}: ${message}`),
+      include: async (target, line) => {
+        const warn = (message: string): void => {
+          warnings.push(`${file.path}: line ${line}: ${message}`)
+        }
+        if (target.startsWith('/') || /^(?:[A-Za-z][\w+.-]*:|\\)/.test(target)) {
+          warn(`requirement include '${target}' is not confined to snapshot files`)
+          return
+        }
+        const path = posix.normalize(posix.join(dir, target))
+        if (path === '..' || path.startsWith('../')) {
+          warn(`requirement include '${target}' is outside the snapshot`)
+          return
+        }
+        if (active.has(path)) {
+          warn(`requirement include cycle at '${target}'`)
+          return
+        }
+        if (depth >= 16) {
+          warn(`requirement include depth limit reached at '${target}'`)
+          return
+        }
+        const child = snapshot.files.get(path)
+        if (!child) {
+          warn(`requirement include '${target}' is missing from the snapshot`)
+          return
+        }
+        await parseFile(child, true, depth + 1)
+      },
     }
     try {
       await parser(ctx)
     } catch (error) {
       ctx.warn(`could not parse (${error instanceof Error ? error.message : String(error)})`)
+    } finally {
+      active.delete(file.path)
+      parsed.add(file.path)
     }
   }
+  for (const file of snapshot.files.values()) await parseFile(file)
 
   const dependencies = [...byKey.values()].sort(
     (a, b) =>
@@ -499,7 +540,7 @@ function parsePackageJson(ctx: ParseContext): void {
 // Python
 // ---------------------------------------------------------------------------
 
-function parseRequirements(ctx: ParseContext): void {
+async function parseRequirements(ctx: ParseContext): Promise<void> {
   const lines = ctx.file.content.split(/\r?\n/)
   let logical = ''
   let startLine = 0
@@ -512,7 +553,13 @@ function parseRequirements(ctx: ParseContext): void {
     }
     line = (logical + line).replace(/(^|\s)#.*$/, '').trim()
     logical = ''
-    if (line === '' || line.startsWith('-')) continue // -r, -c, -e, --hash, --index-url …
+    const include = /^(?:-r\s*|--requirement(?:\s+|=))(.+)$/.exec(line)
+    if (include) {
+      const target = include[1]!.trim().replace(/^(['"])(.*)\1$/, '$2')
+      await ctx.include?.(target, startLine)
+      continue
+    }
+    if (line === '' || line.startsWith('-')) continue // -c, -e, --hash, --index-url …
     if (/^(?:https?|git\+|file):|^\.{0,2}\//.test(line)) continue // direct URLs and local paths
     const spec = line
       .split(';')[0]!
