@@ -12,6 +12,10 @@ changes; they are called out explicitly.
 
 - The project picker now uses a themed dropdown in the page header and New Scan dialog instead of an OS-native
   popup. Project titles and paths appear on separate lines, with keyboard navigation and the selected project marked.
+- AI review now sends a session id with model requests, required by some providers such as OpenCode Go,
+  which previously rejected every request. Failed review tasks now show the provider error. Scans stop
+  launching hunt/review tasks on a model route whose provider rejects the first request outright without
+  reporting any token usage; already-running workers and other routes are unaffected.
 
 ## [0.2.0] - 2026-10-16
 

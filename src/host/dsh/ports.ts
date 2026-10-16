@@ -99,6 +99,8 @@ export type LlmRequestMessage = LlmUserInput | LlmAssistantMessage | LlmToolResu
 export interface LlmGenerateOptions {
   provider: string
   model: string
+  /** Per-conversation identity for request routing / transport metadata; required by some providers (e.g. OpenCode). */
+  sessionId?: string
   reasoningEffort?: string
   messages: LlmRequestMessage[]
   system?: string
