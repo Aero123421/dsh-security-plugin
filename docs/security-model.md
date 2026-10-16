@@ -27,6 +27,11 @@ in the same process and are also trusted. Cordis scopes isolate registries, not 
 
 ## Untrusted repository content and prompt injection
 
+Subfolder scan requests stay inside a registered workspace. The Host resolves the canonical workspace and
+requested directory with `realpath`, rejects traversal and symlink escapes, and applies the same resolver to
+estimates and scan creation/start/resume. Workers still see only the selected snapshot; its paths are relative
+to the workspace, not the subfolder. Canonical roots used for history and triage remain Host-only.
+
 Everything read from the repository is data. The controls:
 
 - **Snapshot, not live tree.** The plugin reads the workspace once into memory (`analysis/snapshot.ts`). Symlinks

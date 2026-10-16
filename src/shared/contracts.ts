@@ -28,7 +28,7 @@ import type { ModelRef, SecuritySettings, SettingsPatch } from './settings.ts'
 /** Endpoint prefix under the shared `/api` channel. */
 export const RPC_NAMESPACE = 'dsh-security'
 /** Bumped on any incompatible change to this file. */
-export const CONTRACT_VERSION = 1
+export const CONTRACT_VERSION = 2
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -185,6 +185,8 @@ export interface ScanSummary {
   readonly id: string
   readonly workspaceId: string
   readonly workspaceTitle: string
+  /** Workspace-relative scan scope; absent for the whole project. */
+  readonly subpath?: string
   readonly mode: ScanMode
   readonly status: ScanStatus
   readonly phase: ScanPhase
@@ -281,7 +283,7 @@ export interface FindingSummary {
   /** One or two plain-language sentences for beginners. */
   readonly summary: string
   readonly triage: TriageState
-  /** Not present in the previous completed scan of the same workspace. */
+  /** Not present in the previous completed scan of the same effective scan root. */
   readonly isNew: boolean
 }
 
@@ -387,10 +389,14 @@ export interface RpcMethods {
     request: { readonly patch: SettingsPatch; readonly expectedRevision: number }
     response: { readonly settings: SecuritySettings; readonly revision: number }
   }
-  estimateScan: { request: { readonly workspaceId: string; readonly mode: ScanMode }; response: ScanEstimate }
+  estimateScan: {
+    request: { readonly workspaceId: string; readonly mode: ScanMode; readonly subpath?: string }
+    response: ScanEstimate
+  }
   createScan: {
     request: {
       readonly workspaceId: string
+      readonly subpath?: string
       readonly mode: ScanMode
       /** Language for AI-written text (titles, explanations, fixes). Defaults to English. */
       readonly language?: ReportLanguage

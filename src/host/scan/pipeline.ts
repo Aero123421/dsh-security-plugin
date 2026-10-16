@@ -51,6 +51,7 @@ import {
   recordSignalFindings,
   signalFingerprint,
 } from './findings.ts'
+import { resolveScanRoot, scanRoot } from './root.ts'
 import { snapshotDigest } from './fingerprint.ts'
 import { endpointPath, planHuntTasks, planReviewTasks, type PlannedTask } from './planning.ts'
 
@@ -279,8 +280,14 @@ export class ScanJob {
       routes: 'surface',
     }
     const astGrep = await this.deps.astGrep()
+    const scope = await resolveScanRoot(
+      { id: this.scan.workspaceId, title: this.scan.workspaceTitle, path: this.scan.workspaceRoot },
+      this.scan.subpath,
+    )
+    if (scope.root !== scanRoot(this.scan)) throw new Error('The scan folder changed; create a new scan.')
     this.analysis = await analyzeWorkspace({
-      root: this.scan.workspaceRoot,
+      root: scope.root,
+      workspaceRoot: scope.workspaceRoot,
       settings: this.analysisSettings(),
       config: this.deps.config,
       toolkit: this.deps.toolkit,
@@ -493,7 +500,7 @@ export class ScanJob {
 
   private reconcile(): void {
     const { store } = this.deps
-    const previous = store.previousCompletedScan(this.scan.workspaceId, this.scan.createdAt)
+    const previous = store.previousCompletedScan(scanRoot(this.scan), this.scan.createdAt)
     markNewFindings(store, this.scan.id, previous ? store.scanFingerprints(previous.id) : undefined)
     const coverage = this.coverage()
     this.scan = store.updateScan(this.scan.id, { coverage, clearProgress: true })

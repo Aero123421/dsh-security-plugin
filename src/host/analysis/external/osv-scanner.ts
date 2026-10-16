@@ -138,7 +138,9 @@ export function parseOsvScannerReport(
   let packages = 0
   let malformed = 0
   for (const result of parsed.data.results ?? []) {
-    const manifest = result.source?.path ? toWorkspacePath(options.root, result.source.path) : undefined
+    const manifest = result.source?.path
+      ? toWorkspacePath(options.root, result.source.path, options.snapshot?.pathPrefix)
+      : undefined
     if (!manifest) continue
     if (options.snapshot && !options.snapshot.files.has(manifest)) continue
     const lines = options.snapshot?.files.get(manifest)?.content

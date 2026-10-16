@@ -96,6 +96,8 @@ export type FindingPatch = Partial<
 >
 
 export interface ScanQuery {
+  /** Current canonical workspace path; includes history under orphaned UUIDs. */
+  readonly workspaceRoot?: string
   readonly workspaceId?: string
   readonly statuses?: readonly ScanStatus[]
   /** Default 50, max 500. Newest first by `createdAt`. */
@@ -121,8 +123,8 @@ export interface SecurityStore {
   updateScan(id: string, patch: ScanPatch): ScanRecord
   getScan(id: string): ScanRecord | undefined
   listScans(query?: ScanQuery): ScanRecord[]
-  /** The newest `completed` scan of a workspace created before `before` (exclusive), if any. */
-  previousCompletedScan(workspaceId: string, before: string): ScanRecord | undefined
+  /** The newest `completed` scan of an effective root created before `before` (exclusive), if any. */
+  previousCompletedScan(rootKey: string, before: string): ScanRecord | undefined
   /** Delete a scan and everything that belongs to it. Returns false when absent. */
   deleteScan(id: string): boolean
   /** Delete scans (any status except running/queued/paused) older than `days`. Returns the count. */
@@ -162,16 +164,16 @@ export interface SecurityStore {
   scanFingerprints(scanId: string): Set<string>
   /**
    * Open-finding counts for list views: excludes `refuted` findings and those
-   * whose triage (by workspace + fingerprint) is false_positive, accepted_risk, or fixed.
+   * whose triage (by workspace root + fingerprint) is false_positive, accepted_risk, or fixed.
    */
   countOpenFindings(
     scanId: string,
-    workspaceId: string,
+    rootKeyBase: string,
   ): { readonly counts: SeverityCounts; readonly confirmed: number }
 
   // Triage ---------------------------------------------------------------------
-  getTriage(workspaceId: string, fingerprints: readonly string[]): Map<string, TriageRecord>
-  setTriage(workspaceId: string, fingerprint: string, state: TriageState, note: string | undefined): TriageRecord
+  getTriage(rootKeyBase: string, fingerprints: readonly string[]): Map<string, TriageRecord>
+  setTriage(rootKeyBase: string, fingerprint: string, state: TriageState, note: string | undefined): TriageRecord
 
   // Events ---------------------------------------------------------------------
   /** Append an event; returns its sequence number (monotonic per database). */

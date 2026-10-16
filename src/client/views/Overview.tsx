@@ -122,6 +122,7 @@ function ProgressCard(props: { readonly scan: ScanSummary }) {
             {heading}
           </h2>
           <p className="dshsec-card-sub">
+            <span>{summary.subpath ?? tr.t('scan.wholeProject')}</span>
             <span>{aiOff ? tr.t('newScan.builtin') : tr.t(`mode.${summary.mode}`)}</span>
             {summary.startedAt ? (
               <span>{tr.t('progress.startedAt', { time: formatHourMinute(summary.startedAt, tr.intlLocale) })}</span>
@@ -496,6 +497,7 @@ function ProblemCard(props: { readonly scan: ScanSummary }) {
             {title}
           </h2>
           <p className="dshsec-muted dshsec-card-sub">
+            <span>{scan.subpath ?? tr.t('scan.wholeProject')}</span>
             <span>{tr.t(`mode.${scan.mode}`)}</span>
             <span>{formatDateTime(scan.createdAt, tr.intlLocale)}</span>
           </p>
@@ -509,7 +511,9 @@ function ProblemCard(props: { readonly scan: ScanSummary }) {
             <Button
               variant="primary"
               icon={<IconRefresh size={14} />}
-              onClick={() => controller.openNewScan({ workspaceId: scan.workspaceId, mode: scan.mode })}
+              onClick={() =>
+                controller.openNewScan({ workspaceId: scan.workspaceId, mode: scan.mode, subpath: scan.subpath })
+              }
             >
               {tr.t('action.scanAgain')}
             </Button>
@@ -593,6 +597,7 @@ function ResultsSummary(props: { readonly scan: ScanSummary; readonly heading: s
             {props.heading}
           </h2>
           <p className="dshsec-muted dshsec-card-sub">
+            <span>{scan.subpath ?? tr.t('scan.wholeProject')}</span>
             <span>{isBuiltinOnly(detail) ? tr.t('newScan.builtin') : tr.t(`mode.${scan.mode}`)}</span>
             <time
               dateTime={scan.finishedAt ?? scan.createdAt}

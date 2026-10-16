@@ -47,6 +47,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
   const [workspaceId, setWorkspaceId] = useState(
     () => props.request.workspaceId ?? currentWorkspace ?? workspaces[0]?.id ?? '',
   )
+  const [subpath, setSubpath] = useState(props.request.subpath ?? '')
   const [approach, setApproach] = useState<Approach>(() => (llmAvailable ? 'ai' : 'builtin'))
   const [mode, setMode] = useState<ScanMode>(() => props.request.mode ?? settings.scan?.defaultMode ?? 'deep')
   const [picked, setPicked] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
@@ -71,12 +72,12 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
     if (!workspaceId) return
     const abort = new AbortController()
     setEstimate({ status: 'loading' })
-    void controller.estimate(workspaceId, scanMode, abort.signal).then(result => {
+    void controller.estimate(workspaceId, scanMode, abort.signal, subpath).then(result => {
       if (abort.signal.aborted) return
       setEstimate(result.ok ? { status: 'ready', value: result.value } : { status: 'error' })
     })
     return () => abort.abort()
-  }, [controller, workspaceId, scanMode])
+  }, [controller, workspaceId, scanMode, subpath])
 
   const configured = hunterModel(settings.models)
   const pickedRef: ModelRef | undefined =
@@ -118,6 +119,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
     setError(undefined)
     const result = await controller.startScan({
       workspaceId,
+      ...(subpath ? { subpath } : {}),
       mode: scanMode,
       aiReview: ai,
       ...(ai && needsConsent ? { consent: true } : {}),
@@ -170,6 +172,21 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
             {({ id }) => <Select id={id} value={workspaceId} options={workspaceOptions} onChange={setWorkspaceId} />}
           </Field>
         ) : null}
+
+        <Field label={tr.t('newScan.subpath')} hint={tr.t('newScan.subpathHint')}>
+          {({ id, describedBy }) => (
+            <input
+              id={id}
+              className="dshsec-input"
+              type="text"
+              value={subpath}
+              placeholder="packages/app"
+              maxLength={1024}
+              aria-describedby={describedBy}
+              onChange={event => setSubpath(event.target.value)}
+            />
+          )}
+        </Field>
 
         <fieldset className="dshsec-fieldset">
           <legend className="dshsec-label">{tr.t('newScan.how')}</legend>

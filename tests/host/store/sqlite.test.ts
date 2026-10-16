@@ -101,14 +101,14 @@ describe('openSecurityStore (in memory)', () => {
       const withNote = store.setTriage('ws_1', 'fp_a', 'accepted_risk', 'internal only')
       const without = store.setTriage('ws_1', 'fp_b', 'fixed', undefined)
       expect(withNote).toStrictEqual({
-        workspaceId: 'ws_1',
+        rootKeyBase: 'ws_1',
         fingerprint: 'fp_a',
         state: 'accepted_risk',
         note: 'internal only',
         updatedAt: NOW.toISOString(),
       })
       expect(without).toStrictEqual({
-        workspaceId: 'ws_1',
+        rootKeyBase: 'ws_1',
         fingerprint: 'fp_b',
         state: 'fixed',
         updatedAt: NOW.toISOString(),
@@ -267,12 +267,18 @@ describe('openSecurityStore (in memory)', () => {
       store.insertScan(scanOf({ id: 'b', status: 'completed', createdAt: '2026-10-03T00:00:00.000Z' }))
       store.insertScan(scanOf({ id: 'c', status: 'failed', createdAt: '2026-10-04T00:00:00.000Z' }))
       store.insertScan(
-        scanOf({ id: 'other', workspaceId: 'ws_2', status: 'completed', createdAt: '2026-10-03T12:00:00.000Z' }),
+        scanOf({
+          id: 'other',
+          workspaceId: 'ws_2',
+          workspaceRoot: '/other',
+          status: 'completed',
+          createdAt: '2026-10-03T12:00:00.000Z',
+        }),
       )
-      expect(store.previousCompletedScan('ws_1', '2026-10-05T00:00:00.000Z')?.id).toBe('b')
-      expect(store.previousCompletedScan('ws_1', '2026-10-03T00:00:00.000Z')?.id).toBe('a')
-      expect(store.previousCompletedScan('ws_1', '2026-10-01T00:00:00.000Z')).toBeUndefined()
-      expect(store.previousCompletedScan('ws_2', '2026-10-05T00:00:00.000Z')?.id).toBe('other')
+      expect(store.previousCompletedScan('/home/dev/acme', '2026-10-05T00:00:00.000Z')?.id).toBe('b')
+      expect(store.previousCompletedScan('/home/dev/acme', '2026-10-03T00:00:00.000Z')?.id).toBe('a')
+      expect(store.previousCompletedScan('/home/dev/acme', '2026-10-01T00:00:00.000Z')).toBeUndefined()
+      expect(store.previousCompletedScan('/other', '2026-10-05T00:00:00.000Z')?.id).toBe('other')
     })
 
     it('purges old inactive scans only', () => {

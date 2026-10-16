@@ -106,6 +106,35 @@ export const MIGRATIONS: readonly (readonly string[])[] = [
     ) STRICT`,
     'CREATE INDEX events_scan_seq ON events (scan_id, seq)',
   ],
+  // v2 — durable filesystem identity, independent of DSH's workspace UUID.
+  [
+    "ALTER TABLE scans ADD COLUMN root_key TEXT NOT NULL DEFAULT ''",
+    "UPDATE scans SET root_key = json_extract(data, '$.workspaceRoot')",
+    'CREATE INDEX scans_root_created ON scans (root_key, created_at DESC, id DESC)',
+    "CREATE INDEX scans_base_created ON scans (json_extract(data, '$.workspaceRoot'), created_at DESC, id DESC) WHERE json_valid(data)",
+    `CREATE TABLE triage_v2 (
+      root_key_base TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      state TEXT NOT NULL,
+      note TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (root_key_base, fingerprint)
+    ) STRICT, WITHOUT ROWID`,
+    // One UUID can have scans at several roots. Preserve each association;
+    // when re-registered UUIDs collide, the latest decision wins deterministically.
+    `INSERT INTO triage_v2 (root_key_base, fingerprint, state, note, updated_at)
+      SELECT root_key_base, fingerprint, state, note, updated_at FROM (
+        SELECT COALESCE(json_extract(s.data, '$.workspaceRoot'), t.workspace_id) AS root_key_base,
+          t.fingerprint, t.state, t.note, t.updated_at,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(json_extract(s.data, '$.workspaceRoot'), t.workspace_id), t.fingerprint
+            ORDER BY t.updated_at DESC, t.workspace_id DESC, s.id DESC
+          ) AS rank
+        FROM triage t LEFT JOIN scans s ON s.workspace_id = t.workspace_id
+      ) WHERE rank = 1`,
+    'DROP TABLE triage',
+    'ALTER TABLE triage_v2 RENAME TO triage',
+  ],
 ]
 
 /** Schema version this build writes. Monotonic; equals the number of migrations. */

@@ -12,6 +12,9 @@ changes; they are called out explicitly.
 
 - Python SAST rules detect explicitly disabled Secure flags on session/CSRF cookies and HttpOnly on session
   cookies, including Flask config assignments and `config.update(...)`. There are now 52 SAST rules.
+- Scan an optional subfolder (for example `packages/app`) without scanning an entire umbrella workspace.
+  History labels show the selected folder. Findings keep workspace-relative paths, and triage is shared with
+  whole-project scans. History and triage now survive DSH re-registering the same project with a new workspace id.
 
 ### Fixed
 
@@ -21,6 +24,12 @@ changes; they are called out explicitly.
   their confidence downgrade is unchanged.
 - A generic secret and a specific secret/SAST credential rule covering the same sensitive span now produce one
   finding, preserving both observations as evidence and the merged fingerprint. Adjacent credentials stay separate.
+
+### Upgrade notes
+
+- Store schema v2 migrates automatically on startup. Older plugin versions refuse the newer database.
+  Before updating, back up `$DSH_HOME/security/security.db` if you may downgrade (stop DSH before copying or
+  restoring the database). If the page shows a mixed-version banner after updating, reload it.
 
 ### Changed
 

@@ -73,7 +73,10 @@ function HistoryBody() {
                     {formatRelative(started, tr.intlLocale, now)}
                   </time>
                 </td>
-                <td data-label={tr.t('history.mode')}>{tr.lookup(`mode.${scan.mode}`) ?? '—'}</td>
+                <td data-label={tr.t('history.mode')}>
+                  {tr.lookup(`mode.${scan.mode}`) ?? '—'}
+                  <div className="dshsec-hint">{scan.subpath ?? tr.t('scan.wholeProject')}</div>
+                </td>
                 <td data-label={tr.t('history.status')}>
                   <StatusBadge status={scan.status} />
                 </td>

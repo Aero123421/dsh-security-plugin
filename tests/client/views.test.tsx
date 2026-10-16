@@ -162,6 +162,23 @@ describe('New Scan dialog', () => {
     await flush()
   }
 
+  it('passes the optional subfolder to estimates and scan creation', async () => {
+    const { dialog, api } = await openDialog(
+      { createScan: () => ok({ scanId: 'subpath-scan' }) },
+      makeBootstrap({ settings: consented }),
+    )
+    const input = dialog.querySelector<HTMLInputElement>('input[placeholder="packages/app"]')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, 'packages/app')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await flush(10)
+    expect(api.callsOf('estimateScan').at(-1)).toMatchObject({ subpath: 'packages/app' })
+    await click(byText(dialog, 'button', 'Start scan'))
+    expect(api.callsOf('createScan')[0]).toMatchObject({ subpath: 'packages/app' })
+  })
+
   it('defaults to AI review, shows the estimate with ≈ and requires the consent checkbox', async () => {
     const { dialog, api } = await openDialog()
     expect(approach(dialog, 'ai').checked).toBe(true)

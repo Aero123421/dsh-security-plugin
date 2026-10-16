@@ -143,7 +143,7 @@ export function parseGitleaksReport(
       continue
     }
     const finding = parsed.data
-    const path = toWorkspacePath(options.root, finding.File)
+    const path = toWorkspacePath(options.root, finding.File, options.snapshot?.pathPrefix)
     if (!path) continue
     if (options.snapshot && !options.snapshot.files.has(path)) continue
     signals.push(toSignal(finding, path))

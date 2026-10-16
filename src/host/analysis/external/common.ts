@@ -93,14 +93,14 @@ function statusOf(id: AnalyzerId, tool: ToolHandle, available: boolean, reason?:
  * Convert a path reported by a tool into a workspace-relative POSIX path.
  * Returns `undefined` for anything outside the root.
  */
-export function toWorkspacePath(root: string, reported: string): string | undefined {
+export function toWorkspacePath(root: string, reported: string, pathPrefix?: string): string | undefined {
   if (reported === '') return undefined
   const native = reported.replace(/[\\/]/g, sep)
   const rel = isAbsolute(native) ? relative(root, native) : native.replace(/^(?:\.[\\/])+/, '')
   if (rel === '' || isAbsolute(rel)) return undefined
   const posix = rel.split(sep).join('/')
   if (posix.split('/').some(segment => segment === '..' || segment === '')) return undefined
-  return posix
+  return pathPrefix ? `${pathPrefix}/${posix}` : posix
 }
 
 /** Read a tool-written report file with a size cap. */

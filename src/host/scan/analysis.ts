@@ -49,6 +49,7 @@ export type AnalysisStep = 'snapshot' | 'inventory' | 'secrets' | 'sast' | 'rout
 
 export interface AnalysisOptions {
   readonly root: string
+  readonly workspaceRoot?: string
   readonly settings: SecuritySettings
   readonly config: Config
   readonly toolkit: Toolkit | undefined
@@ -66,8 +67,10 @@ export async function snapshotWorkspace(
   settings: SecuritySettings,
   config: Config,
   signal: AbortSignal,
+  workspaceRoot?: string,
 ): Promise<Snapshot> {
   return await takeSnapshot(root, {
+    ...(workspaceRoot ? { workspaceRoot } : {}),
     excludeGlobs: settings.scan.excludeGlobs,
     maxFiles: config.maxFiles,
     maxFileBytes: config.maxFileBytes,
@@ -84,7 +87,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   const signals: Signal[] = []
 
   step('snapshot')
-  const snapshot = await snapshotWorkspace(options.root, settings, config, signal)
+  const snapshot = await snapshotWorkspace(options.root, settings, config, signal, options.workspaceRoot)
   if (snapshot.truncated) {
     warnings.push(
       `The snapshot reached the configured size limit; ${snapshot.excluded.filter(e => e.reason === 'limit-files' || e.reason === 'limit-bytes').length} or more files were not analyzed.`,

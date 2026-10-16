@@ -133,7 +133,7 @@ export function parseSemgrepOutput(
     const result = resultSchema.safeParse(item)
     if (!result.success) continue
     const r = result.data
-    const path = toWorkspacePath(options.root, r.path)
+    const path = toWorkspacePath(options.root, r.path, options.snapshot?.pathPrefix)
     if (!path) continue
     if (options.snapshot && !options.snapshot.files.has(path)) continue
     const startLine = Math.max(1, r.start.line)
