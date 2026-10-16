@@ -1,4 +1,4 @@
-import { cp, rm, writeFile } from 'node:fs/promises'
+import { cp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { loadAstGrep } from '../../../src/host/analysis/astgrep.ts'
@@ -322,9 +322,15 @@ describe('new findings across scans', () => {
 })
 
 describe('quick scan', () => {
-  it('reviews endpoints in the rule-clean Flask fixture and receives route steering sinks', async () => {
+  it('reviews endpoints in a rule-clean Flask fixture copy and receives route steering sinks', async () => {
     const copy = await copyFixture('flask-secure')
     try {
+      // Cookie rules now detect the planted config issue. Harden only this temporary
+      // copy so the regression still proves Quick reviews endpoints with zero rule hits.
+      const configPath = join(copy.root, 'app/config.py')
+      const config = await readFile(configPath, 'utf8')
+      expect(config).toContain('SESSION_COOKIE_SECURE = False')
+      await writeFile(configPath, config.replace('SESSION_COOKIE_SECURE = False', 'SESSION_COOKIE_SECURE = True'))
       const llm = await oracleLlm()
       const h = createHarness({ llm, workspaces: [workspace(copy.root)], settings: AI_SETTINGS })
       const id = await runScan(h, { mode: 'quick' })
