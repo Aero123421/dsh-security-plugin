@@ -71,6 +71,8 @@ export interface Snapshot {
   readonly root: string
   /** Canonical workspace base for consistent masking across scan scopes. Host-only. */
   readonly workspaceRoot?: string
+  /** Registered spelling before canonicalization (for model-side path masking). Host-only. */
+  readonly registeredWorkspaceRoot?: string
   /** Workspace-relative prefix of the effective root. */
   readonly pathPrefix?: string
   readonly files: ReadonlyMap<string, SnapshotFile>

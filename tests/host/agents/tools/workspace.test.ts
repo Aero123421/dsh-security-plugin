@@ -161,6 +161,60 @@ async function harness(
 }
 
 describe('createWorkspaceTools', () => {
+  it('masks known generic values in prose, header dictionaries, generated and oversized files', async () => {
+    const secret = 'rT8!pL2@vM6#xN4$qK9%zB7'
+    const snapshot = snapshotOf(
+      {
+        'src/config.ts': `const password = "${secret}"`,
+        'docs/runbook.md': `credential copied here: ${secret}`,
+        'src/headers.ts': `const headers = { Authorization: "Bearer ${secret}" }`,
+        'src/generated.ts': `// @generated\n// credential ${secret}`,
+        'src/large.ts': `// credential ${secret}\n${' '.repeat(2 * 1024 * 1024)}`,
+        'src/normal.ts': 'export const count = 42',
+      },
+      ROOT,
+    )
+    // The skipped files have no recorded spans; only the copy in config establishes this value.
+    const generated = snapshot.files.get('src/generated.ts')!
+    const files = new Map(snapshot.files)
+    files.set(generated.path, { ...generated, isGenerated: true })
+    const frozen = { ...snapshot, files }
+    const matches = await scanSecrets(frozen)
+    expect(matches.some(m => m.ruleId === 'generic-secret')).toBe(true)
+    expect(matches.some(m => /generated|large/.test(m.path))).toBe(false)
+    const h = await harness({}, {}, { snapshot: frozen, redactor: new Redactor(matches) })
+    for (const path of ['docs/runbook.md', 'src/headers.ts', 'src/generated.ts', 'src/large.ts']) {
+      const result = await h.call('read_file', { path, end_line: 1 })
+      expect(result.text).not.toContain(secret)
+      const full = await h.call('read_file', { path })
+      expect(full.text).toContain('[REDACTED:generic-secret]')
+    }
+    const search = await h.call('search_code', { pattern: 'credential|Bearer', regex: true })
+    expect(search.text).not.toContain(secret)
+    expect(search.text).toContain('[REDACTED:generic-secret]')
+    expect((await h.call('read_file', { path: 'src/normal.ts' })).text).toContain('export const count = 42')
+    // Query echoes and error text are also tool output.
+    expect((await h.call('search_code', { pattern: secret })).text).not.toContain(secret)
+  })
+
+  it('masks canonical, registered and case-variant roots without changing suffix semantics', async () => {
+    const canonical = 'C:\\Users\\Alice\\Projects\\Acme'
+    const registered = 'C:\\Users\\Alice\\Links\\Acme'
+    const snapshot = {
+      ...snapshotOf(
+        { 'app.ts': 'const p = "c:/users/ALICE/projects/acme-old/file"\n// C:/USERS/ALICE/LINKS/ACME/src' },
+        canonical,
+      ),
+      workspaceRoot: canonical,
+      registeredWorkspaceRoot: registered,
+    }
+    const h = await harness({}, {}, { snapshot })
+    const text = (await h.call('read_file', { path: 'app.ts' })).text
+    expect(text).toContain('<root>-old/file')
+    expect(text).toContain('<root>/src')
+    expect(text).not.toMatch(/users/i)
+  })
+
   it('creates the non-terminal tools with described inputs', async () => {
     const h = await harness()
     expect([...h.tools.keys()]).toEqual([...WORKSPACE_TOOL_NAMES])

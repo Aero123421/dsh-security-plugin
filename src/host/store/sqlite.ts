@@ -336,12 +336,18 @@ class SqliteSecurityStore implements SecurityStore {
 
   // Settings -----------------------------------------------------------------
 
-  readSettings(): { readonly value: unknown; readonly revision: number } {
+  readSettings(): { readonly value: unknown; readonly revision: number; readonly unreadable?: boolean } {
     return this.guard('readSettings', () => {
       const row = this.stmt(SQL.readSettings).get()
       if (row === undefined) return { value: undefined, revision: 0 }
       const r = new RowReader('settings', row)
-      return { value: r.anyJson('json'), revision: r.num('revision') }
+      const revision = r.num('revision')
+      try {
+        return { value: r.anyJson('json'), revision }
+      } catch {
+        // Keep the CAS token even when the JSON is corrupt, so a validated update can repair this row.
+        return { value: undefined, revision, unreadable: true }
+      }
     })
   }
 

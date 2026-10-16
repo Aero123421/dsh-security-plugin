@@ -521,6 +521,37 @@ export function secretSignals(matches: readonly SecretMatch[], snapshot: Snapsho
  */
 export class Redactor {
   readonly #byPath = new Map<string, SecretMatch[]>()
+  readonly #scrubbers = new WeakMap<Snapshot, (text: string) => string>()
+
+  /** Host-only exact-value matcher shared across all tools over a frozen snapshot. */
+  scrub(text: string, snapshot: Snapshot): string {
+    let scrub = this.#scrubbers.get(snapshot)
+    if (!scrub) {
+      const secrets = this.secretValues(path => snapshot.files.get(path)?.content).filter(s => s.value.length >= 8)
+      const escaped = secrets.map(s => s.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      // Never silently drop known values when the bounded matcher cannot hold them: fail closed.
+      if (secrets.length > 20_000 || escaped.reduce((n, s) => n + s.length + 1, 0) > 1_000_000) {
+        scrub = text => redactSpan(text, 'secret-matcher-limit')
+      } else if (secrets.length === 0) {
+        scrub = text => text
+      } else {
+        const rules = new Map(secrets.map(s => [s.value, s.ruleId]))
+        const pattern = new RegExp(escaped.join('|'), 'g')
+        scrub = text => {
+          try {
+            return text.replace(pattern, value => redactSpan(value, rules.get(value)!))
+          } catch {
+            // Engines may impose a lower compiled-regexp limit. Do not fall back to unsanitized text.
+            const failClosed = (text: string) => redactSpan(text, 'secret-matcher-limit')
+            this.#scrubbers.set(snapshot, failClosed)
+            return failClosed(text)
+          }
+        }
+      }
+      this.#scrubbers.set(snapshot, scrub)
+    }
+    return redactText(scrub(text))
+  }
 
   constructor(matches: readonly SecretMatch[]) {
     for (const match of matches) {

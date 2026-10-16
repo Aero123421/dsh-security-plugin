@@ -7,12 +7,15 @@
 import { z } from 'zod'
 import type { Severity } from '../../shared/domain.ts'
 import type { Dependency, Ecosystem, Signal } from './types.ts'
+import { isSensitivePath } from './secrets.ts'
 
 export interface OsvQueryOptions {
   /** Base URL, default `https://api.osv.dev`. */
   readonly endpoint: string
   readonly fetch: typeof fetch
   readonly signal?: AbortSignal
+  /** Same gitignore-style disclosure policy as the workspace tools. */
+  readonly withheldGlobs?: readonly string[]
   /** Queries per `querybatch` request (max 1000). */
   readonly batchSize?: number
   /** Per-request timeout. */
@@ -107,7 +110,7 @@ export async function queryOsv(deps: readonly Dependency[], options: OsvQueryOpt
   // One query per unique package version; remember every place it was declared.
   const queries = new Map<string, { ecosystem: string; name: string; version: string; refs: OsvPackageRef[] }>()
   for (const dep of deps) {
-    if (!dep.exact) continue
+    if (!dep.exact || isSensitivePath(dep.manifest, options.withheldGlobs ?? [])) continue
     const version = queryVersion(dep)
     if (!version) continue
     const ecosystem = toOsvEcosystem(dep.ecosystem)

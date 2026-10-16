@@ -1,4 +1,7 @@
-import { homedir } from 'node:os'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
+import { openSecurityStore } from '../../../src/host/store/sqlite.ts'
 import { join, sep } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { WorkspaceEntity } from '../../../src/host/dsh/ports.ts'
@@ -118,6 +121,46 @@ async function findingAt(path: string, line: number): Promise<FindingSummary> {
 }
 
 describe('bootstrap, workspaces, and models', () => {
+  it('bootstraps defaults for corrupt JSON and repairs the row without resetting its revision', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-corrupt-settings-'))
+    const path = join(dir, 'security.db')
+    const store = openSecurityStore(path)
+    const db = new DatabaseSync(path)
+    db.prepare('INSERT INTO settings (id, json, revision) VALUES (1, ?, ?)').run('{broken-json', 7)
+    db.close()
+    const local = createHarness({ store })
+    try {
+      const handlers = makeHandlers(local, undefined, [])
+      const bootstrap = await handlers.getBootstrap({}, call())
+      expect(bootstrap.settings).toEqual(DEFAULT_SETTINGS)
+      expect(bootstrap.settingsRevision).toBe(7)
+      expect(local.logger.entries.some(entry => entry.level === 'warn')).toBe(true)
+      const updated = await handlers.updateSettings({ patch: { ui: { language: 'ja' } }, expectedRevision: 7 }, call())
+      expect(updated.revision).toBe(8)
+      expect(store.readSettings()).toMatchObject({ revision: 8, value: { ui: { language: 'ja' } } })
+    } finally {
+      await local.controller.dispose()
+      store.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('allows a remote page to start a scan using existing consent without widening settings', async () => {
+    const model = await oracleLlm()
+    const local = createHarness({ llm: model, workspaces, settings: AI_SETTINGS, allowRemoteHighRisk: false })
+    try {
+      const service = makeHandlers(local, model, workspaces)
+      const boot = await service.getBootstrap({}, call(false))
+      expect(boot.canEditHighRiskSettings).toBe(false)
+      const { scanId } = await service.createScan({ workspaceId: WS_ID, mode: 'quick' }, call(false))
+      expect(await local.settle(scanId)).toBe('completed')
+      expect(model.calls.length).toBeGreaterThan(0)
+      expect(local.settings.get().revision).toBe(boot.settingsRevision)
+    } finally {
+      await local.controller.dispose()
+    }
+  })
+
   it('describes the plugin, settings, capabilities, and limits', async () => {
     const local = await invoke('getBootstrap', {})
     expect(local).toMatchObject({
