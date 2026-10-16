@@ -8,6 +8,8 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-16
+
 ### Fixed
 
 - Settings saves preserve edits made while saving. Superseded scan and finding loads no longer replace newer results;
@@ -228,7 +230,8 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.0...v0.1.1
