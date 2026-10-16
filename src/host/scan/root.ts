@@ -36,16 +36,16 @@ export async function resolveScanRoot(
   try {
     root = await realpath(join(workspaceRoot, subpath))
   } catch {
-    throw new RpcError('security/not-found', 'The subfolder does not exist or cannot be read.', {})
+    throw new RpcError('security/not-found', 'The subfolder was not found in this project.', {})
   }
   const prefix = workspaceRoot.endsWith(sep) ? workspaceRoot : workspaceRoot + sep
   if (root === workspaceRoot || !root.startsWith(prefix)) {
-    throw new RpcError('security/bad-request', 'The subfolder must stay inside the project folder.', {})
+    throw new RpcError('security/not-found', 'The subfolder was not found in this project.', {})
   }
   try {
     if (!(await stat(root)).isDirectory()) throw new Error('not a directory')
   } catch {
-    throw new RpcError('security/not-found', 'The subfolder is not a readable directory.', {})
+    throw new RpcError('security/not-found', 'The subfolder was not found in this project.', {})
   }
   return { workspaceRoot, root, subpath: relative(workspaceRoot, root).split(sep).join('/') }
 }

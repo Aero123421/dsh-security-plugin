@@ -406,7 +406,7 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
     const task = queue[head]!
     signal?.throwIfAborted()
 
-    if (task.abs !== root) {
+    {
       let real: string
       try {
         real = await realpath(task.abs)
@@ -428,7 +428,7 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
     try {
       names = await readdir(task.abs)
     } catch {
-      if (task.abs !== root) exclude(task.rel, 'unreadable')
+      exclude(task.rel, 'unreadable')
       continue
     }
     names.sort(compareStrings)
@@ -542,6 +542,7 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
   const commit = await readGitCommit(workspaceRoot)
   return {
     root,
+    ...(options.workspaceRoot ? { workspaceRoot } : {}),
     ...(pathPrefix ? { pathPrefix } : {}),
     files: new Map(files.map(file => [file.path, file])),
     excluded,

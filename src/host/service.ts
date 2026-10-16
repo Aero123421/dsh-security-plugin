@@ -69,6 +69,22 @@ const MODEL_INFO_TIMEOUT_MS = 5_000
 
 export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const { store, settings, controller } = deps
+  const reconciledTriage = new Map<string, string>()
+  const reconcileTriage = (): void => {
+    for (const workspace of deps.workspaces()?.list() ?? []) {
+      if (reconciledTriage.get(workspace.id) === workspace.path) continue
+      let root: string
+      try {
+        root = realpathSync(workspace.path)
+      } catch {
+        continue
+      }
+      store.reconcileTriageRoot(workspace.id, root)
+      reconciledTriage.set(workspace.id, workspace.path)
+    }
+  }
+  // Registry services can appear after this plugin starts; read paths retry lazily.
+  reconcileTriage()
   const maskPaths = (): PathMasker => hostPathMasker(deps)
   /** The request's signal, also aborted when the plugin unloads. */
   const workSignal = (call: { readonly signal: AbortSignal }): AbortSignal =>
@@ -78,6 +94,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const scanMask = (scan: ScanRecord): PathMasker => hostPathMasker(deps, [scan.workspaceRoot])
 
   const requireScan = (scanId: string): ScanRecord => {
+    reconcileTriage()
     const scan = store.getScan(scanId)
     if (!scan) throw new RpcError('security/not-found', 'Scan not found.', { scanId })
     return scan
@@ -90,6 +107,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
   }
 
   const summary = (scan: ScanRecord): ScanSummary => {
+    reconcileTriage()
     const { counts, confirmed } = store.countOpenFindings(scan.id, scan.workspaceRoot)
     // Project-facing actions must use the current registration, not an orphaned UUID.
     const current = deps

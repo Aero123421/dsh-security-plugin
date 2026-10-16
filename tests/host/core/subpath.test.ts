@@ -1,3 +1,4 @@
+import { realpathSync, renameSync, symlinkSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -88,13 +89,19 @@ describe('subfolder admission', () => {
     try {
       await symlink(outside, join(root, 'escape'))
       await symlink(root, join(root, 'same'))
-      for (const subpath of ['escape', 'same']) {
+      const failure = {
+        code: 'security/not-found',
+        message: 'The subfolder was not found in this project.',
+        details: {},
+      }
+      for (const subpath of ['escape', 'escape/nonexistent-descendant', 'same', 'missing', 'file.txt']) {
+        await expect(resolveScanRoot(workspace(), subpath)).rejects.toMatchObject(failure)
         await expect(
           handlers().estimateScan({ workspaceId: workspace().id, mode: 'quick', subpath }, call()),
-        ).rejects.toMatchObject({ code: 'security/bad-request' })
+        ).rejects.toMatchObject(failure)
         await expect(
           h.controller.create({ workspaceId: workspace().id, mode: 'quick', aiReview: false, subpath }),
-        ).rejects.toMatchObject({ code: 'security/bad-request' })
+        ).rejects.toMatchObject(failure)
       }
     } finally {
       await rm(outside, { recursive: true, force: true })
@@ -321,4 +328,108 @@ it('migrates v1 orphan-UUID history and triage to the re-registered project path
   } finally {
     migrated.close()
   }
+})
+
+it.each([undefined, 'packages/a'])('masks workspace-base and sibling absolute paths for scope %s', async subpath => {
+  const content = `${root}\n${root}/packages/b/private.ts\n${root}/packages/a/app.ts\n`
+  const expected = '<root>\n<root>/packages/b/private.ts\n<root>/packages/a/app.ts\n'
+  await writeFile(join(root, 'packages/a/app.ts'), content)
+  const analysis = await analyzeWorkspace({
+    root: subpath ? join(root, subpath) : root,
+    workspaceRoot: root,
+    settings: h.settings.get().settings,
+    config: h.config,
+    toolkit: undefined,
+    astGrep: undefined,
+    fetch: noNetwork,
+    signal: signal(),
+  })
+  expect(analysis.snapshot.workspaceRoot).toBe(root)
+  expect(analysis.privacy.scrub(content)).toBe(expected)
+  expect(analysis.privacy.excerpt('packages/a/app.ts', content)).toBe(expected)
+  expect(analysis.quoteSource.redact('packages/a/app.ts', content)).toBe(expected)
+  const read = createWorkspaceTools(analysis.view()).find(tool => tool.name === 'read_file')!
+  const result = await read.execute!(read.input.parse({ path: 'packages/a/app.ts' }), {
+    signal: signal(),
+    workerId: 'mask-test',
+    turn: 1,
+  })
+  expect(result.text).not.toContain(root)
+  expect(result.text).toContain('<root>/packages/b/private.ts')
+  expect(result.text).toContain('<root>/packages/a/app.ts')
+})
+
+it('revalidates the selected root at the walk boundary', async () => {
+  const selected = join(root, 'packages/a')
+  const saved = join(root, 'packages/saved')
+  await writeFile(join(root, 'packages/b/private.ts'), 'must not enter snapshot')
+  const boundary = signal()
+  let calls = 0
+  Object.defineProperty(boundary, 'throwIfAborted', {
+    value() {
+      if (++calls !== 2) return
+      expect(realpathSync(selected)).toBe(selected)
+      expect(saved).toBe(join(root, 'packages/saved'))
+      renameSync(selected, saved)
+      symlinkSync(join(root, 'packages/b'), selected)
+    },
+  })
+  const snapshot = await snapshotWorkspace(selected, h.settings.get().settings, h.config, boundary, root)
+  expect(snapshot.files.size).toBe(0)
+  expect(snapshot.excluded).toContainEqual({ path: 'packages/a', reason: 'outside-root' })
+})
+
+it('recovers scan-less legacy triage lazily for registered UUIDs with deterministic collisions', async () => {
+  const fixture = await copyFixture('express-shop')
+  try {
+    await cp(join(fixture.root, 'scripts/sync-catalog.ts'), join(root, 'packages/a/app.ts'))
+  } finally {
+    await fixture.cleanup()
+  }
+  const first = await scan('packages/a')
+  const fingerprint = h.store.listFindings(first)[0]!.fingerprint
+  const dbPath = join(root, 'scanless.db')
+  const legacy = new DatabaseSync(dbPath)
+  legacy.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT')
+  legacy.exec("INSERT INTO meta VALUES ('schema_version', '1')")
+  for (const step of MIGRATIONS[0] ?? []) legacy.exec(step)
+  const insert = legacy.prepare('INSERT INTO triage VALUES (?,?,?,?,?)')
+  insert.run(workspace().id, fingerprint, 'accepted_risk', 'recovered', '2026-02-02T00:00:00.000Z')
+  for (const fp of ['legacy-newer', 'base-newer', 'tie'])
+    insert.run(workspace().id, fp, 'fixed', 'legacy', '2026-02-02T00:00:00.000Z')
+  insert.run('unknown-uuid', fingerprint, 'false_positive', 'unknown remains', '2026-02-02T00:00:00.000Z')
+  legacy.close()
+  let clock = new Date('2026-02-01T00:00:00.000Z')
+  const migrated = openSecurityStore(dbPath, { now: () => clock })
+  expect(migrated.listScans()).toEqual([])
+  expect(migrated.getTriage(workspace().id, [fingerprint]).get(fingerprint)?.state).toBe('accepted_risk')
+  migrated.setTriage(root, 'legacy-newer', 'open', 'older base')
+  clock = new Date('2026-02-03T00:00:00.000Z')
+  migrated.setTriage(root, 'base-newer', 'accepted_risk', 'newer base')
+  clock = new Date('2026-02-02T00:00:00.000Z')
+  migrated.setTriage(root, 'tie', 'open', 'canonical tie wins')
+  await h.controller.dispose()
+  h.store.close()
+  h = createHarness({ store: migrated, workspaces: [workspace()] })
+  const registered: ReturnType<typeof workspace>[] = []
+  const rpc = handlers(registered)
+  expect(migrated.getTriage(workspace().id, [fingerprint]).size).toBe(1)
+  registered.push(workspace())
+  const next = await scan('packages/a')
+  const finding = h.store.listFindings(next).find(f => f.fingerprint === fingerprint)!
+  expect(await rpc.getFinding({ scanId: next, findingId: finding.id }, call())).toMatchObject({
+    triage: 'accepted_risk',
+    triageNote: 'recovered',
+  })
+  const states = migrated.getTriage(root, ['legacy-newer', 'base-newer', 'tie'])
+  expect(states.get('legacy-newer')?.state).toBe('fixed')
+  expect(states.get('base-newer')?.state).toBe('accepted_risk')
+  expect(states.get('tie')?.note).toBe('canonical tie wins')
+  expect(migrated.getTriage(workspace().id, [fingerprint, 'legacy-newer', 'base-newer', 'tie']).size).toBe(0)
+  expect(migrated.getTriage('unknown-uuid', [fingerprint]).get(fingerprint)?.note).toBe('unknown remains')
+  // The successful service hook is cached, and the store operation is independently idempotent.
+  migrated.reconcileTriageRoot(workspace().id, root)
+  expect(await rpc.getFinding({ scanId: next, findingId: finding.id }, call())).toMatchObject({
+    triage: 'accepted_risk',
+  })
 })

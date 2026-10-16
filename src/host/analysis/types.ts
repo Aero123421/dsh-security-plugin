@@ -68,6 +68,8 @@ export interface ExcludedPath {
 export interface Snapshot {
   /** Absolute canonical root. Host-only; never sent to the browser or a model. */
   readonly root: string
+  /** Canonical workspace base for consistent masking across scan scopes. Host-only. */
+  readonly workspaceRoot?: string
   /** Workspace-relative prefix of the effective root. */
   readonly pathPrefix?: string
   readonly files: ReadonlyMap<string, SnapshotFile>

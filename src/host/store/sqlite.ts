@@ -601,6 +601,21 @@ class SqliteSecurityStore implements SecurityStore {
 
   // Triage ---------------------------------------------------------------------
 
+  reconcileTriageRoot(workspaceId: string, rootKeyBase: string): void {
+    if (workspaceId === rootKeyBase) return
+    this.guard('reconcileTriageRoot', () =>
+      this.atomic(() => {
+        // Equal timestamps keep the canonical row; this tie-break is stable on every retry.
+        this.stmt(`INSERT INTO triage (root_key_base, fingerprint, state, note, updated_at)
+        SELECT ?, fingerprint, state, note, updated_at FROM triage WHERE root_key_base = ?
+        ON CONFLICT (root_key_base, fingerprint) DO UPDATE SET
+          state = excluded.state, note = excluded.note, updated_at = excluded.updated_at
+        WHERE excluded.updated_at > triage.updated_at`).run(rootKeyBase, workspaceId)
+        this.stmt('DELETE FROM triage WHERE root_key_base = ?').run(workspaceId)
+      }),
+    )
+  }
+
   getTriage(rootKeyBase: string, fingerprints: readonly string[]): Map<string, TriageRecord> {
     return this.guard('getTriage', () => {
       const out = new Map<string, TriageRecord>()

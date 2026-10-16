@@ -172,6 +172,8 @@ export interface SecurityStore {
   ): { readonly counts: SeverityCounts; readonly confirmed: number }
 
   // Triage ---------------------------------------------------------------------
+  /** Recover retained UUID-keyed v1 triage once its registered canonical path is known. */
+  reconcileTriageRoot(workspaceId: string, rootKeyBase: string): void
   getTriage(rootKeyBase: string, fingerprints: readonly string[]): Map<string, TriageRecord>
   setTriage(rootKeyBase: string, fingerprint: string, state: TriageState, note: string | undefined): TriageRecord
 
