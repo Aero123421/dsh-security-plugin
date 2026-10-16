@@ -182,15 +182,23 @@ function npmPackDryRun() {
     if (result.stderr) console.error(result.stderr.trim())
     process.exit(1)
   }
-  const start = result.stdout.indexOf('[')
+  // npm <= 11 prints an array with one entry; npm 12 prints an object keyed
+  // by package name. Accept both. Slice from the first JSON opener in case
+  // npm ever writes a preamble line to stdout.
+  const openers = [result.stdout.indexOf('['), result.stdout.indexOf('{')].filter(index => index >= 0)
+  const start = openers.length > 0 ? Math.min(...openers) : 0
   let parsed
   try {
-    parsed = JSON.parse(result.stdout.slice(Math.max(0, start)))
+    parsed = JSON.parse(result.stdout.slice(start))
   } catch (error) {
     console.error(`verify-package: could not parse npm pack output: ${error instanceof Error ? error.message : error}`)
     process.exit(1)
   }
-  const entry = Array.isArray(parsed) ? parsed[0] : undefined
+  const entry = Array.isArray(parsed)
+    ? parsed[0]
+    : Array.isArray(parsed?.files)
+      ? parsed
+      : Object.values(parsed ?? {})[0]
   if (!entry || !Array.isArray(entry.files)) {
     console.error('verify-package: npm pack returned no file list')
     process.exit(1)
