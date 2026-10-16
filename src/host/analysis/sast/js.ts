@@ -625,14 +625,17 @@ export function templateRules(ctx: FileContext): void {
 // ---------------------------------------------------------------------------
 
 function sqlInjection(chk: Checker, call: CallFact): void {
-  if (call.tagged || !SQL_METHODS.has(call.name) || call.receiver === '') return
+  const predicate = /^(?:where|andWhere|orWhere)$/.test(call.name)
+  const literal = /^(?:sequelize|@sequelize\/core)\.literal$/.test(chk.qualify(call.callee))
+  if (call.tagged || (!predicate && !literal && !SQL_METHODS.has(call.name)) || (!literal && call.receiver === ''))
+    return
   const arg = chk.positional(call, 0)
-  if (!arg) return
+  if (!arg || chk.ex.isObjectLiteral(arg) || chk.ex.isArrayLiteral(arg)) return
   const values = chk.values(arg)
   const exact = chk.ex.exactSource(arg)
   const built = values.some(v => chk.ex.isStringBuilt(v) && !chk.ex.isConstant(v))
-  if (!built && !exact) return
-  if (!SQL_ALWAYS.test(call.name)) {
+  if ((!built && !exact) || (predicate && !built && !isSqlQueryBuilder(chk, call))) return
+  if (!predicate && !literal && !SQL_ALWAYS.test(call.name)) {
     const text = values.map(v => chk.text(v)).join(' ')
     if (!SQL_WORDS.test(text) && !SQL_RECEIVER.test(call.receiver)) return
   }
@@ -640,8 +643,26 @@ function sqlInjection(chk: Checker, call: CallFact): void {
   chk.check(SQLI, call, taint, true)
 }
 
+/** Structural SQL-builder evidence; do not turn ambiguous Mongo where(object) into SQL. */
+function isSqlQueryBuilder(chk: Checker, call: CallFact): boolean {
+  return (
+    /^(?:andWhere|orWhere)$/.test(call.name) ||
+    /\.createQueryBuilder\(/.test(call.receiver) ||
+    chk.model.calls.some(
+      c => c.fn === call.fn && c.receiver === call.receiver && /^(?:andWhere|orWhere)$/.test(c.name),
+    ) ||
+    chk.model.assigns.some(
+      a =>
+        a.fn === call.fn &&
+        a.targets.some(t => t.name === call.receiver) &&
+        /\bcreateQueryBuilder\s*\(/.test(chk.text(a.value)),
+    )
+  )
+}
+
 function nosqlInjection(chk: Checker, call: CallFact): void {
   if (!MONGO_METHODS.has(call.name) || call.receiver === '' || call.tagged) return
+  if (call.name === 'where' && isSqlQueryBuilder(chk, call)) return
   if (NOT_A_COLLECTION.test(call.receiver) || NOT_A_COLLECTION.test(chk.qualify(call.receiver))) return
   // `instance.update(values)` (Sequelize, TypeORM) is mass assignment, not a query filter, and
   // Sequelize `Model.update(values, { where })` takes the filter second.
@@ -818,12 +839,28 @@ function serverXss(chk: Checker, call: CallFact): void {
   if (!/^(?:send|write|end)$/.test(call.name)) return
   const root = rootName(call.receiver)
   if (root !== 'res' && root !== 'response') return
-  if (
-    !/^(?:res|response)(?:\.(?:status|set|type|header|append|cookie|vary|location|links)\([\s\S]*\))*$/.test(
-      call.receiver,
+  // Walk bracket partners rather than a regex whose repeated wildcard can
+  // repartition every `status(...)` on a failing chain suffix.
+  const [a, b] = chk.ex.range(call.calleeSpan)
+  const { tokens, match } = chk.model
+  let i = a + 1
+  while (i < b - 2) {
+    if (tokens[i]?.value === '!') {
+      i++
+      continue
+    } // TypeScript non-null receiver
+    if (
+      !/^(?:\.|\?\.)$/.test(tokens[i]?.value ?? '') ||
+      !/^(?:status|set|type|header|append|cookie|vary|location|links)$/.test(tokens[i + 1]?.value ?? '')
     )
-  )
-    return
+      return
+    const open = tokens[i + 2]?.value === '?.' ? i + 3 : i + 2
+    if (tokens[open]?.value !== '(') return
+    const close = match[open]!
+    if (close <= open || close >= b - 2) return
+    i = close + 1
+  }
+  if (i !== b - 2 || !/^(?:\.|\?\.)$/.test(tokens[i]?.value ?? '')) return
   const body = chk.positional(call, 0)
   if (!body || chk.ex.isObjectLiteral(body) || chk.ex.isArrayLiteral(body) || chk.ex.wholeBody(body)) return
   const exact = chk.ex.exactSource(body)

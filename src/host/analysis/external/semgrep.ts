@@ -72,6 +72,9 @@ export async function runSemgrep(options: SemgrepRunOptions): Promise<AnalyzerRu
     '--metrics=off',
     '--disable-version-check',
     '--disable-nosem',
+    // Target discovery must not run git ls-files in an untrusted repository:
+    // repository-local core.fsmonitor can execute a command.
+    '--no-git-ignore',
     '--quiet',
     '--config',
     configPath,

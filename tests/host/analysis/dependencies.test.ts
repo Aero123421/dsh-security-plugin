@@ -109,7 +109,8 @@ describe('npm', () => {
 describe('Python', () => {
   it('parses requirements files', async () => {
     const { dependencies, warnings } = await parseDependencies(await fixture('python'))
-    expect(warnings).toEqual([])
+    // The fixture references an absent base.txt; coverage loss is now explicit.
+    expect(warnings).toEqual(["requirements.txt: line 2: requirement include 'base.txt' is missing from the snapshot"])
     expect(dependencies.map(dep => `${summary(dep)} [${dep.manifest}:${dep.line}]`)).toEqual([
       'cryptography@41.0.5 direct [requirements.txt:11]',
       'django@4.2.7 direct [requirements.txt:4]',

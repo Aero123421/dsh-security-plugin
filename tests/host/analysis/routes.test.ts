@@ -152,7 +152,8 @@ describe.each(MODES)('route extraction (%s mode)', (_mode, handle) => {
       'DELETE /api/users/:id @ src/app/api/users/[id]/route.ts:8',
       'POST /dashboard/:slug* @ src/app/(admin)/dashboard/[...slug]/route.ts:2',
     ])
-    expect(endpoints.every(e => e.framework === 'next' && e.authHints.includes('next-middleware'))).toBe(true)
+    // This fixture's middleware only calls NextResponse.next(); presence is not an auth check.
+    expect(endpoints.every(e => e.framework === 'next' && e.authHints.length === 0)).toBe(true)
     // `[...slug]` → `:slug*`, `(admin)` dropped; `export const DELETE = async () => {}` has a handler.
     expect(endpoint(endpoints, 'POST', '/dashboard/:slug*').params).toEqual(['slug'])
     expect(endpoint(endpoints, 'DELETE', '/api/users/:id')).toMatchObject({
@@ -183,9 +184,7 @@ describe.each(MODES)('route extraction (%s mode)', (_mode, handle) => {
       }),
       { astGrep: handle },
     )
-    expect(root.endpoints.map(e => [e.id, e.authHints])).toEqual([
-      ['GET /api/ping @ app/api/ping/route.js:1', ['next-middleware']],
-    ])
+    expect(root.endpoints.map(e => [e.id, e.authHints])).toEqual([['GET /api/ping @ app/api/ping/route.js:1', []]])
   })
 
   it('Flask: @app.route methods, @bp.get, url_prefix and auth decorators', async () => {
