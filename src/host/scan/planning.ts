@@ -1,7 +1,7 @@
 /**
  * Deterministic task planning: turns the attack surface (endpoints), rule
- * hits, sensitive files, and planner hypotheses into a ranked list of AI
- * review tasks with stable keys, so re-planning after a resume yields the
+ * hits, sensitive files, planner hypotheses, and a bounded source sweep into
+ * ranked AI review tasks with stable keys, so re-planning after a resume yields the
  * same tasks.
  */
 
@@ -13,6 +13,7 @@ import {
   severityAtLeast,
   severityRank,
 } from '../../shared/domain.ts'
+import { MUTATING_METHODS } from '../analysis/routes/signals.ts'
 import type { Endpoint, Signal, Snapshot } from '../analysis/types.ts'
 import type { FindingRecord, TaskInput, TaskKind } from '../core/model.ts'
 import type { RoleName } from '../../shared/domain.ts'
@@ -54,9 +55,9 @@ export interface HuntPlanInput {
 const ENDPOINTS_PER_TASK = 8
 const SIGNALS_PER_TASK = 12
 const MAX_SENSITIVE_FILE_TASKS = 6
-const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE', 'ANY'])
+const SWEEP_FILES_PER_TASK = 4
 const SENSITIVE_NAME =
-  /(?:^|[/_.-])(auth|authn|authz|login|logout|session|sessions|permission|permissions|policy|policies|guard|guards|acl|rbac|role|roles|middleware|tenant|tenants|account|accounts|admin|token|tokens|jwt|oauth|password|billing|payment|payments|invite|invites|upload|uploads)(?:[/_.-]|$)/i
+  /(?:^|[/_.-])(auth|authn|authz|login|logout|session|sessions|permission|permissions|policy|policies|guard|guards|acl|rbac|role|roles|middleware|tenant|tenants|account|accounts|admin|token|tokens|jwt|oauth|password|billing|payment|payments|invite|invites|upload|uploads|config|configuration|settings|cookie|cookies|security|constants|env)(?:[/_.-]|$)/i
 const SOURCE_LANGUAGES = new Set([
   'javascript',
   'typescript',
@@ -82,7 +83,13 @@ export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTa
   const endpoints = input.endpoints.filter(e => visible(e.declaredAt.path))
   const candidates: PlannedTask[] =
     input.mode === 'quick'
-      ? planTriage(steering)
+      ? [
+          ...planTriage(steering),
+          ...planQuickEndpoints(
+            endpoints.filter(e => inScope(endpointPath(e))),
+            steering,
+          ),
+        ]
       : [
           ...planEndpoints(
             endpoints.filter(e => inScope(endpointPath(e))),
@@ -99,8 +106,19 @@ export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTa
     const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
     candidates.push(...planSensitiveFiles(input.snapshot, targeted, inScope))
   }
+  // Quick stays within its existing 6-task / 40-call defaults: triage first,
+  // then only the riskiest endpoint groups that fit. No hypotheses or sweep.
   const ranked = candidates.sort((a, b) => b.priority - a.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-  return { tasks: ranked.slice(0, input.maxTasks), overflow: Math.max(0, ranked.length - input.maxTasks) }
+  const tasks = ranked.slice(0, input.maxTasks)
+  let overflow = Math.max(0, ranked.length - input.maxTasks)
+  if (input.mode !== 'quick') {
+    const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
+    const sweep = planSweep(input.snapshot, targeted, inScope, Math.max(0, input.maxTasks - tasks.length))
+    // Append only: sweep work must never displace an existing task family.
+    tasks.push(...sweep.tasks)
+    overflow += sweep.overflow
+  }
+  return { tasks, overflow }
 }
 
 /** Findings that deserve an independent review in this mode, most severe first. */
@@ -160,13 +178,25 @@ function planTriage(signals: readonly Signal[]): PlannedTask[] {
   )
 }
 
+function planQuickEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[]): PlannedTask[] {
+  const risky = new Set(
+    endpoints.filter(e => e.authHints.length === 0 && MUTATING_METHODS.has(e.method)).map(e => e.id),
+  )
+  const riskCount = (task: PlannedTask) => task.input.endpointIds?.filter(id => risky.has(id)).length ?? 0
+  const tasks = planEndpoints(endpoints, signals).sort(
+    (a, b) => riskCount(b) - riskCount(a) || b.priority - a.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+  )
+  // Keep every endpoint below triage (priority >= 50), including in the worker queue.
+  return tasks.map((task, index) => ({ ...task, priority: 49 - index / (tasks.length + 1) }))
+}
+
 function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[]): PlannedTask[] {
   return groupByPath(endpoints, endpointPath).flatMap(([path, group]) => {
     const sorted = [...group].sort((a, b) => a.declaredAt.startLine - b.declaredAt.startLine)
     const fileSignals = signals.filter(s => s.location.path === path)
     return chunk(sorted, ENDPOINTS_PER_TASK).map((part, index) => {
       const unguarded = part.filter(e => e.authHints.length === 0).length
-      const mutating = part.filter(e => MUTATING.has(e.method)).length
+      const mutating = part.filter(e => MUTATING_METHODS.has(e.method)).length
       const params = part.reduce((n, e) => n + e.params.length, 0)
       // Groups are keyed by the handler file; also start from the file that declares (mounts) the route.
       const declarationPaths = part.flatMap(e => (e.declaredAt.path !== path ? [e.declaredAt.path] : []))
@@ -254,6 +284,40 @@ function planSensitiveFiles(
       priority: 45,
       input: { targetPaths: [f.path], focus: ['authn', 'authz', 'business-logic', 'crypto'] as FindingCategory[] },
     }))
+}
+
+function planSweep(
+  snapshot: Snapshot,
+  targeted: ReadonlySet<string>,
+  inScope: (path: string) => boolean,
+  remaining: number,
+): { tasks: PlannedTask[]; overflow: number } {
+  const files = [...snapshot.files.values()]
+    .filter(f => SOURCE_LANGUAGES.has(f.language) && !f.isGenerated && inScope(f.path) && !targeted.has(f.path))
+    .sort(
+      (a, b) =>
+        // Even with includeTests, spare sweep capacity goes to production first.
+        Number(a.isTest) - Number(b.isTest) ||
+        Number(SENSITIVE_NAME.test(b.path)) - Number(SENSITIVE_NAME.test(a.path)) ||
+        b.size - a.size ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    )
+  const groups = chunk(files, SWEEP_FILES_PER_TASK)
+  return {
+    tasks: groups.slice(0, remaining).map((part, index) => ({
+      key: `sweep:${shortHash(part.map(f => f.path).join('\u0000'))}`,
+      kind: 'hunt-file',
+      role: 'hunter',
+      title: `Sweep ${part.length} otherwise-untargeted source file${part.length === 1 ? '' : 's'}`,
+      // Preserve file ranking in the persisted worker queue too; all sweeps stay below other hunt families.
+      priority: 10 - index / (groups.length + 1),
+      input: {
+        targetPaths: part.map(f => f.path),
+        focus: ['authn', 'authz', 'business-logic', 'crypto', 'misconfiguration', 'data-exposure'],
+      },
+    })),
+    overflow: Math.max(0, groups.length - remaining),
+  }
 }
 
 // ---------------------------------------------------------------------------

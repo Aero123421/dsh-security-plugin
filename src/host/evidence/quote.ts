@@ -278,7 +278,7 @@ function verifyPrepared(
       const occupied = Math.max(quoteLines, Math.min(...spans.map(s => s.endLine - s.startLine + 1)))
       if (span > occupied + 2 * slack) {
         return mismatch(
-          `quote ambiguous: it occurs ${hits.length === MAX_WINDOW_HITS ? 'many' : hits.length} times in lines ${low}-${high}; cite the exact lines of one occurrence`,
+          `quote ambiguous: it occurs ${hits.length === MAX_WINDOW_HITS ? 'many' : hits.length} times in lines ${low}-${high}; candidate lines: ${formatOccurrenceLines(spans)}; cite the exact lines of one occurrence`,
         )
       }
       // A tight citation names one occurrence: take the one nearest the cited lines (first on a tie).
@@ -298,8 +298,19 @@ function verifyPrepared(
   // No occurrence inside the window, so every occurrence lies elsewhere.
   const first = haystack.indexOf(needle)
   if (first < 0) return mismatch(valid ? 'quote not found' : 'lines out of range')
-  if (haystack.indexOf(needle, first + 1) >= 0) return mismatch('quote ambiguous')
+  if (haystack.indexOf(needle, first + 1) >= 0) {
+    const hits = occurrencesWithin(haystack, needle, 0, haystack.length)
+    const spans = hits.map(index => linesOfOccurrence(prepared, index, needle.length))
+    return mismatch(
+      `quote ambiguous; candidate lines: ${formatOccurrenceLines(spans)}; cite the exact lines of one occurrence`,
+    )
+  }
   return found(prepared, path, 'relocated', first, needle.length)
+}
+
+function formatOccurrenceLines(spans: readonly { readonly startLine: number; readonly endLine: number }[]): string {
+  const lines = spans.map(s => (s.startLine === s.endLine ? `${s.startLine}` : `${s.startLine}-${s.endLine}`))
+  return `${[...new Set(lines)].join(', ')}${spans.length === MAX_WINDOW_HITS ? ' (first candidates only)' : ''}`
 }
 
 /** Start indices of every occurrence of `needle` lying entirely within `haystack[from, to)` (capped). */

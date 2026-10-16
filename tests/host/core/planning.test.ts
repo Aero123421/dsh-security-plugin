@@ -1,7 +1,11 @@
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { extractRoutes } from '../../../src/host/analysis/routes/index.ts'
+import { takeSnapshot } from '../../../src/host/analysis/snapshot.ts'
 import type { Endpoint, Signal, Snapshot, SnapshotFile } from '../../../src/host/analysis/types.ts'
 import { signalFingerprint } from '../../../src/host/scan/findings.ts'
 import { type HuntPlanInput, type Hypothesis, planHuntTasks, planReviewTasks } from '../../../src/host/scan/planning.ts'
+import { DEFAULT_BUDGETS } from '../../../src/shared/settings.ts'
 import { fileOf, snapshotOf } from '../analysis/helpers.ts'
 import { endpointOf, findingRecord, signalOf } from './factories.ts'
 
@@ -41,7 +45,7 @@ function plan(overrides: Partial<HuntPlanInput>) {
 const at = (path: string, line: number) => ({ path, startLine: line, endLine: line })
 
 describe('planHuntTasks — quick mode', () => {
-  it('only triages medium-or-worse vulnerability signals, grouped per file', () => {
+  it('triages medium-or-worse vulnerability signals before endpoint tasks', () => {
     const signals: Signal[] = [
       signalOf({ location: at('src/lib/db.ts', 1), severity: 'high' }),
       signalOf({ location: at('src/lib/db.ts', 2), severity: 'medium', ruleId: 'js.ssrf', category: 'ssrf' }),
@@ -57,7 +61,8 @@ describe('planHuntTasks — quick mode', () => {
       hypotheses: [{ title: 'IDOR', category: 'authz', targetPaths: ['src/routes/orders.ts'], rationale: 'r' }],
     })
     expect(result.overflow).toBe(0)
-    expect(result.tasks).toHaveLength(1)
+    expect(result.tasks).toHaveLength(2)
+    expect(result.tasks[0]!.priority).toBeGreaterThan(result.tasks[1]!.priority)
     const [task] = result.tasks
     expect(task).toMatchObject({
       key: 'triage:src/lib/db.ts#0',
@@ -68,6 +73,22 @@ describe('planHuntTasks — quick mode', () => {
     })
     // Most severe first.
     expect(task?.input.signalFingerprints).toEqual([signalFingerprint(signals[0]!), signalFingerprint(signals[1]!)])
+  })
+
+  it('fills spare quick slots with endpoints even when no vulnerability rule fires', () => {
+    const endpoints = [
+      endpointOf('GET', '/public', 'src/public.ts', 1),
+      endpointOf('POST', '/orders', 'src/orders.ts', 1),
+      endpointOf('POST', '/guarded', 'src/guarded.ts', 1, { authHints: ['requireAuth'] }),
+      ...Array.from({ length: 8 }, (_, i) => endpointOf('GET', `/extra/${i}`, `src/extra${i}.ts`, 1)),
+    ]
+    const { tasks } = plan({ mode: 'quick', endpoints, maxTasks: DEFAULT_BUDGETS.quick.maxTasks })
+    expect(tasks).toHaveLength(6)
+    expect(tasks[0]?.input.targetPaths).toEqual(['src/orders.ts'])
+    expect(tasks.every(t => t.kind === 'hunt-endpoints')).toBe(true)
+    const triaged = plan({ mode: 'quick', endpoints, signals: [signalOf()], maxTasks: 1 })
+    expect(triaged.tasks).toHaveLength(1)
+    expect(triaged.tasks[0]?.kind).toBe('triage-signals')
   })
 
   it('chunks more than 12 hits of one file into several tasks', () => {
@@ -194,7 +215,7 @@ describe('planHuntTasks — deep and research modes', () => {
       snapshot: snapshot(extra),
       endpoints: [endpointOf('POST', '/login', 'src/auth/session.ts', 1)],
     })
-    const files = tasks.filter(t => t.kind === 'hunt-file')
+    const files = tasks.filter(t => t.key.startsWith('file:'))
     // The 6 largest candidates (src/routes/admin.ts, 30 bytes, is the 7th), ranked by key at equal priority.
     expect(files.map(t => t.key)).toEqual([
       'file:src/admin/panel.ts',
@@ -217,6 +238,83 @@ describe('planHuntTasks — deep and research modes', () => {
     expect(keys).not.toContain('file:docs/auth.md')
     // Quick mode never adds them.
     expect(plan({ mode: 'quick', snapshot: snapshot(extra) }).tasks).toEqual([])
+  })
+
+  it.each(['deep', 'research'] as const)(
+    'sweeps otherwise-untargeted source files in %s within remaining budget',
+    mode => {
+      const extra = Array.from({ length: 24 }, (_, i) => fileOf(`src/plain${i}.ts`, 'x'.repeat(i + 1)))
+      const snap = snapshot([
+        ...extra,
+        fileOf('src/generated.ts', 'x', { isGenerated: true }),
+        fileOf('tests/huge.test.ts', 'x'.repeat(100_000)),
+        fileOf('src/hidden.ts', 'x'),
+      ])
+      const input = {
+        mode,
+        snapshot: snap,
+        endpoints: [endpointOf('POST', '/orders', 'src/routes/orders.ts', 1)],
+        signals: [signalOf({ location: at('src/lib/db.ts', 1) })],
+        isWithheld: (path: string) => path === 'src/hidden.ts',
+      }
+      const full = plan(input)
+      const sweep = full.tasks.filter(t => t.key.startsWith('sweep:'))
+      expect(sweep.length).toBeGreaterThan(0)
+      expect(sweep.every((task, i) => i === 0 || sweep[i - 1]!.priority > task.priority)).toBe(true)
+      expect(Math.max(...sweep.map(t => t.priority))).toBeLessThan(
+        Math.min(...full.tasks.filter(t => !t.key.startsWith('sweep:')).map(t => t.priority)),
+      )
+      expect(sweep.flatMap(t => t.input.targetPaths)).toContain('src/plain23.ts')
+      const targets = full.tasks.flatMap(t => t.input.targetPaths)
+      expect(new Set(targets).size).toBe(targets.length)
+      expect(targets).not.toContain('src/generated.ts')
+      expect(targets).not.toContain('src/hidden.ts')
+      expect(targets).not.toContain('tests/huge.test.ts')
+      const beforeSweep = full.tasks.length - sweep.length
+      for (const maxTasks of [0, 1, 2, beforeSweep, beforeSweep + 1]) {
+        const bounded = plan({ ...input, maxTasks })
+        expect(bounded.tasks.length).toBeLessThanOrEqual(maxTasks)
+        expect(bounded.tasks).toEqual(full.tasks.slice(0, maxTasks))
+        if (maxTasks <= 2) expect(bounded.tasks.every(t => !t.key.startsWith('sweep:'))).toBe(true)
+      }
+      expect(plan({ ...input, maxTasks: 2 }).tasks.map(t => t.kind)).toEqual(['hunt-endpoints', 'hunt-signals'])
+      const included = plan({ ...input, includeTests: true }).tasks.filter(t => t.key.startsWith('sweep:'))
+      const sweptPaths = included.flatMap(t => t.input.targetPaths)
+      expect(sweptPaths).toContain('tests/huge.test.ts')
+      expect(sweptPaths.indexOf('tests/huge.test.ts')).toBeGreaterThan(sweptPaths.indexOf('src/plain0.ts'))
+      expect(
+        plan({ ...input, includeTests: true, maxTasks: beforeSweep + 1 }).tasks.at(-1)?.input.targetPaths,
+      ).not.toContain('tests/huge.test.ts')
+    },
+  )
+
+  it('ranks sensitive names ahead of size when they overflow the sensitive-file family', () => {
+    const snap = snapshotOf(
+      Object.fromEntries([
+        ...Array.from({ length: 8 }, (_, i) => [`src/security/settings${i}.ts`, 'x']),
+        ['src/large.ts', 'x'.repeat(10_000)],
+      ]),
+    )
+    const { tasks } = plan({ snapshot: snap, maxTasks: 7 })
+    expect(tasks.at(-1)?.key).toMatch(/^sweep:/)
+    expect(tasks.at(-1)?.input.targetPaths.slice(0, 2)).toEqual([
+      'src/security/settings6.ts',
+      'src/security/settings7.ts',
+    ])
+  })
+
+  it('targets the previously missed Flask configuration with default deep planning', async () => {
+    const root = fileURLToPath(new URL('../../fixtures/apps/flask-secure/', import.meta.url))
+    const snap = await takeSnapshot(root, {
+      excludeGlobs: ['README.md', 'expected.json'],
+      maxFiles: 1000,
+      maxFileBytes: 1_000_000,
+      maxTotalBytes: 10_000_000,
+    })
+    const { endpoints } = await extractRoutes(snap)
+    expect(endpoints.length).toBeGreaterThan(0)
+    const { tasks } = plan({ snapshot: snap, endpoints, maxTasks: DEFAULT_BUDGETS.deep.maxTasks })
+    expect(tasks.flatMap(t => t.input.targetPaths)).toContain('app/config.py')
   })
 
   it('excludes test files unless includeTests is set', () => {

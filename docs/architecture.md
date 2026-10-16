@@ -110,12 +110,16 @@ host-side checks before anything is stored.
   mutating methods, parameters and nearby rule hits.
 - `hunt-signals`: rule hits (`vulnerability` and `sink`) in files without endpoints, 12 per task.
 - `hunt-hypothesis`: one per Planner hypothesis, ranked in the Planner's order.
-- `hunt-file`: up to 6 security-sensitive files (auth, session, permission, billing, upload, …) not otherwise
-  targeted.
-- `triage-signals` (Quick only): medium-or-higher `vulnerability` hits, 12 per task.
+- `hunt-file`: up to 6 security-sensitive files (auth, session, config, settings, cookie, billing, upload, …) not
+  otherwise targeted. Deep/Research then append lowest-priority sweeps of remaining source files, 4 per task,
+  only within spare task capacity. Sweeps prefer production files, then sensitive names, then larger files.
+- `triage-signals` (Quick only): medium-or-higher `vulnerability` hits, 12 per task. Quick fills remaining slots
+  with endpoint groups, prioritizing unguarded mutating endpoints, without raising its task or call caps.
 
 Test and fixture files are left out unless `includeTests` is on. Candidates are sorted by priority and cut at the
-mode's `maxTasks`. The number left over is reported as a notice.
+mode's `maxTasks`; Quick always puts triage first. The number left over is reported as a notice. Unguarded mutating
+routes and GET routes with `admin`, `internal` or `debug` path segments emit non-reportable `sink` observations:
+these increase endpoint priority and appear as hunter steering context, never as deterministic findings.
 
 **Workers** (`agents/runtime/worker.ts`) are short-lived tool-calling loops:
 

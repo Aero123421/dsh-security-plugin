@@ -15,6 +15,7 @@ import { runSemgrep } from '../analysis/external/semgrep.ts'
 import { buildInventory } from '../analysis/inventory.ts'
 import { queryOsv } from '../analysis/osv.ts'
 import { extractRoutes } from '../analysis/routes/index.ts'
+import { routeSignals } from '../analysis/routes/signals.ts'
 import { runSast } from '../analysis/sast/engine.ts'
 import { Redactor, redactKnownSecrets, scanSecrets, secretSignals } from '../analysis/secrets.ts'
 import { takeSnapshot } from '../analysis/snapshot.ts'
@@ -144,6 +145,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   step('routes')
   const routes = await extractRoutes(snapshot, { ...(options.astGrep ? { astGrep: options.astGrep } : {}), signal })
   endpoints = routes.endpoints
+  signals.push(...routeSignals(endpoints, snapshot))
   warnings.push(...routes.warnings.slice(0, 20))
   analyzers.push({ id: 'routes', available: true, source: 'builtin' })
 

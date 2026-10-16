@@ -1,4 +1,4 @@
-import { cp, rm, writeFile } from 'node:fs/promises'
+import { cp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { loadAstGrep } from '../../../src/host/analysis/astgrep.ts'
@@ -322,7 +322,34 @@ describe('new findings across scans', () => {
 })
 
 describe('quick scan', () => {
-  it('only triages rule hits: no planner and no reviewer', async () => {
+  it('reviews endpoints in a rule-clean Flask fixture copy and receives route steering sinks', async () => {
+    const copy = await copyFixture('flask-secure')
+    try {
+      // Cookie rules now detect the planted config issue. Harden only this temporary
+      // copy so the regression still proves Quick reviews endpoints with zero rule hits.
+      const configPath = join(copy.root, 'app/config.py')
+      const config = await readFile(configPath, 'utf8')
+      expect(config).toContain('SESSION_COOKIE_SECURE = False')
+      await writeFile(configPath, config.replace('SESSION_COOKIE_SECURE = False', 'SESSION_COOKIE_SECURE = True'))
+      const llm = await oracleLlm()
+      const h = createHarness({ llm, workspaces: [workspace(copy.root)], settings: AI_SETTINGS })
+      const id = await runScan(h, { mode: 'quick' })
+      const scan = h.store.getScan(id)
+      expect(scan?.status).toBe('completed')
+      const tasks = h.store.listTasks(id)
+      expect(tasks.length).toBeGreaterThan(0)
+      expect(tasks.length).toBeLessThanOrEqual(scan?.budget.maxTasks ?? 0)
+      expect(tasks.every(t => t.kind === 'hunt-endpoints' && t.status === 'done')).toBe(true)
+      const prompts = JSON.stringify(llm.calls)
+      expect(prompts).toContain('routes.unguarded')
+      expect(prompts).toContain('Review steering observations (not findings;')
+      expect(h.store.listFindings(id).every(f => f.source === 'ai')).toBe(true)
+    } finally {
+      await copy.cleanup()
+    }
+  })
+
+  it('triages rule hits and fills spare slots with endpoints: no planner and no reviewer', async () => {
     const llm = await oracleLlm()
     const h = createHarness({ llm, workspaces: [workspace()], settings: AI_SETTINGS })
     const id = await runScan(h, { mode: 'quick' })
@@ -335,7 +362,10 @@ describe('quick scan', () => {
     const tasks = h.store.listTasks(id)
     expect(tasks.length).toBeGreaterThan(0)
     expect(tasks.length).toBeLessThanOrEqual(scan?.budget.maxTasks ?? 0)
-    expect(tasks.every(t => t.kind === 'triage-signals' && t.status === 'done')).toBe(true)
+    expect(tasks.every(t => ['triage-signals', 'hunt-endpoints'].includes(t.kind) && t.status === 'done')).toBe(true)
+    expect(tasks.some(t => t.kind === 'triage-signals')).toBe(true)
+    expect(tasks.some(t => t.kind === 'hunt-endpoints')).toBe(true)
+    expect(scan?.usage.llmCalls).toBeLessThanOrEqual(scan?.budget.maxLlmCalls ?? 0)
     const sql = byLocation(h.store.listFindings(id), 'src/routes/products.ts', 27)
     // Enriched by the hunter but not independently reviewed.
     expect(sql).toMatchObject({ title: 'SQL injection in product search', verification: 'potential' })
