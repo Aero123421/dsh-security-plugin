@@ -23,9 +23,6 @@ importers:
       '@deepseek-ai/dsh-workspace':
         specifier: 0.2.1-alpha.2
         version: 0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)(@deepseek-ai/dsh-typert-protocol@0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1))
-      '@testing-library/react':
-        specifier: 16.3.3
-        version: 16.3.3(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5
@@ -42,8 +39,8 @@ importers:
         specifier: 0.28.2
         version: 0.28.2
       happy-dom:
-        specifier: 21.0.1
-        version: 21.0.1
+        specifier: 21.0.3
+        version: 21.0.3
       ignore:
         specifier: 7.0.12
         version: 7.0.12
@@ -58,7 +55,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: 4.1.11
-        version: 4.1.11(@types/node@22.20.5)(@vitest/coverage-v8@4.1.11)(esbuild@0.28.2)(happy-dom@21.0.1)(yaml@2.9.1)
+        version: 4.1.11(@types/node@22.20.5)(@vitest/coverage-v8@4.1.11)(esbuild@0.28.2)(happy-dom@21.0.3)(yaml@2.9.1)
       yaml:
         specifier: 2.9.1
         version: 2.9.1
@@ -142,10 +139,6 @@ packages:
     resolution: {integrity: sha512-CjXrNHTnvqBVqHgdBysY3vk2T8tpJHb5/RMeHJBTyVa9xgugCB0CJTx/3oO8RV2QRQP391RWpB7D6hLjm8V9uA==}
     engines: {node: '>=6.0.0'}
     hasBin: true
-
-  '@babel/runtime@7.29.10':
-    resolution: {integrity: sha512-NpugTzbKgGrNe45Ui32cN8vCFFMxVtP/9rtfwv0nP5FRDAjvYBxJcLVpYA9mr1jxP6cnIT7x9LUzuDTbWYYNRA==}
-    engines: {node: '>=6.9.0'}
 
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
@@ -542,21 +535,6 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@testing-library/react@16.3.3':
-    resolution: {integrity: sha512-Uo193NgQbPMz6lrrhtRQQFcMC6Re/ELLFbbuVL30WDlZxlpZf9/lMHTAVxPRLw1q1iu9OJmR1c2BLiENRstdBg==}
-    engines: {node: '>=18'}
-    peerDependencies:
-      '@testing-library/dom': ^10.0.0
-      '@types/react': ^18.0.0 || ^19.0.0
-      '@types/react-dom': ^18.0.0 || ^19.0.0
-      react: ^18.0.0 || ^19.0.0
-      react-dom: ^18.0.0 || ^19.0.0
-    peerDependenciesMeta:
-      '@types/react':
-        optional: true
-      '@types/react-dom':
-        optional: true
-
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
 
@@ -682,8 +660,8 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
-  happy-dom@21.0.1:
-    resolution: {integrity: sha512-pRBs/u9fhrncyByOl58DMex0R2uAj6ZPKWIjV5j5yNGZBqLw3P6BTRhlc0DD5b/Ht4/6JYTMuE2LJhUWRC6SGw==}
+  happy-dom@21.0.3:
+    resolution: {integrity: sha512-PesNgu5BnIEmAwzKGewB3K1ORFeznFZJ4JrRz89ea1wkHnxskdpzX9sN/+zb4KO6k8oSMhyJSj/cwXAFrYBBNA==}
     engines: {node: '>=20.0.0'}
 
   has-flag@4.0.0:
@@ -1046,8 +1024,6 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.8
 
-  '@babel/runtime@7.29.10': {}
-
   '@babel/types@7.29.8':
     dependencies:
       '@babel/helper-string-parser': 7.29.7
@@ -1291,15 +1267,6 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@testing-library/react@16.3.3(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
-    dependencies:
-      '@babel/runtime': 7.29.10
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
-    optionalDependencies:
-      '@types/react': 18.3.31
-      '@types/react-dom': 18.3.7(@types/react@18.3.31)
-
   '@types/chai@5.2.3':
     dependencies:
       '@types/deep-eql': 4.0.2
@@ -1342,7 +1309,7 @@ snapshots:
       obug: 2.2.1
       std-env: 4.3.0
       tinyrainbow: 3.2.0
-      vitest: 4.1.11(@types/node@22.20.5)(@vitest/coverage-v8@4.1.11)(esbuild@0.28.2)(happy-dom@21.0.1)(yaml@2.9.1)
+      vitest: 4.1.11(@types/node@22.20.5)(@vitest/coverage-v8@4.1.11)(esbuild@0.28.2)(happy-dom@21.0.3)(yaml@2.9.1)
 
   '@vitest/expect@4.1.11':
     dependencies:
@@ -1451,7 +1418,7 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  happy-dom@21.0.1:
+  happy-dom@21.0.3:
     dependencies:
       '@types/node': 22.20.5
       '@types/whatwg-mimetype': 3.0.2
@@ -1647,7 +1614,7 @@ snapshots:
       fsevents: 2.3.3
       yaml: 2.9.1
 
-  vitest@4.1.11(@types/node@22.20.5)(@vitest/coverage-v8@4.1.11)(esbuild@0.28.2)(happy-dom@21.0.1)(yaml@2.9.1):
+  vitest@4.1.11(@types/node@22.20.5)(@vitest/coverage-v8@4.1.11)(esbuild@0.28.2)(happy-dom@21.0.3)(yaml@2.9.1):
     dependencies:
       '@vitest/expect': 4.1.11
       '@vitest/mocker': 4.1.11(vite@8.3.4(@types/node@22.20.5)(esbuild@0.28.2)(yaml@2.9.1))
@@ -1672,7 +1639,7 @@ snapshots:
     optionalDependencies:
       '@types/node': 22.20.5
       '@vitest/coverage-v8': 4.1.11(vitest@4.1.11)
-      happy-dom: 21.0.1
+      happy-dom: 21.0.3
     transitivePeerDependencies:
       - '@vitejs/devtools'
       - esbuild
