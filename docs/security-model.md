@@ -127,19 +127,34 @@ the provider the user chose. The next section covers how that content is reduced
 ## Evidence integrity
 
 - Every model citation is verified against the same redacted text the tools served (`evidence/quote.ts`). An AI
-  finding with no verified step is discarded. The count of discarded findings is shown under Coverage, so a model
-  that invents code is visible.
+  finding with no verified **code** step is discarded; its key step must also be code. The count of discarded findings
+  is shown under Coverage, so a model that invents code is visible.
 - **"Verified" means the location holds the quote.** The stored location and snippet are the lines the quote
   occupies, not the cited range. A citation much wider than its quote is rejected, and a quote that occurs more than
   once in a loose cited range is ambiguous, so citing "the whole file" cannot verify anything.
 - **Suppression needs proof.** A Skeptic `refuted` verdict needs at least one verified counter-evidence quote of
-  code, or the host downgrades it to `inconclusive`. Quotes that are only comments, docstrings or documentation
-  (`// input sanitized upstream`) never count. A Hunter cannot rule out a rule hit on its own: without a following
-  review, its verified defense makes the hit `inconclusive` at most. A manipulated model can make a finding look
+  code, or the host downgrades it to `inconclusive`. Comments, documentation, literal-only prose (including assigned
+  strings), and punctuation alone never count as code. For mixed citations, an identifier or number must remain
+  outside comments and literals, and the remaining code must contribute at least as many non-whitespace characters
+  as the comments. Literal contents count toward neither side: `if (x === "admin")` remains code. A long defensive
+  comment padded with a short sink is therefore non-code evidence; a code-led guard with a short explanatory comment
+  is accepted. This is a lexical gate, not proof that the cited code actually defends the path; the independent
+  reviewer must still assess that. Nested block comments are tracked in Rust, Swift, Kotlin, Scala, and Haskell.
+  The optional stored `commentOnly` flag denotes all these non-code cases; old steps without it remain readable.
+  A Hunter cannot rule out a rule hit on its own: without a following review, its verified defense makes the hit
+  `inconclusive` at most. A manipulated model can make a finding look
   *less* certain, but it cannot make a rule hit disappear without an independent reviewer quoting real code.
-- **Confirmation needs proof too.** `confirmed` without any verified step on the attack path becomes
-  `inconclusive`. A severity change needs a confirmed verdict with verified supporting code and lowers a
+- **Confirmation needs proof too.** `confirmed` without any verified code on the attack path or in reviewer support
+  becomes `inconclusive`. A severity change needs a confirmed verdict with verified supporting code and lowers a
   deterministic critical/high rule hit by one level at most.
+- **Stable identities without hiding adjacent issues.** Hunter fingerprints use the exact verified redacted quote,
+  not model-supplied `N|` prefixes or cited line numbers. Location-based hunter deduplication requires intersecting
+  ranges in the same file and the same category or CWE, not proximity alone. Triage applies through primary and
+  merged fingerprints; the most recent decision wins, with conflicting equal-time decisions failing open.
+- Identical SAST expressions in one file receive occurrence suffixes only when more than one exists, after matcher
+  deduplication and in file order. Single-occurrence identities remain line-independent. Inserting/removing an
+  identical sink can renumber occurrences or return a survivor to its singleton identity. Such identity changes
+  deliberately do not transfer triage: the survivor may need re-triage rather than inherit another sink's dismissal.
 - Rule findings come from deterministic code and are recorded before any AI phase runs. The AI cannot delete them.
 - Ruled-out findings stay in the store and reports (as SARIF suppressions with a justification), so a reviewer can
   audit every dismissal. Transcripts are kept by default for the same reason.

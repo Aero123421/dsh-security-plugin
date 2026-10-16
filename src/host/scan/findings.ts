@@ -76,7 +76,7 @@ function signalLimitations(signal: Signal): string[] {
 
 /**
  * Merge generic secret hits only when a specific credential rule covers the
- * same sensitive span. Never use the hunter's ±3-line overlap heuristic here:
+ * same sensitive span. Never use the hunter's range-overlap heuristic here:
  * adjacent credentials and unrelated findings must remain independent.
  */
 function signalGroups(signals: readonly Signal[]): { primary: Signal; duplicates: Signal[] }[] {
@@ -217,7 +217,7 @@ export interface HunterRecordResult {
 }
 
 /**
- * Persist a hunter's verified output. Findings without any verified quote are
+ * Persist a hunter's verified output. Findings without any verified code quote are
  * discarded. A `false_positive` verdict on a rule hit never refutes it: the
  * cited defense is attached as counter-evidence and, when no reviewer will
  * follow and the defense is verified code (not only comments), the finding
@@ -235,7 +235,7 @@ export function recordHunterOutput(
   let disputed = 0
   store.transaction(() => {
     for (const finding of output.findings) {
-      const verifiedSteps = finding.attackPath.filter(step => isQuoteVerified(step.quoteCheck))
+      const verifiedSteps = finding.attackPath.filter(isVerifiedCode)
       const key = keyStep(finding.attackPath)
       if (verifiedSteps.length === 0 || !key?.location) {
         discarded++
@@ -337,7 +337,7 @@ export function recordHunterOutput(
 
 /**
  * Apply an independent review. Refutation needs verified counter-evidence
- * that is code, not only comments; confirmation needs a verified step. A
+ * that is code, not only comments; confirmation needs verified code. A
  * severity correction applies only to a confirmed verdict with verified
  * supporting code, and lowers a deterministic critical/high rule hit by at
  * most one level; the original severity is noted in the review reasoning.
@@ -359,15 +359,13 @@ export function applySkepticOutput(
     const supportIds = insertCitations(store, ctx, 'skeptic', 'source_span', output.supporting)
     const counterVerified = output.counterevidence.some(isVerifiedCode)
     const supportVerified = output.supporting.some(isVerifiedCode)
-    const pathVerified =
-      finding.attackPath.some(step => isQuoteVerified(step.quoteCheck)) ||
-      output.supporting.some(c => isQuoteVerified(c.quoteCheck))
+    const pathVerified = finding.attackPath.some(isVerifiedCode) || supportVerified
     let verdict = output.verdict
     let reasoning = output.reasoning
     if (verdict === 'refuted' && !counterVerified) {
       verdict = 'inconclusive'
       reasoning = output.counterevidence.some(c => isQuoteVerified(c.quoteCheck))
-        ? `${reasoning}\n\n[Host] The reviewer's matching counter-evidence is only comments or documentation, which do not prove a defense, so the finding stays open.`
+        ? `${reasoning}\n\n[Host] The reviewer's matching counter-evidence is non-code evidence (comments, literal text, punctuation, or comment-led excerpts), which does not prove a defense, so the finding stays open.`
         : `${reasoning}\n\n[Host] The reviewer claimed a defense but none of its quotes matched the source, so the finding stays open.`
     }
     if (verdict === 'confirmed' && !pathVerified) {
@@ -429,7 +427,7 @@ export function recordChains(
         ...new Set(chain.findingIds.map(id => ids.get(id.trim().toUpperCase())).filter(f => f !== undefined)),
       ]
       const key = keyStep(chain.attackPath)
-      if (parts.length < 2 || !key?.location || !chain.attackPath.some(s => isQuoteVerified(s.quoteCheck))) {
+      if (parts.length < 2 || !key?.location || !chain.attackPath.some(isVerifiedCode)) {
         discarded++
         continue
       }
@@ -519,11 +517,11 @@ function reviewedSeverity(
   }
 }
 
-/** The step that best identifies the issue: the last verified one (usually the sink). */
+/** The step that best identifies the issue: the last verified code step (usually the sink). */
 function keyStep(steps: readonly VerifiedCitation[]): VerifiedCitation | undefined {
   for (let i = steps.length - 1; i >= 0; i--) {
     const step = steps[i]
-    if (step && isQuoteVerified(step.quoteCheck) && step.location) return step
+    if (step && isVerifiedCode(step) && step.location) return step
   }
   return undefined
 }
@@ -536,6 +534,7 @@ function toSteps(steps: readonly VerifiedCitation[]): AttackStepRecord[] {
     quote: clip(step.quote, 1200),
     ...(step.snippet ? { snippet: step.snippet } : {}),
     quoteCheck: step.quoteCheck,
+    ...(step.commentOnly ? { commentOnly: true } : {}),
   }))
 }
 
@@ -592,7 +591,8 @@ function overlapping(
       f.location.path === location.path &&
       f.source !== 'dependency' &&
       f.source !== 'secret' &&
-      Math.abs(f.location.startLine - location.startLine) <= 3 &&
+      f.location.startLine <= location.endLine &&
+      location.startLine <= f.location.endLine &&
       (f.category === category || (cwe !== undefined && f.cwe === cwe)),
   )
 }

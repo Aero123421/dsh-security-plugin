@@ -187,6 +187,8 @@ export interface AttackStepRecord {
   readonly quote?: string
   readonly snippet?: string
   readonly quoteCheck: QuoteCheck
+  /** Matching prose/literal/punctuation evidence, not verified code; absent in older rows. */
+  readonly commentOnly?: boolean
 }
 
 export interface FindingReview {

@@ -70,15 +70,15 @@ export interface VerifiedCitation {
   readonly quote: string
   readonly snippet?: string
   readonly quoteCheck: QuoteCheck
-  /** The verified quote is only comments, docstrings, or documentation prose. */
+  /** The matching quote is non-code evidence (prose, literal text, punctuation, or comment-led). */
   readonly commentOnly?: boolean
   readonly reason?: string
 }
 
 /**
  * Whether a citation proves something about code: its quote was verified and
- * is not only comments or documentation. Comment-only quotes may be shown as
- * context but never count as counter-evidence.
+ * passes the lexical code gate. Non-code quotes may be shown as context but
+ * never count as attack-path proof or counter-evidence.
  */
 export function isVerifiedCode(citation: Pick<VerifiedCitation, 'quoteCheck' | 'commentOnly'>): boolean {
   return isQuoteVerified(citation.quoteCheck) && citation.commentOnly !== true
@@ -95,7 +95,7 @@ export function verifyCitation(source: QuoteSource, citation: Citation): Verifie
   const result = verifyQuote(source, { path, startLine, endLine, quote: citation.quote })
   const verified: VerifiedCitation = {
     description: citation.description,
-    quote: citation.quote,
+    quote: result.quote ?? citation.quote,
     quoteCheck: result.check,
     ...(result.location ? { location: result.location } : {}),
     ...(result.snippet ? { snippet: result.snippet } : {}),
@@ -123,7 +123,7 @@ export function describeMismatches(
   return lines
 }
 
-/** Human-readable list of verified citations that quote only comments or documentation, for a retry message. */
+/** Human-readable list of matching non-code citations, for a retry message. */
 export function describeCommentOnly(
   label: string,
   items: readonly VerifiedCitation[],
@@ -134,7 +134,7 @@ export function describeCommentOnly(
     const cited = original[index]
     if (!cited || !isQuoteVerified(item.quoteCheck) || item.commentOnly !== true) return
     lines.push(
-      `- ${label} ${index + 1}: ${cited.path}:${cited.start_line}-${cited.end_line} — only comments or documentation, not code`,
+      `- ${label} ${index + 1}: ${cited.path}:${cited.start_line}-${cited.end_line} — non-code evidence (comments, literal text, punctuation, or comment-led excerpt)`,
     )
   })
   return lines

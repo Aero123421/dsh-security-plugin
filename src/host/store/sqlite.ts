@@ -215,7 +215,16 @@ const SQL = {
   deleteFinding: 'DELETE FROM findings WHERE id = ?',
   countOpenFindings: `SELECT f.severity AS severity, f.verification AS verification, COUNT(*) AS n
     FROM findings f
-    LEFT JOIN triage t ON t.root_key_base = ?2 AND t.fingerprint = f.fingerprint
+    LEFT JOIN triage t ON t.root_key_base = ?2 AND t.fingerprint = (
+      SELECT candidate.fingerprint FROM triage candidate
+      WHERE candidate.root_key_base = ?2 AND (
+        candidate.fingerprint = f.fingerprint OR candidate.fingerprint IN (
+          SELECT value FROM json_each(f.data, '$.mergedFingerprints')
+        )
+      )
+      ORDER BY candidate.updated_at DESC, (candidate.state = 'open') DESC, candidate.fingerprint ASC
+      LIMIT 1
+    )
     WHERE f.scan_id = ?1 AND f.verification <> 'refuted' AND (t.state IS NULL OR t.state = 'open')
     GROUP BY f.severity, f.verification`,
 

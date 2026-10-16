@@ -17,6 +17,13 @@ changes; they are called out explicitly.
   200 rows with a Show more button, and reuse search fields and unchanged rows.
 - New Scan explains that AI code-sharing consent is saved for future scans until disabled in Settings. Failed
   scan creation best-effort restores consent enabled by that attempt without overwriting newer settings.
+- Evidence gates reject comment-led mixed citations, string-literal prose, nested-comment text, and punctuation
+  alone as verified code. New AI findings and confirmation upgrades require real code evidence; stored supporting
+  steps retain their non-code classification. Code-led citations containing strings or explanatory comments still work.
+- Finding identities use verified source quotes without tool line numbers. Hunter deduplication requires intersecting
+  ranges, keeping adjacent vulnerabilities separate. Identical SAST sinks receive distinct occurrence identities;
+  adding/removing identical sinks may require re-triage rather than hiding a surviving issue.
+- Triage follows primary and merged fingerprints across scans in finding lists, details, reports, and open counts.
 
 ## [0.2.1] - 2026-10-16
 

@@ -357,7 +357,7 @@ describe('recordHunterOutput', () => {
       cwe: 'CWE-89',
       severity: 'medium',
       title: 'SQL injection',
-      location: { path: 'src/routes/products.ts', startLine: 27, endLine: 27 },
+      location: { path: 'src/routes/products.ts', startLine: 27, endLine: 29 },
       attackPath: [{ order: 1, description: 'rule hit', quoteCheck: 'match' }],
       limitations: ['Found by a pattern rule; the full data flow has not been traced unless an AI review is attached.'],
       supportEvidenceIds: ['ev-rule'],
@@ -622,7 +622,7 @@ describe('applySkepticOutput', () => {
     )
     expect(updated.verification).toBe('inconclusive')
     expect(updated.review?.verdict).toBe('inconclusive')
-    expect(updated.review?.reasoning).toMatch(/\[Host\] The reviewer's matching counter-evidence is only comments/)
+    expect(updated.review?.reasoning).toMatch(/\[Host\] The reviewer's matching counter-evidence is non-code evidence/)
     expect(store.getEvidence(SCAN, updated.counterEvidenceIds)[0]).toMatchObject({ quoteCheck: 'match' })
 
     // One verified code quote next to the comment is enough.

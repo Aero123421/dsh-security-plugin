@@ -32,7 +32,7 @@ import { buildInventory } from './analysis/inventory.ts'
 import { extractRoutes } from './analysis/routes/index.ts'
 import { ToolkitError, type Toolkit } from './analysis/toolkit.ts'
 import { type Config, operatorLimits } from './config.ts'
-import type { EvidenceRecord, FindingRecord, ScanRecord } from './core/model.ts'
+import type { EvidenceRecord, FindingRecord, ScanRecord, TriageRecord } from './core/model.ts'
 import type { LlmPort, LoggerPort, WorkspaceRegistryPort } from './dsh/ports.ts'
 import { renderReport } from './report/index.ts'
 import { RpcError } from './rpc/errors.ts'
@@ -198,13 +198,16 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     const findings = store.listFindings(scan.id)
     const triage = store.getTriage(
       scan.workspaceRoot,
-      findings.map(f => f.fingerprint),
+      findings.flatMap(f => [f.fingerprint, ...f.mergedFingerprints]),
     )
-    return findings.map(f => toSummary(f, triage.get(f.fingerprint)?.state ?? 'open'))
+    return findings.map(f => toSummary(f, triageFor(f, triage)?.state ?? 'open'))
   }
 
   const findingDetail = (scan: ScanRecord, finding: FindingRecord): FindingDetail => {
-    const triage = store.getTriage(scan.workspaceRoot, [finding.fingerprint]).get(finding.fingerprint)
+    const triage = triageFor(
+      finding,
+      store.getTriage(scan.workspaceRoot, [finding.fingerprint, ...finding.mergedFingerprints]),
+    )
     const evidence = store.getEvidence(scan.id, finding.supportEvidenceIds).map(toEvidenceView)
     const counter = store.getEvidence(scan.id, finding.counterEvidenceIds).map(toEvidenceView)
     return {
@@ -445,8 +448,13 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     async setTriage(payload) {
       const scan = requireScan(payload.scanId)
       const finding = requireFinding(scan, payload.findingId)
-      const record = store.setTriage(scan.workspaceRoot, finding.fingerprint, payload.triage, payload.note)
-      return toSummary(finding, record.state)
+      // Write all aliases so either representation keeps triage after a merge-status flip.
+      store.transaction(() => {
+        for (const fingerprint of new Set([finding.fingerprint, ...finding.mergedFingerprints])) {
+          store.setTriage(scan.workspaceRoot, fingerprint, payload.triage, payload.note)
+        }
+      })
+      return toSummary(finding, payload.triage)
     },
 
     async getFixPrompt(payload) {
@@ -528,6 +536,19 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
 // ---------------------------------------------------------------------------
 // Projections
 // ---------------------------------------------------------------------------
+
+/** Latest decision on any alias wins; equal-time conflicts fail open. Keep SQL counts in sync. */
+function triageFor(finding: FindingRecord, records: ReadonlyMap<string, TriageRecord>): TriageRecord | undefined {
+  return [finding.fingerprint, ...finding.mergedFingerprints]
+    .map(fp => records.get(fp))
+    .filter((record): record is TriageRecord => record !== undefined)
+    .sort(
+      (a, b) =>
+        b.updatedAt.localeCompare(a.updatedAt) ||
+        Number(b.state === 'open') - Number(a.state === 'open') ||
+        a.fingerprint.localeCompare(b.fingerprint),
+    )[0]
+}
 
 function toSummary(finding: FindingRecord, triage: TriageState): FindingSummary {
   return {
