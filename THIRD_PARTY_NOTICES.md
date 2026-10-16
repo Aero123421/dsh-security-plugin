@@ -105,8 +105,8 @@ code is not part of this package.
 
 | Tool | Pinned version | License |
 | --- | --- | --- |
-| [Gitleaks](https://github.com/gitleaks/gitleaks) | 8.28.0 | MIT |
-| [OSV-Scanner](https://github.com/google/osv-scanner) | 2.2.2 | Apache-2.0 |
+| [Gitleaks](https://github.com/gitleaks/gitleaks) | 8.30.1 | MIT |
+| [OSV-Scanner](https://github.com/google/osv-scanner) | 2.7.0 | Apache-2.0 |
 
 ## Tools used only if the user installs them
 

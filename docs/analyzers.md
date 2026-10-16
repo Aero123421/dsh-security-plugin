@@ -212,7 +212,7 @@ Builtin and external results for the same location and category are de-duplicate
 - **From the UI.** Settings → *Analyzers* shows each tool's status and license. For Gitleaks and OSV-Scanner, when
   this release pins a SHA-256 for your platform and the operator allows it (`allowManagedToolkit`), tick the
   license checkbox and press *Install*. The download is verified against `toolkit.lock.json` before it is
-  installed. Pinned versions: Gitleaks 8.28.0 (linux/darwin x64+arm64, win32 x64) and OSV-Scanner 2.2.2
+  installed. Pinned versions: Gitleaks 8.30.1 (linux/darwin x64+arm64, win32 x64) and OSV-Scanner 2.7.0
   (linux/darwin x64+arm64, win32 x64+arm64).
 - **Manually** (any platform, or when no pin is available), then make sure the binary is on the `PATH` of the DSH
   Host process:
