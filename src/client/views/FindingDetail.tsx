@@ -289,7 +289,7 @@ function RecheckSection(props: { readonly scan: ScanSummary }) {
   const [busy, setBusy] = useState(false)
   const run = async () => {
     setBusy(true)
-    await controller.quickRescan(props.scan.workspaceId)
+    await controller.quickRescan(props.scan.workspaceId, props.scan.subpath)
     setBusy(false)
   }
   return (

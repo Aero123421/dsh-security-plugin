@@ -7,6 +7,22 @@ DSH Security has two layers of configuration:
 | **Operator config** | Whoever runs DSH | The profile's `cordis.patch.yml` (`id: dsh-security` row) | Ceilings, paths, and what remote pages may enable. Read once when the plugin starts. |
 | **User settings** | Anyone who can open the DSH Web UI | Security page → *Settings* tab, or DSH Settings → Security | Models, scan preferences, budgets, privacy switches, storage, language. Stored in `security.db` and always clamped to the operator ceilings. |
 
+## Scan a subfolder
+
+In **New scan**, set **Subfolder** to a POSIX-style relative path such as `packages/app`, or leave it empty
+for the whole project. The folder must already exist inside the registered DSH project; absolute paths, `..`,
+empty path segments and symlinks that escape the project are rejected for estimates and scans alike.
+File paths and privacy/exclusion patterns remain workspace-relative. Workers see only files in the selected
+folder. History labels identify the scope, and “new” findings compare only with the last completed scan of that
+same folder. Triage is shared across subfolder and whole-project scans. History and triage follow the canonical
+project path, not DSH's workspace id; moving a project to a different path starts a separate history.
+Reusing the same canonical path for a different project shares the old history and triage. History rows can be
+deleted in the History tab, but deleting scans does **not** clear triage. For an isolated identity, use a different
+canonical folder path. There is no per-project triage reset control; to reset all Security data, stop DSH, back up
+`$DSH_HOME/security/security.db` (or the configured data directory), and remove the database together with any
+`security.db-wal` / `security.db-shm` sidecars before restarting. This also removes every project's history and
+triage and resets all Security user settings, including models and consent.
+
 ## Operator config
 
 Source: `src/host/config.ts`. Unknown keys are ignored. Invalid values (wrong type, out of range) stop the plugin

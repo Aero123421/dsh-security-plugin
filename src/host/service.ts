@@ -6,6 +6,7 @@
  * reasons, warnings, event messages) is path-masked when projected.
  */
 
+import { realpathSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import type {
   AnalyzerStatus,
@@ -35,6 +36,7 @@ import type { LlmPort, LoggerPort, WorkspaceRegistryPort } from './dsh/ports.ts'
 import { renderReport } from './report/index.ts'
 import { RpcError } from './rpc/errors.ts'
 import type { RpcHandlers } from './rpc/server.ts'
+import { resolveScanRoot } from './scan/root.ts'
 import { snapshotWorkspace } from './scan/analysis.ts'
 import type { ScanController } from './scan/controller.ts'
 import { endpointPath, planHuntTasks } from './scan/planning.ts'
@@ -67,6 +69,22 @@ const MODEL_INFO_TIMEOUT_MS = 5_000
 
 export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const { store, settings, controller } = deps
+  const reconciledTriage = new Map<string, string>()
+  const reconcileTriage = (): void => {
+    for (const workspace of deps.workspaces()?.list() ?? []) {
+      if (reconciledTriage.get(workspace.id) === workspace.path) continue
+      let root: string
+      try {
+        root = realpathSync(workspace.path)
+      } catch {
+        continue
+      }
+      store.reconcileTriageRoot(workspace.id, root)
+      reconciledTriage.set(workspace.id, workspace.path)
+    }
+  }
+  // Registry services can appear after this plugin starts; read paths retry lazily.
+  reconcileTriage()
   const maskPaths = (): PathMasker => hostPathMasker(deps)
   /** The request's signal, also aborted when the plugin unloads. */
   const workSignal = (call: { readonly signal: AbortSignal }): AbortSignal =>
@@ -76,6 +94,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const scanMask = (scan: ScanRecord): PathMasker => hostPathMasker(deps, [scan.workspaceRoot])
 
   const requireScan = (scanId: string): ScanRecord => {
+    reconcileTriage()
     const scan = store.getScan(scanId)
     if (!scan) throw new RpcError('security/not-found', 'Scan not found.', { scanId })
     return scan
@@ -88,11 +107,18 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
   }
 
   const summary = (scan: ScanRecord): ScanSummary => {
-    const { counts, confirmed } = store.countOpenFindings(scan.id, scan.workspaceId)
+    reconcileTriage()
+    const { counts, confirmed } = store.countOpenFindings(scan.id, scan.workspaceRoot)
+    // Project-facing actions must use the current registration, not an orphaned UUID.
+    const current = deps
+      .workspaces()
+      ?.list()
+      .find(w => canonicalPath(w.path) === canonicalPath(scan.workspaceRoot))
     return {
       id: scan.id,
-      workspaceId: scan.workspaceId,
+      workspaceId: current?.id ?? scan.workspaceId,
       workspaceTitle: scan.workspaceTitle,
+      ...(scan.subpath ? { subpath: scan.subpath } : {}),
       mode: scan.mode,
       status: scan.status,
       phase: scan.phase,
@@ -170,14 +196,14 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const findingSummaries = (scan: ScanRecord): FindingSummary[] => {
     const findings = store.listFindings(scan.id)
     const triage = store.getTriage(
-      scan.workspaceId,
+      scan.workspaceRoot,
       findings.map(f => f.fingerprint),
     )
     return findings.map(f => toSummary(f, triage.get(f.fingerprint)?.state ?? 'open'))
   }
 
   const findingDetail = (scan: ScanRecord, finding: FindingRecord): FindingDetail => {
-    const triage = store.getTriage(scan.workspaceId, [finding.fingerprint]).get(finding.fingerprint)
+    const triage = store.getTriage(scan.workspaceRoot, [finding.fingerprint]).get(finding.fingerprint)
     const evidence = store.getEvidence(scan.id, finding.supportEvidenceIds).map(toEvidenceView)
     const counter = store.getEvidence(scan.id, finding.counterEvidenceIds).map(toEvidenceView)
     return {
@@ -253,7 +279,11 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
       const registry = deps.workspaces()
       if (!registry) return []
       return registry.list().map((workspace): WorkspaceSummary => {
-        const last = store.listScans({ workspaceId: workspace.id, limit: 1 })[0]
+        const last = store.listScans({
+          workspaceId: workspace.id,
+          workspaceRoot: canonicalPath(workspace.path),
+          limit: 1,
+        })[0]
         return {
           id: workspace.id,
           title: workspace.title,
@@ -314,12 +344,15 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
       const registry = deps.workspaces()
       const workspace = registry?.get(payload.workspaceId)
       if (!workspace) throw new RpcError('security/not-found', 'That project is no longer registered in DSH.', {})
+      const scope = await resolveScanRoot(workspace, payload.subpath)
       const { settings: current } = settings.get()
       const signal = workSignal(call)
-      const snapshot = await snapshotWorkspace(workspace.path, current, deps.config, signal).catch(error => {
-        deps.logger.warn('dsh-security: estimate failed', error)
-        throw new RpcError('security/workspace-unavailable', 'The project folder cannot be read.', {})
-      })
+      const snapshot = await snapshotWorkspace(scope.root, current, deps.config, signal, scope.workspaceRoot).catch(
+        error => {
+          deps.logger.warn('dsh-security: estimate failed', error)
+          throw new RpcError('security/workspace-unavailable', 'The project folder cannot be read.', {})
+        },
+      )
       const inventory = buildInventory(snapshot)
       const astGrep = await deps.astGrep()
       const { endpoints } = await extractRoutes(snapshot, { ...(astGrep ? { astGrep } : {}), signal })
@@ -363,7 +396,12 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     async listScans(payload) {
       return store
         .listScans({
-          ...(payload.workspaceId ? { workspaceId: payload.workspaceId } : {}),
+          ...(payload.workspaceId
+            ? {
+                workspaceId: payload.workspaceId,
+                workspaceRoot: canonicalPath(deps.workspaces()?.get(payload.workspaceId)?.path),
+              }
+            : {}),
           limit: Math.min(payload.limit ?? 50, 500),
         })
         .map(summary)
@@ -403,7 +441,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     async setTriage(payload) {
       const scan = requireScan(payload.scanId)
       const finding = requireFinding(scan, payload.findingId)
-      const record = store.setTriage(scan.workspaceId, finding.fingerprint, payload.triage, payload.note)
+      const record = store.setTriage(scan.workspaceRoot, finding.fingerprint, payload.triage, payload.note)
       return toSummary(finding, record.state)
     },
 
@@ -604,3 +642,13 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 export type { ToolkitEntry }
+
+/** History remains available when the project is temporarily offline. */
+function canonicalPath(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined
+  try {
+    return realpathSync(path)
+  } catch {
+    return path
+  }
+}

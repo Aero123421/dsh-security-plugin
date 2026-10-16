@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open, readdir, realpath, stat } from 'node:fs/promises'
-import { isAbsolute, join, resolve, sep } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import ignore from 'ignore'
 import { DEPENDENCY_FILE_MAX_BYTES, isDependencyFileName } from './dependencies.ts'
 import {
@@ -370,6 +370,9 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
   const { signal } = options
   signal?.throwIfAborted()
   const root = await realpath(rootInput)
+  const workspaceRoot = options.workspaceRoot ? await realpath(options.workspaceRoot) : root
+  if (!isInside(workspaceRoot, root)) throw new Error('Snapshot root is outside the workspace')
+  const pathPrefix = relative(workspaceRoot, root).split(sep).join('/')
   const rootStat = await stat(root)
   if (!rootStat.isDirectory()) throw new Error(`Snapshot root is not a directory: ${rootInput}`)
 
@@ -385,12 +388,25 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
   }
 
   // Breadth-first so a truncated snapshot favours shallow, usually more central files.
-  const queue: DirTask[] = [{ rel: '', abs: root, levels: [] }]
+  const ancestors: GitignoreLevel[] = []
+  if (pathPrefix) {
+    let dir = workspaceRoot
+    for (const segment of pathPrefix.split('/')) {
+      const rules = await readGitignore(join(dir, '.gitignore'))
+      if (rules)
+        ancestors.push({
+          base: relative(workspaceRoot, dir).split(sep).join('/'),
+          ig: ignore({ ignorecase: false }).add(rules),
+        })
+      dir = join(dir, segment)
+    }
+  }
+  const queue: DirTask[] = [{ rel: pathPrefix, abs: root, levels: ancestors }]
   walk: for (let head = 0; head < queue.length; head++) {
     const task = queue[head]!
     signal?.throwIfAborted()
 
-    if (task.rel !== '') {
+    {
       let real: string
       try {
         real = await realpath(task.abs)
@@ -412,7 +428,7 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
     try {
       names = await readdir(task.abs)
     } catch {
-      if (task.rel !== '') exclude(task.rel, 'unreadable')
+      exclude(task.rel, 'unreadable')
       continue
     }
     names.sort(compareStrings)
@@ -523,9 +539,11 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
 
   files.sort((a, b) => compareStrings(a.path, b.path))
   excluded.sort((a, b) => compareStrings(a.path, b.path))
-  const commit = await readGitCommit(root)
+  const commit = await readGitCommit(workspaceRoot)
   return {
     root,
+    ...(options.workspaceRoot ? { workspaceRoot } : {}),
+    ...(pathPrefix ? { pathPrefix } : {}),
     files: new Map(files.map(file => [file.path, file])),
     excluded,
     totalBytes,

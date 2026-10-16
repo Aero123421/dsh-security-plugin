@@ -709,7 +709,7 @@ describe('failures', () => {
     const failure = h.events(scan.id).find(e => e.type === 'run-failed')
     expect(failure?.level).toBe('error')
     for (const text of [failed?.error?.message ?? '', failure?.message ?? '']) {
-      expect(text).toContain('ENOENT')
+      expect(text).toContain('The project folder cannot be read.')
       expect(text).not.toContain(gone.root)
     }
     expect(h.events(scan.id).find(e => e.type === 'run-start')?.message).toBe('Scan started')

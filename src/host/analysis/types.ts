@@ -68,6 +68,10 @@ export interface ExcludedPath {
 export interface Snapshot {
   /** Absolute canonical root. Host-only; never sent to the browser or a model. */
   readonly root: string
+  /** Canonical workspace base for consistent masking across scan scopes. Host-only. */
+  readonly workspaceRoot?: string
+  /** Workspace-relative prefix of the effective root. */
+  readonly pathPrefix?: string
   readonly files: ReadonlyMap<string, SnapshotFile>
   readonly excluded: readonly ExcludedPath[]
   readonly totalBytes: number
@@ -79,6 +83,8 @@ export interface Snapshot {
 }
 
 export interface SnapshotOptions {
+  /** Canonical registered workspace root; paths remain relative to this root. */
+  readonly workspaceRoot?: string
   /** Extra gitignore-style patterns. */
   readonly excludeGlobs: readonly string[]
   readonly maxFiles: number

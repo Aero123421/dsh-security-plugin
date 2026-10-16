@@ -63,6 +63,9 @@ const en = {
 
   'newScan.title': 'New scan',
   'newScan.project': 'Project',
+  'newScan.subpath': 'Subfolder',
+  'newScan.subpathHint': 'Optional relative path, such as packages/app. Leave empty to scan the whole project.',
+  'scan.wholeProject': 'Whole project',
   'newScan.how': 'How to check',
   'newScan.ai': 'AI review',
   'newScan.ai.desc':
@@ -581,6 +584,9 @@ const ja = {
 
   'newScan.title': '新しいスキャン',
   'newScan.project': 'プロジェクト',
+  'newScan.subpath': 'サブフォルダー',
+  'newScan.subpathHint': 'packages/app などの相対パスを指定します。空欄ならプロジェクト全体をスキャンします。',
+  'scan.wholeProject': 'プロジェクト全体',
   'newScan.how': 'チェックの方法',
   'newScan.ai': 'AI レビュー',
   'newScan.ai.desc':
@@ -1098,6 +1104,9 @@ const zh = {
 
   'newScan.title': '新建扫描',
   'newScan.project': '项目',
+  'newScan.subpath': '子文件夹',
+  'newScan.subpathHint': '可选相对路径，例如 packages/app。留空则扫描整个项目。',
+  'scan.wholeProject': '整个项目',
   'newScan.how': '检查方式',
   'newScan.ai': 'AI 审查',
   'newScan.ai.desc':

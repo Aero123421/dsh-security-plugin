@@ -48,6 +48,7 @@ export interface ScanRecord {
   readonly workspaceTitle: string
   /** Absolute canonical root. Host-only; never leaves the Host. */
   readonly workspaceRoot: string
+  readonly subpath?: string
   readonly mode: ScanMode
   readonly status: ScanStatus
   readonly phase: ScanPhase
@@ -227,7 +228,7 @@ export interface FindingRecord {
 }
 
 export interface TriageRecord {
-  readonly workspaceId: string
+  readonly rootKeyBase: string
   readonly fingerprint: string
   readonly state: TriageState
   readonly note?: string

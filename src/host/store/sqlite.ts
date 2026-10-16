@@ -164,19 +164,20 @@ const SQL = {
     ON CONFLICT (id) DO UPDATE SET json = excluded.json, revision = excluded.revision`,
 
   insertScan: `INSERT INTO scans
-    (id, workspace_id, status, mode, phase, created_at, updated_at, started_at, finished_at, data)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+    (id, workspace_id, status, mode, phase, created_at, updated_at, started_at, finished_at, data, root_key)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
   updateScan: `UPDATE scans SET workspace_id = ?2, status = ?3, mode = ?4, phase = ?5, created_at = ?6,
-    updated_at = ?7, started_at = ?8, finished_at = ?9, data = ?10 WHERE id = ?1`,
+    updated_at = ?7, started_at = ?8, finished_at = ?9, data = ?10, root_key = ?11 WHERE id = ?1`,
   getScan: 'SELECT * FROM scans WHERE id = ?',
   listScans: `SELECT * FROM scans
     WHERE (:statuses IS NULL OR status IN (SELECT value FROM json_each(:statuses)))
     ORDER BY created_at DESC, id DESC LIMIT :limit`,
   listScansByWorkspace: `SELECT * FROM scans
-    WHERE workspace_id = :workspace AND (:statuses IS NULL OR status IN (SELECT value FROM json_each(:statuses)))
+    WHERE (workspace_id = :workspace OR (json_valid(data) AND json_extract(data, '$.workspaceRoot') = :root))
+      AND (:statuses IS NULL OR status IN (SELECT value FROM json_each(:statuses)))
     ORDER BY created_at DESC, id DESC LIMIT :limit`,
   previousCompletedScan: `SELECT * FROM scans
-    WHERE workspace_id = ? AND status = 'completed' AND created_at < ?
+    WHERE root_key = ? AND status = 'completed' AND created_at < ?
     ORDER BY created_at DESC, id DESC LIMIT 1`,
   deleteScan: 'DELETE FROM scans WHERE id = ?',
   purgeScans: `DELETE FROM scans WHERE created_at < ? AND status NOT IN ('queued', 'running', 'paused')`,
@@ -214,14 +215,14 @@ const SQL = {
   deleteFinding: 'DELETE FROM findings WHERE id = ?',
   countOpenFindings: `SELECT f.severity AS severity, f.verification AS verification, COUNT(*) AS n
     FROM findings f
-    LEFT JOIN triage t ON t.workspace_id = ?2 AND t.fingerprint = f.fingerprint
+    LEFT JOIN triage t ON t.root_key_base = ?2 AND t.fingerprint = f.fingerprint
     WHERE f.scan_id = ?1 AND f.verification <> 'refuted' AND (t.state IS NULL OR t.state = 'open')
     GROUP BY f.severity, f.verification`,
 
   getTriage: `SELECT * FROM triage
-    WHERE workspace_id = ? AND fingerprint IN (SELECT value FROM json_each(?))`,
-  setTriage: `INSERT INTO triage (workspace_id, fingerprint, state, note, updated_at) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT (workspace_id, fingerprint)
+    WHERE root_key_base = ? AND fingerprint IN (SELECT value FROM json_each(?))`,
+  setTriage: `INSERT INTO triage (root_key_base, fingerprint, state, note, updated_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (root_key_base, fingerprint)
     DO UPDATE SET state = excluded.state, note = excluded.note, updated_at = excluded.updated_at`,
 
   appendEvent: 'INSERT INTO events (scan_id, at, level, type, message, data) VALUES (?, ?, ?, ?, ?, ?)',
@@ -380,13 +381,14 @@ class SqliteSecurityStore implements SecurityStore {
       }
       if (query.workspaceId === undefined) return this.stmt(SQL.listScans).all(params).map(decodeScan)
       params.workspace = query.workspaceId
+      params.root = query.workspaceRoot ?? null
       return this.stmt(SQL.listScansByWorkspace).all(params).map(decodeScan)
     })
   }
 
-  previousCompletedScan(workspaceId: string, before: string): ScanRecord | undefined {
+  previousCompletedScan(rootKey: string, before: string): ScanRecord | undefined {
     return this.guard('previousCompletedScan', () =>
-      mapOne(this.stmt(SQL.previousCompletedScan).get(workspaceId, before), decodeScan),
+      mapOne(this.stmt(SQL.previousCompletedScan).get(rootKey, before), decodeScan),
     )
   }
 
@@ -580,12 +582,12 @@ class SqliteSecurityStore implements SecurityStore {
 
   countOpenFindings(
     scanId: string,
-    workspaceId: string,
+    rootKeyBase: string,
   ): { readonly counts: SeverityCounts; readonly confirmed: number } {
     return this.guard('countOpenFindings', () => {
       const counts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
       let confirmed = 0
-      for (const row of this.stmt(SQL.countOpenFindings).all(numbered([scanId, workspaceId]))) {
+      for (const row of this.stmt(SQL.countOpenFindings).all(numbered([scanId, rootKeyBase]))) {
         const { severity, verification, n } = row
         if (typeof n !== 'number' || !isSeverity(severity) || typeof verification !== 'string') {
           throw new StoreError('corrupt', `findings of scan ${scanId}: unexpected severity ${String(severity)}`)
@@ -599,11 +601,26 @@ class SqliteSecurityStore implements SecurityStore {
 
   // Triage ---------------------------------------------------------------------
 
-  getTriage(workspaceId: string, fingerprints: readonly string[]): Map<string, TriageRecord> {
+  reconcileTriageRoot(workspaceId: string, rootKeyBase: string): void {
+    if (workspaceId === rootKeyBase) return
+    this.guard('reconcileTriageRoot', () =>
+      this.atomic(() => {
+        // Equal timestamps keep the canonical row; this tie-break is stable on every retry.
+        this.stmt(`INSERT INTO triage (root_key_base, fingerprint, state, note, updated_at)
+        SELECT ?, fingerprint, state, note, updated_at FROM triage WHERE root_key_base = ?
+        ON CONFLICT (root_key_base, fingerprint) DO UPDATE SET
+          state = excluded.state, note = excluded.note, updated_at = excluded.updated_at
+        WHERE excluded.updated_at > triage.updated_at`).run(rootKeyBase, workspaceId)
+        this.stmt('DELETE FROM triage WHERE root_key_base = ?').run(workspaceId)
+      }),
+    )
+  }
+
+  getTriage(rootKeyBase: string, fingerprints: readonly string[]): Map<string, TriageRecord> {
     return this.guard('getTriage', () => {
       const out = new Map<string, TriageRecord>()
       if (fingerprints.length === 0) return out
-      for (const row of this.stmt(SQL.getTriage).all(workspaceId, JSON.stringify(fingerprints))) {
+      for (const row of this.stmt(SQL.getTriage).all(rootKeyBase, JSON.stringify(fingerprints))) {
         const record = decodeTriage(row)
         out.set(record.fingerprint, record)
       }
@@ -611,15 +628,15 @@ class SqliteSecurityStore implements SecurityStore {
     })
   }
 
-  setTriage(workspaceId: string, fingerprint: string, state: TriageState, note: string | undefined): TriageRecord {
+  setTriage(rootKeyBase: string, fingerprint: string, state: TriageState, note: string | undefined): TriageRecord {
     return this.guard('setTriage', () => {
       if (!(TRIAGE_STATES as readonly string[]).includes(state)) {
         throw new StoreError('constraint', `setTriage: unknown triage state ${JSON.stringify(state)}`)
       }
       const capped = note === undefined ? undefined : truncateChars(note, TRIAGE_NOTE_MAX_CHARS)
       const updatedAt = this.stamp()
-      this.stmt(SQL.setTriage).run(workspaceId, fingerprint, state, capped ?? null, updatedAt)
-      const record: TriageRecord = { workspaceId, fingerprint, state, updatedAt }
+      this.stmt(SQL.setTriage).run(rootKeyBase, fingerprint, state, capped ?? null, updatedAt)
+      const record: TriageRecord = { rootKeyBase, fingerprint, state, updatedAt }
       return capped === undefined ? record : { ...record, note: capped }
     })
   }

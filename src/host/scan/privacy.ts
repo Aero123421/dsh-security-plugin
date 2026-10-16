@@ -67,7 +67,10 @@ export class ModelPrivacy {
   scrub(text: string): string {
     if (text === '') return text
     this.#secrets ??= this.#redactor.secretValues(path => this.#snapshot.files.get(path)?.content)
-    return maskRoot(redactText(redactKnownSecrets(text, this.#secrets)), this.#snapshot.root)
+    return maskRoot(
+      redactText(redactKnownSecrets(text, this.#secrets)),
+      this.#snapshot.workspaceRoot ?? this.#snapshot.root,
+    )
   }
 
   /** An excerpt taken from `path`: the placeholder when the file is withheld, otherwise scrubbed. */

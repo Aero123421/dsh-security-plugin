@@ -33,6 +33,7 @@ import type {
   TaskStatus,
   TriageRecord,
 } from '../core/model.ts'
+import { scanRoot } from '../scan/root.ts'
 import { StoreError } from './types.ts'
 
 /** A row as returned by `node:sqlite`. */
@@ -230,13 +231,14 @@ const SCAN_DATA: DataShape = {
     threatModel: 'object',
     language: 'string',
     snapshotDigest: 'string',
+    subpath: 'string',
   },
 }
 
 /** Positional parameters for `INSERT INTO scans` / `UPDATE scans` (see sqlite.ts). */
 export function scanParams(
   scan: ScanRecord,
-): [string, string, string, string, string, string, string, string | null, string | null, string] {
+): [string, string, string, string, string, string, string, string | null, string | null, string, string] {
   return [
     scan.id,
     scan.workspaceId,
@@ -248,6 +250,7 @@ export function scanParams(
     scan.startedAt ?? null,
     scan.finishedAt ?? null,
     dataJson(scan, SCAN_COLUMNS),
+    scanRoot(scan),
   ]
 }
 
@@ -426,7 +429,7 @@ export function decodeFinding(row: Row): FindingRecord {
 export function decodeTriage(row: Row): TriageRecord {
   const r = new RowReader('triage', row, 'fingerprint')
   const record = {
-    workspaceId: r.text('workspace_id'),
+    rootKeyBase: r.text('root_key_base'),
     fingerprint: r.id,
     state: r.oneOf('state', TRIAGE_STATES),
     updatedAt: r.text('updated_at'),

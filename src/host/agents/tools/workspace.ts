@@ -122,7 +122,8 @@ export function workspaceQuoteSource(
 ): QuoteSource {
   const { snapshot, redactor } = view
   const masked = {
-    redactFile: (path: string, content: string) => maskRoot(redactor.redactFile(path, content), snapshot.root),
+    redactFile: (path: string, content: string) =>
+      maskRoot(redactor.redactFile(path, content), snapshot.workspaceRoot ?? snapshot.root),
   }
   return snapshotQuoteSource(snapshot, masked, view.withheldGlobs)
 }
@@ -200,7 +201,10 @@ class Workspace {
   redacted(file: SnapshotFile): string {
     const cached = this.#redacted.get(file.path)
     if (cached !== undefined) return cached ?? file.content
-    const text = maskRoot(this.#view.redactor.redactFile(file.path, file.content), this.snapshot.root)
+    const text = maskRoot(
+      this.#view.redactor.redactFile(file.path, file.content),
+      this.snapshot.workspaceRoot ?? this.snapshot.root,
+    )
     this.#redacted.set(file.path, text === file.content ? null : text)
     return text
   }
@@ -216,7 +220,7 @@ class Workspace {
 
   /** Final pass over every tool output: stateless redaction where needed and root masking. */
   finish(text: string, isError = false, redact = false): ToolResult {
-    const safe = maskRoot(redact ? redactText(text) : text, this.snapshot.root)
+    const safe = maskRoot(redact ? redactText(text) : text, this.snapshot.workspaceRoot ?? this.snapshot.root)
     return isError ? { text: safe, isError: true } : { text: safe }
   }
 

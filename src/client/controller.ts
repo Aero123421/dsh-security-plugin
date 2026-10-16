@@ -55,11 +55,13 @@ export type FlashMessage =
   | { readonly id: number; readonly tone: Tone; readonly error: RpcFailure }
 
 export interface NewScanRequest {
+  readonly subpath?: string
   readonly workspaceId?: string
   readonly mode?: ScanMode
 }
 
 export interface StartScanInput {
+  readonly subpath?: string
   readonly workspaceId: string
   readonly mode: ScanMode
   /** Grant `privacy.sendCodeToModel` first (the user ticked the consent box). */
@@ -193,9 +195,14 @@ export interface SecurityController {
 
   openNewScan(request?: NewScanRequest): void
   closeNewScan(): void
-  estimate(workspaceId: string, mode: ScanMode, signal?: AbortSignal): Promise<RpcResult<ScanEstimate>>
+  estimate(
+    workspaceId: string,
+    mode: ScanMode,
+    signal?: AbortSignal,
+    subpath?: string,
+  ): Promise<RpcResult<ScanEstimate>>
   startScan(input: StartScanInput): Promise<RpcResult<{ scanId: string }>>
-  quickRescan(workspaceId: string): Promise<RpcResult<{ scanId: string }> | undefined>
+  quickRescan(workspaceId: string, subpath?: string): Promise<RpcResult<{ scanId: string }> | undefined>
 
   loadScanDetail(scanId: string, force?: boolean): Promise<void>
   watchScan(scanId: string): () => void
@@ -516,11 +523,11 @@ export function createController(options: ControllerOptions): SecurityController
     set(s => (s.newScan ? { ...s, newScan: undefined } : s))
   }
 
-  async function estimate(workspaceId: string, mode: ScanMode, signal?: AbortSignal) {
-    const key = `${workspaceId}\u0000${mode}`
+  async function estimate(workspaceId: string, mode: ScanMode, signal?: AbortSignal, subpath?: string) {
+    const key = `${workspaceId}\u0000${mode}\u0000${subpath ?? ''}`
     const cached = estimateCache.get(key)
     if (cached) return { ok: true, value: cached } as const
-    const result = await api.call('estimateScan', { workspaceId, mode }, signal)
+    const result = await api.call('estimateScan', { workspaceId, mode, ...(subpath ? { subpath } : {}) }, signal)
     if (result.ok) estimateCache.set(key, result.value)
     return result
   }
@@ -571,6 +578,7 @@ export function createController(options: ControllerOptions): SecurityController
     const result = await api.call('createScan', {
       workspaceId: input.workspaceId,
       mode: input.mode,
+      ...(input.subpath ? { subpath: input.subpath } : {}),
       language: get().language,
       ...(aiReview ? {} : { aiReview: false }),
     })
@@ -588,15 +596,15 @@ export function createController(options: ControllerOptions): SecurityController
     return result
   }
 
-  async function quickRescan(workspaceId: string) {
+  async function quickRescan(workspaceId: string, subpath?: string) {
     if (get().bootstrap.value?.settings?.privacy?.sendCodeToModel !== true) {
-      openNewScan({ workspaceId, mode: 'quick' })
+      openNewScan({ workspaceId, mode: 'quick', ...(subpath ? { subpath } : {}) })
       return undefined
     }
-    const result = await startScan({ workspaceId, mode: 'quick' })
+    const result = await startScan({ workspaceId, mode: 'quick', ...(subpath ? { subpath } : {}) })
     if (result.ok) flash({ tone: 'success', key: 'detail.recheckStarted' })
     else if (result.error.code === 'security/consent-required' || result.error.code === 'security/no-model') {
-      openNewScan({ workspaceId, mode: 'quick' })
+      openNewScan({ workspaceId, mode: 'quick', ...(subpath ? { subpath } : {}) })
     } else flash({ tone: result.error.code === 'security/busy' ? 'info' : 'error', error: result.error })
     return result
   }

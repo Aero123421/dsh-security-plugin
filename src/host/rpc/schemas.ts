@@ -180,7 +180,11 @@ export type RequestSchemas = { readonly [M in RpcMethodName]: z.ZodType<RpcReque
 const emptyRequestSchema = z.strictObject({})
 const scanRefSchema = z.strictObject({ scanId: idSchema })
 const findingRefSchema = z.strictObject({ scanId: idSchema, findingId: idSchema })
-const workspaceModeSchema = z.strictObject({ workspaceId: idSchema, mode: scanModeSchema })
+const workspaceModeSchema = z.strictObject({
+  workspaceId: idSchema,
+  mode: scanModeSchema,
+  subpath: singleLine(1024).optional(),
+})
 
 /** Strict request schemas for every method; a missing method is a type error. */
 export const requestSchemas = {

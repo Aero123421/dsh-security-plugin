@@ -122,7 +122,7 @@ describe('bootstrap, workspaces, and models', () => {
     const local = await invoke('getBootstrap', {})
     expect(local).toMatchObject({
       pluginVersion: '0.0.0-test',
-      contractVersion: 1,
+      contractVersion: 2,
       settingsRevision: 1,
       loopback: true,
       canEditHighRiskSettings: true,

@@ -5,7 +5,6 @@
  * closed browser tab never stops a scan.
  */
 
-import { stat } from 'node:fs/promises'
 import type { ReportLanguage, WorkerView } from '../../shared/contracts.ts'
 import { ROLE_NAMES, type RoleName, type ScanMode, type ScanStatus } from '../../shared/domain.ts'
 import type { ModelRef } from '../../shared/settings.ts'
@@ -13,6 +12,7 @@ import type { ScanRecord } from '../core/model.ts'
 import type { WorkspaceEntity, WorkspaceRegistryPort } from '../dsh/ports.ts'
 import { RpcError } from '../rpc/errors.ts'
 import { roleRoute, type SettingsService } from '../settings.ts'
+import { resolveScanRoot } from './root.ts'
 import { newId } from './findings.ts'
 import { initialPhases, type PipelineDeps, ScanJob } from './pipeline.ts'
 
@@ -24,6 +24,7 @@ export interface ControllerDeps extends Omit<PipelineDeps, 'live'> {
 
 export interface CreateScanInput {
   readonly workspaceId: string
+  readonly subpath?: string
   readonly mode: ScanMode
   readonly language?: ReportLanguage
   /** Default true. `false` runs only the built-in analyzers and sends nothing to models. */
@@ -79,7 +80,7 @@ export class ScanController {
   async create(input: CreateScanInput): Promise<ScanRecord> {
     this.assertOpen()
     const workspace = this.workspace(input.workspaceId)
-    await assertDirectory(workspace)
+    const scope = await resolveScanRoot(workspace, input.subpath)
     const { settings } = this.deps.settings.get()
     const aiReview = input.aiReview !== false
     const models: Partial<Record<RoleName, ModelRef>> = {}
@@ -109,7 +110,9 @@ export class ScanController {
         )
       }
     }
-    const busy = this.deps.store.listScans({ workspaceId: workspace.id, statuses: ACTIVE, limit: 1 }).at(0)
+    const busy = this.deps.store
+      .listScans({ workspaceId: workspace.id, workspaceRoot: scope.workspaceRoot, statuses: ACTIVE, limit: 1 })
+      .at(0)
     if (busy) {
       throw new RpcError('security/busy', 'A scan of this project is already queued or running.', { scanId: busy.id })
     }
@@ -118,7 +121,8 @@ export class ScanController {
       id: newId(),
       workspaceId: workspace.id,
       workspaceTitle: workspace.title,
-      workspaceRoot: workspace.path,
+      workspaceRoot: scope.workspaceRoot,
+      ...(scope.subpath ? { subpath: scope.subpath } : {}),
       mode: input.mode,
       status: 'queued',
       phase: 'snapshot',
@@ -267,17 +271,6 @@ export class ScanController {
   private assertOpen(): void {
     if (this.disposed) throw new RpcError('security/invalid-state', 'The security plugin is shutting down.', {})
   }
-}
-
-async function assertDirectory(workspace: WorkspaceEntity): Promise<void> {
-  try {
-    if ((await stat(workspace.path)).isDirectory()) return
-  } catch {
-    // Reported below.
-  }
-  throw new RpcError('security/workspace-unavailable', 'The project folder cannot be read.', {
-    workspaceId: workspace.id,
-  })
 }
 
 function invalidState(scan: ScanRecord, action: string): RpcError {
