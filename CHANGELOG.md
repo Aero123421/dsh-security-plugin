@@ -8,6 +8,12 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+
+- Managed analyzer downloads now pin Gitleaks 8.30.1 (was 8.28.0) and OSV-Scanner 2.7.0 (was 2.2.2) in
+  `toolkit.lock.json`, with SHA-256 hashes verified against the upstream checksums files. Newer OSV-Scanner
+  releases enable more lockfile extractors by default, so scans may report packages older pins did not see.
+
 ## [0.1.1] - 2026-10-15
 
 ### Fixed
