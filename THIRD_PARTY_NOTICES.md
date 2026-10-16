@@ -90,7 +90,7 @@ THIS SOFTWARE.
 
 | Package | Version | License | Notes |
 | --- | --- | --- | --- |
-| [@ast-grep/napi](https://github.com/ast-grep/ast-grep) | 0.50.0 | MIT | Native tree-sitter engine with prebuilt binaries. When it is missing or has no binary for the platform, the plugin uses its built-in tokenizer instead. Its license text ships in its own package. |
+| [@ast-grep/napi](https://github.com/ast-grep/ast-grep) | 0.51.0 | MIT | Native tree-sitter engine with prebuilt binaries. When it is missing or has no binary for the platform, the plugin uses its built-in tokenizer instead. Its license text ships in its own package. |
 
 `@ast-grep/lang-python` is loaded opportunistically if it is installed, but it
 is not a declared dependency of this package.
