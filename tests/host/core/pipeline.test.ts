@@ -1,6 +1,6 @@
 import { cp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { loadAstGrep } from '../../../src/host/analysis/astgrep.ts'
 import type { FindingRecord } from '../../../src/host/core/model.ts'
 import type { LlmGenerateOptions, LlmStreamChunk } from '../../../src/host/dsh/ports.ts'
@@ -9,6 +9,7 @@ import { initialPhases } from '../../../src/host/scan/pipeline.ts'
 import { openSecurityStore } from '../../../src/host/store/sqlite.ts'
 import type { SettingsPatch } from '../../../src/shared/settings.ts'
 import { scanRecord } from './factories.ts'
+import { runOf, taskOf } from '../store/fixtures.ts'
 import {
   AI_SETTINGS,
   copyFixture,
@@ -608,6 +609,67 @@ describe('pause, resume, cancel, and shutdown', () => {
     expect(h.store.listAgentRuns('crashed')[0]?.finishedAt).toBeDefined()
     expect(h.events('crashed').map(e => e.type)).toContain('run-interrupted')
     expect(h.store.getScan('ancient')).toBeUndefined()
+  })
+
+  it.each(['running', 'interrupted'] as const)(
+    'atomically repairs partial %s recovery and is idempotent',
+    async status => {
+      const h = createHarness({ workspaces: [workspace()] })
+      h.store.insertScan(
+        scanRecord({ id: 'recovery', workspaceRoot: shop.root, status, createdAt: new Date().toISOString() }),
+      )
+      h.store.ensureTask(taskOf({ id: 'recovery-task', scanId: 'recovery', status: 'running' }))
+      h.store.insertAgentRun(
+        runOf({ id: 'recovery-run', scanId: 'recovery', taskId: 'recovery-task', status: 'running' }),
+      )
+      // Clean interrupted history must not consume the normal 500-row list cap.
+      for (let i = 0; i < 501; i++)
+        h.store.insertScan(
+          scanRecord({ id: `z-clean-${i}`, status: 'interrupted', createdAt: new Date().toISOString() }),
+        )
+      expect(h.store.scansNeedingRecovery().map(scan => scan.id)).toEqual(['recovery'])
+      const updateRun = vi.spyOn(h.store, 'updateAgentRun').mockImplementationOnce(() => {
+        throw new Error('simulated write failure')
+      })
+      expect(() => h.controller.start()).toThrow('simulated write failure')
+      expect(h.store.getScan('recovery')?.status).toBe(status)
+      expect(h.store.getTask('recovery-task')?.status).toBe('running')
+      expect(h.events('recovery')).toEqual([])
+      updateRun.mockRestore()
+      h.controller.start()
+      expect(h.store.getScan('recovery')?.status).toBe('interrupted')
+      expect(h.store.getTask('recovery-task')?.status).toBe('pending')
+      expect(h.store.listAgentRuns('recovery')[0]).toMatchObject({ status: 'cancelled', stopReason: 'interrupted' })
+      const events = h.events('recovery')
+      const runs = h.store.listAgentRuns('recovery')
+      h.controller.start()
+      expect(h.events('recovery')).toEqual(events)
+      expect(h.store.listAgentRuns('recovery')).toEqual(runs)
+      await h.controller.dispose()
+      h.store.close()
+    },
+  )
+
+  it('closes stale workers and clears finishedAt while a resumed attempt is unfinished', async () => {
+    const h = createHarness({ workspaces: [workspace()] })
+    h.store.insertScan(
+      scanRecord({
+        id: 'legacy-attempt',
+        workspaceRoot: shop.root,
+        status: 'paused',
+        finishedAt: '2026-10-01T12:00:00.000Z',
+      }),
+    )
+    h.store.insertAgentRun(runOf({ id: 'stale-worker', scanId: 'legacy-attempt', status: 'running' }))
+    expect(h.controller.resume('legacy-attempt')).not.toHaveProperty('finishedAt')
+    expect(h.store.getScan('legacy-attempt')?.status).toBe('running')
+    expect(h.store.getScan('legacy-attempt')).not.toHaveProperty('finishedAt')
+    expect(h.store.listAgentRuns('legacy-attempt').some(run => run.status === 'running')).toBe(false)
+    expect(await h.settle('legacy-attempt')).toBe('completed')
+    expect(h.store.listAgentRuns('legacy-attempt').some(run => run.status === 'running')).toBe(false)
+    expect(h.store.getScan('legacy-attempt')?.finishedAt).toBeDefined()
+    await h.controller.dispose()
+    h.store.close()
   })
 
   it('queues scans beyond maxConcurrentScans and runs them in order', async () => {

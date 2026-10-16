@@ -91,9 +91,7 @@ THIS SOFTWARE.
 | Package | Version | License | Notes |
 | --- | --- | --- | --- |
 | [@ast-grep/napi](https://github.com/ast-grep/ast-grep) | 0.51.0 | MIT | Native tree-sitter engine with prebuilt binaries. When it is missing or has no binary for the platform, the plugin uses its built-in tokenizer instead. Its license text ships in its own package. |
-
-`@ast-grep/lang-python` is loaded opportunistically if it is installed, but it
-is not a declared dependency of this package.
+| [@ast-grep/lang-python](https://www.npmjs.com/package/@ast-grep/lang-python) | 0.0.6 | ISC (manifest), MIT (shipped LICENSE) | Optional tree-sitter-python grammar (upstream grammar 0.25.0, MIT); includes platform prebuilds and uses @ast-grep/setup-lang 0.0.6 (also ISC in its manifest, MIT in its shipped LICENSE). Tested with @ast-grep/napi 0.51.0. License texts ship in the respective packages. If unavailable, Python uses the built-in tokenizer. |
 
 ## External tools downloaded only at the user's request
 

@@ -52,7 +52,7 @@ import {
   recordSignalFindings,
   signalFingerprint,
 } from './findings.ts'
-import { resolveScanRoot, scanRoot } from './root.ts'
+import { resolveScanRoot, sameScanRoot, scanRoot } from './root.ts'
 import { snapshotDigest } from './fingerprint.ts'
 import { endpointPath, planHuntTasks, planReviewTasks, type PlannedTask } from './planning.ts'
 
@@ -176,10 +176,13 @@ export class ScanJob {
   async run(): Promise<void> {
     const { store } = this.deps
     const resumed = this.scan.startedAt !== undefined
+    // Persisted workers belong to the previous attempt, never this one.
+    this.closeStaleRuns()
     this.scan = store.updateScan(this.scan.id, {
       status: 'running',
       ...(resumed ? {} : { startedAt: this.iso() }),
       clearError: true,
+      clearFinishedAt: true,
     })
     this.budget = new ScanBudgetGate(this.scan.budget, this.scan.usage, this.signal, () => this.deps.now().getTime())
     this.event('info', 'run-start', `Scan ${resumed ? 'resumed' : 'started'}`)
@@ -197,7 +200,17 @@ export class ScanJob {
     } finally {
       clearTimeout(this.deadlineTimer)
       this.persistUsage()
+      this.closeStaleRuns()
       this.deps.live.clear(this.scan.id)
+    }
+  }
+
+  private closeStaleRuns(): void {
+    const { store } = this.deps
+    for (const run of store.listAgentRuns(this.scan.id)) {
+      if (run.status === 'running') {
+        store.updateAgentRun(run.id, { status: 'cancelled', stopReason: 'interrupted', finishedAt: this.iso() })
+      }
     }
   }
 
@@ -287,7 +300,14 @@ export class ScanJob {
       { id: this.scan.workspaceId, title: this.scan.workspaceTitle, path: this.scan.workspaceRoot },
       this.scan.subpath,
     )
-    if (scope.root !== scanRoot(this.scan)) throw new Error('The scan folder changed; create a new scan.')
+    const storedRoot = scanRoot(this.scan)
+    if (
+      scope.root !== storedRoot &&
+      // Only legacy workspace spellings need equivalence. A changed subfolder
+      // under an already-canonical workspace must still be rejected.
+      (scope.workspaceRoot === this.scan.workspaceRoot || !(await sameScanRoot(storedRoot, scope.root)))
+    )
+      throw new Error('The scan folder changed; create a new scan.')
     this.analysis = await analyzeWorkspace({
       root: scope.root,
       workspaceRoot: scope.workspaceRoot,

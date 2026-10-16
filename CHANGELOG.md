@@ -24,6 +24,15 @@ changes; they are called out explicitly.
   ranges, keeping adjacent vulnerabilities separate. Identical SAST sinks receive distinct occurrence identities;
   adding/removing identical sinks may require re-triage rather than hiding a surviving issue.
 - Triage follows primary and merged fingerprints across scans in finding lists, details, reports, and open counts.
+- Reconcile legacy symlink/trailing-slash project roots at startup and when registered projects first become
+  available, including stores already migrated by 0.2.0/0.2.1. History and triage use the canonical project path;
+  the newest triage decision wins (canonical rows win timestamp ties). No schema version change is required.
+  Paused and queued legacy scans accept canonical-equivalent workspace roots when starting again.
+- Recover interrupted scans atomically, repair partial recovery from older versions on the next startup, and
+  close stale running workers when an attempt resumes or finishes. Resuming clears the previous finished time.
+- Install the optional Python AST grammar alongside ast-grep, report Python fallback separately from JS/TS AST
+  availability, and reject undeclared Host bundle runtime modules during package verification.
+- Run npm/pnpm/npx through their Windows command launchers in `check:dsh`.
 
 ## [0.2.1] - 2026-10-16
 

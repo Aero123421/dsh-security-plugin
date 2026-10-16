@@ -196,6 +196,15 @@ describe('openSecurityStore (in memory)', () => {
       expect(store.getScan('scan_1')).toStrictEqual(cleared)
     })
 
+    it('clears finishedAt explicitly and keeps undefined patches unchanged', () => {
+      const finishedAt = NOW.toISOString()
+      store.updateScan('scan_1', { status: 'failed', finishedAt })
+      expect(store.updateScan('scan_1', { finishedAt: undefined }).finishedAt).toBe(finishedAt)
+      expect(store.updateScan('scan_1', { status: 'queued', clearFinishedAt: true })).not.toHaveProperty('finishedAt')
+      expect(store.getScan('scan_1')).not.toHaveProperty('finishedAt')
+      expect(store.getScan('scan_1')).not.toHaveProperty('clearFinishedAt')
+    })
+
     it('ignores keys outside the patch type', () => {
       const patch = { id: 'hijack', workspaceId: 'ws_9', status: 'paused' } as unknown as ScanPatch
       const updated = store.updateScan('scan_1', patch)

@@ -242,6 +242,8 @@ Builtin and external results for the same location and category are de-duplicate
 ## The ast-grep engine
 
 `@ast-grep/napi` (optional dependency) gives tree-sitter ASTs for JavaScript, TypeScript and TSX. Python ASTs also
-need `@ast-grep/lang-python`, which is used when it is installed. Files over 512 KiB, and files whose parse has
-large error regions, use the tokenizer. The status appears as the `ast-grep` analyzer in Coverage. Set
+need `@ast-grep/lang-python` (also a pinned optional dependency). Its bundled platform prebuild is loaded without
+requiring tree-sitter-cli; unsupported platforms fall back to the tokenizer. Files over 512 KiB, and files whose
+parse has large error regions, also use the tokenizer. The `ast-grep` analyzer status in bootstrap and Coverage
+states whether Python ASTs are available separately from the JavaScript/TypeScript engine. Set
 `disableAstGrep: true` to force the tokenizer everywhere.

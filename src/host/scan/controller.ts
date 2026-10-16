@@ -51,22 +51,28 @@ export class ScanController {
   /** Recover from an unclean stop, apply retention, and start queued scans. */
   start(): void {
     const { store } = this.deps
-    for (const scan of store.listScans({ statuses: ['running'], limit: 500 })) {
-      store.updateScan(scan.id, { status: 'interrupted' })
-      store.appendEvent(
-        scan.id,
-        'warn',
-        'run-interrupted',
-        'DSH stopped while this scan was running. Resume it to continue.',
-      )
-      for (const task of store.listTasks(scan.id, ['running'])) store.updateTask(task.id, { status: 'pending' })
-      // Close runs that were in flight so the scan does not show workers that will never finish.
-      const at = this.deps.now().toISOString()
-      for (const run of store.listAgentRuns(scan.id)) {
-        if (run.status === 'running') {
+    for (const scan of store.scansNeedingRecovery()) {
+      const tasks = store.listTasks(scan.id, ['running'])
+      const runs = store.listAgentRuns(scan.id).filter(run => run.status === 'running')
+      if (scan.status !== 'running' && tasks.length === 0 && runs.length === 0) continue
+      // One scan is one recovery unit. Also repair partial recovery left by
+      // older versions that committed the interrupted status before cleanup.
+      store.transaction(() => {
+        if (scan.status === 'running') {
+          store.updateScan(scan.id, { status: 'interrupted' })
+          store.appendEvent(
+            scan.id,
+            'warn',
+            'run-interrupted',
+            'DSH stopped while this scan was running. Resume it to continue.',
+          )
+        }
+        for (const task of tasks) store.updateTask(task.id, { status: 'pending' })
+        const at = this.deps.now().toISOString()
+        for (const run of runs) {
           store.updateAgentRun(run.id, { status: 'cancelled', stopReason: 'interrupted', finishedAt: at })
         }
-      }
+      })
     }
     const retention = this.deps.settings.get().settings.storage.retentionDays
     if (retention > 0) {
@@ -162,8 +168,22 @@ export class ScanController {
     this.assertOpen()
     const scan = this.require(id)
     if (!['paused', 'interrupted', 'failed'].includes(scan.status)) throw invalidState(scan, 'resume')
-    const updated = this.deps.store.updateScan(id, { status: 'queued', clearError: true })
-    this.deps.store.appendEvent(id, 'info', 'resumed', 'Scan queued to resume')
+    const { store } = this.deps
+    const updated = store.transaction(() => {
+      for (const task of store.listTasks(id, ['running'])) store.updateTask(task.id, { status: 'pending' })
+      for (const run of store.listAgentRuns(id)) {
+        if (run.status === 'running') {
+          store.updateAgentRun(run.id, {
+            status: 'cancelled',
+            stopReason: 'interrupted',
+            finishedAt: this.deps.now().toISOString(),
+          })
+        }
+      }
+      const queued = store.updateScan(id, { status: 'queued', clearError: true, clearFinishedAt: true })
+      store.appendEvent(id, 'info', 'resumed', 'Scan queued to resume')
+      return queued
+    })
     this.kick()
     return updated
   }

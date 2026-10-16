@@ -14,7 +14,7 @@
  *   (released nested work included) is rolled back. Callbacks must be
  *   synchronous.
  * - Patches: `undefined` values in a patch mean "leave unchanged"; use
- *   `clearError` / `clearProgress` to remove those scan fields. Keys outside
+ *   `clearError` / `clearProgress` / `clearFinishedAt` to remove those scan fields. Keys outside
  *   the patch type (e.g. `id`) are ignored at runtime.
  * - Status filters: an empty `statuses` array matches nothing; omit it to
  *   match every status.
@@ -23,7 +23,7 @@
  * - Orderings break remaining ties by id so results are deterministic.
  */
 
-import { chmodSync, mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync, realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite'
 import { gunzipSync, gzipSync } from 'node:zlib'
@@ -48,6 +48,7 @@ import type {
   TaskStatus,
   TriageRecord,
 } from '../core/model.ts'
+import { scanRoot } from '../scan/root.ts'
 import {
   agentRunParams,
   decodeAgentRun,
@@ -101,7 +102,7 @@ export interface OpenStoreOptions {
 
 // Patch allowlists. Typed as exhaustive records so adding a field to a patch
 // type without listing it here is a compile error.
-type PatchKeys<P> = Readonly<Record<Exclude<keyof P, 'clearError' | 'clearProgress'>, true>>
+type PatchKeys<P> = Readonly<Record<Exclude<keyof P, 'clearError' | 'clearProgress' | 'clearFinishedAt'>, true>>
 
 const SCAN_PATCH_KEYS: PatchKeys<ScanPatch> = {
   status: true,
@@ -370,6 +371,7 @@ class SqliteSecurityStore implements SecurityStore {
         const next = mergePatch(current, patch, SCAN_PATCH_KEYS)
         if (patch.clearError) delete next.error
         if (patch.clearProgress) delete next.progress
+        if (patch.clearFinishedAt) delete next.finishedAt
         next.updatedAt = this.stamp()
         const record = next as unknown as ScanRecord
         this.stmt(SQL.updateScan).run(numbered(scanParams(record)))
@@ -393,6 +395,18 @@ class SqliteSecurityStore implements SecurityStore {
       params.root = query.workspaceRoot ?? null
       return this.stmt(SQL.listScansByWorkspace).all(params).map(decodeScan)
     })
+  }
+
+  scansNeedingRecovery(): ScanRecord[] {
+    return this.guard('scansNeedingRecovery', () =>
+      this.stmt(`SELECT * FROM scans
+      WHERE status = 'running' OR (status = 'interrupted' AND (
+        EXISTS (SELECT 1 FROM agent_runs r WHERE r.scan_id = scans.id AND r.status = 'running')
+        OR EXISTS (SELECT 1 FROM tasks t WHERE t.scan_id = scans.id AND t.status = 'running')
+      )) ORDER BY created_at, id`)
+        .all()
+        .map(decodeScan),
+    )
   }
 
   previousCompletedScan(rootKey: string, before: string): ScanRecord | undefined {
@@ -611,16 +625,43 @@ class SqliteSecurityStore implements SecurityStore {
   // Triage ---------------------------------------------------------------------
 
   reconcileTriageRoot(workspaceId: string, rootKeyBase: string): void {
-    if (workspaceId === rootKeyBase) return
     this.guard('reconcileTriageRoot', () =>
       this.atomic(() => {
-        // Equal timestamps keep the canonical row; this tie-break is stable on every retry.
-        this.stmt(`INSERT INTO triage (root_key_base, fingerprint, state, note, updated_at)
-        SELECT ?, fingerprint, state, note, updated_at FROM triage WHERE root_key_base = ?
-        ON CONFLICT (root_key_base, fingerprint) DO UPDATE SET
-          state = excluded.state, note = excluded.note, updated_at = excluded.updated_at
-        WHERE excluded.updated_at > triage.updated_at`).run(rootKeyBase, workspaceId)
-        this.stmt('DELETE FROM triage WHERE root_key_base = ?').run(workspaceId)
+        // v2 copied legacy paths verbatim. Reconcile on registration as well as
+        // startup, including databases already migrated by 0.2.0/0.2.1. A path
+        // that cannot currently be resolved is retained, never guessed.
+        const aliases = new Set([workspaceId])
+        for (const row of this.stmt(`SELECT json_extract(data, '$.workspaceRoot') AS root FROM scans
+          UNION SELECT root_key_base AS root FROM triage`).all()) {
+          if (typeof row.root !== 'string' || row.root === rootKeyBase) continue
+          try {
+            if (realpathSync(row.root) === rootKeyBase) aliases.add(row.root)
+          } catch {
+            // Offline or removed roots can be reconciled after they become available.
+          }
+        }
+        aliases.delete(rootKeyBase)
+        // Latest decision wins. Equal timestamps keep the canonical row, then
+        // the lexically first alias; ordering makes retries deterministic.
+        for (const alias of [...aliases].sort()) {
+          this.stmt(`INSERT INTO triage (root_key_base, fingerprint, state, note, updated_at)
+          SELECT ?, fingerprint, state, note, updated_at FROM triage WHERE root_key_base = ?
+          ON CONFLICT (root_key_base, fingerprint) DO UPDATE SET
+            state = excluded.state, note = excluded.note, updated_at = excluded.updated_at
+          WHERE excluded.updated_at > triage.updated_at`).run(rootKeyBase, alias)
+          this.stmt('DELETE FROM triage WHERE root_key_base = ?').run(alias)
+          for (const row of this.stmt("SELECT * FROM scans WHERE json_extract(data, '$.workspaceRoot') = ?").all(
+            alias,
+          )) {
+            const scan = decodeScan(row)
+            // Change only identity: preserve timestamps, status, and scoped history.
+            this.stmt("UPDATE scans SET root_key = ?, data = json_set(data, '$.workspaceRoot', ?) WHERE id = ?").run(
+              scanRoot({ ...scan, workspaceRoot: rootKeyBase }),
+              rootKeyBase,
+              scan.id,
+            )
+          }
+        }
       }),
     )
   }

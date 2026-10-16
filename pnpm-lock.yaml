@@ -66,11 +66,22 @@ importers:
         specifier: 4.6.7
         version: 4.6.7
     optionalDependencies:
+      '@ast-grep/lang-python':
+        specifier: 0.0.6
+        version: 0.0.6
       '@ast-grep/napi':
         specifier: 0.51.0
         version: 0.51.0
 
 packages:
+
+  '@ast-grep/lang-python@0.0.6':
+    resolution: {integrity: sha512-eF/bEBspmrxdVuPNihvZDyyJx5qtIpGEMz9l1nNQmrji7NZcUiRNC8WwzYyQCBdy1mj8HZ0Tn4I2q3gp/6Bkiw==}
+    peerDependencies:
+      tree-sitter-cli: 0.25.8
+    peerDependenciesMeta:
+      tree-sitter-cli:
+        optional: true
 
   '@ast-grep/napi-darwin-arm64@0.51.0':
     resolution: {integrity: sha512-jKzwYtHqVAY3F6Ch9sE4zRc2iDP74U2bJB2AucRDpQe3HrHUz4rCCfXS4PZpq9FL+kI6YS+qglZG3LRgnv1JsA==}
@@ -129,6 +140,9 @@ packages:
   '@ast-grep/napi@0.51.0':
     resolution: {integrity: sha512-thHIZoygVkwW/6yBFBgqPtmKpAnEfwsJyIFliKo6hxkXlYLLfvwReDH2le/5zk358ir/97IJdTB7xv309LYbSQ==}
     engines: {node: '>= 10'}
+
+  '@ast-grep/setup-lang@0.0.6':
+    resolution: {integrity: sha512-aSYZNF5nGQMxnwiA3Lcc8zi0AtpGlug47ADgqCgP/2n7p922FbnW7vo1rbW4kKjW72B/3mDdN7uvYidv8JnPnw==}
 
   '@babel/helper-string-parser@7.29.7':
     resolution: {integrity: sha512-Pb5ijPrZ89GDH8223L4UP8i6QApWxs04RbPQJTeWDV0/keR2E36MeKnyr6LYmUUvqRRI+Iv87SuF1W6ErINzYw==}
@@ -1050,6 +1064,11 @@ packages:
 
 snapshots:
 
+  '@ast-grep/lang-python@0.0.6':
+    dependencies:
+      '@ast-grep/setup-lang': 0.0.6
+    optional: true
+
   '@ast-grep/napi-darwin-arm64@0.51.0':
     optional: true
 
@@ -1088,6 +1107,9 @@ snapshots:
       '@ast-grep/napi-win32-arm64-msvc': 0.51.0
       '@ast-grep/napi-win32-ia32-msvc': 0.51.0
       '@ast-grep/napi-win32-x64-msvc': 0.51.0
+    optional: true
+
+  '@ast-grep/setup-lang@0.0.6':
     optional: true
 
   '@babel/helper-string-parser@7.29.7': {}

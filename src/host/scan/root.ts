@@ -50,7 +50,17 @@ export async function resolveScanRoot(
   return { workspaceRoot, root, subpath: relative(workspaceRoot, root).split(sep).join('/') }
 }
 
-/** Canonical effective root for a validated, durable scan. Host-only. */
+/** Accept legacy path spellings, but never a different filesystem target. */
+export async function sameScanRoot(stored: string, resolved: string): Promise<boolean> {
+  if (stored === resolved) return true
+  try {
+    return (await realpath(stored)) === resolved
+  } catch {
+    return false
+  }
+}
+
+/** Effective root for a validated, durable scan. Legacy records may not yet be canonical. */
 export function scanRoot(scan: { readonly workspaceRoot: string; readonly subpath?: string }): string {
   return scan.subpath ? join(scan.workspaceRoot, scan.subpath) : scan.workspaceRoot
 }
