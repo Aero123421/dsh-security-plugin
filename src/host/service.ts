@@ -27,6 +27,7 @@ import type {
 import { CONTRACT_VERSION } from '../shared/contracts.ts'
 import { closureOf, formatCodeRef, isActiveScanStatus, type TriageState } from '../shared/domain.ts'
 import type { AstGrepHandle } from './analysis/astgrep.ts'
+import { isDependencyFileName } from './analysis/dependencies.ts'
 import { buildInventory } from './analysis/inventory.ts'
 import { extractRoutes } from './analysis/routes/index.ts'
 import { ToolkitError, type Toolkit } from './analysis/toolkit.ts'
@@ -372,6 +373,9 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
       const extra = payload.mode === 'quick' ? 2 : payload.mode === 'deep' ? 8 : 20
       const tasks = Math.min(budget.maxTasks, plan.tasks.length + extra)
       const estimate: ScanEstimate = {
+        dependencyManifests: [...snapshot.files.keys()].filter(path =>
+          isDependencyFileName(path.split('/').at(-1) ?? ''),
+        ).length,
         files: snapshot.files.size,
         bytes: snapshot.totalBytes,
         excluded: snapshot.excluded.length,

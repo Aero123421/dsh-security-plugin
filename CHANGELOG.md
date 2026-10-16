@@ -12,6 +12,8 @@ changes; they are called out explicitly.
 
 - Add a project folder from the Security page or New Scan dialog when DSH’s folder services are available.
   The folder is registered in DSH’s project list and selected for scanning; the dialog always shows its project.
+- Coverage calls out parsed dependencies not checked for known vulnerabilities when online OSV lookup is off and
+  OSV-Scanner returned no package results. The New Scan dialog explains the default-off lookup and links to Settings.
 - Python SAST rules detect explicitly disabled Secure flags on session/CSRF cookies and HttpOnly on session
   cookies, including Flask config assignments and `config.update(...)`. There are now 52 SAST rules.
 - Scan an optional subfolder (for example `packages/app`) without scanning an entire umbrella workspace.

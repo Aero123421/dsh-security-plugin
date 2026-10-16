@@ -339,6 +339,58 @@ describe('osv-scanner', () => {
     }
   })
 
+  it.runIf(isPosix).each([
+    {
+      name: 'clean package results',
+      raw: {
+        results: [
+          {
+            source: { path: 'package-lock.json' },
+            packages: [{ package: { name: 'minimist', version: '1.2.8', ecosystem: 'npm' } }],
+          },
+        ],
+      },
+      code: 0,
+      checked: 1,
+    },
+    { name: 'no packages', raw: { results: [] }, code: 0, checked: 0 },
+    { name: 'malformed output', raw: { results: 'invalid' }, code: 0, checked: 0 },
+    {
+      name: 'excluded manifest',
+      raw: {
+        results: [
+          {
+            source: { path: 'excluded.json' },
+            packages: [{ package: { name: 'minimist', version: '1.2.8', ecosystem: 'npm' } }],
+          },
+        ],
+      },
+      code: 0,
+      checked: 0,
+    },
+    { name: 'no lock files', raw: {}, code: 128, checked: 0 },
+  ])('tracks dependency coverage for $name', async ({ raw, code, checked }) => {
+    const { dir, cleanup } = await makeTempDir()
+    try {
+      const tool = await fakeTool(
+        dir,
+        'osv-scanner',
+        `process.stdout.write(${JSON.stringify(JSON.stringify(raw))}); process.exit(${code})`,
+      )
+      const run = await runOsvScanner({
+        tool: { path: tool, source: 'path', version: '2.7.0' },
+        root: dir,
+        offline: false,
+        snapshot: snapshotOf({ 'package-lock.json': '{}' }, dir),
+      })
+      expect(run.status.available).toBe(true)
+      expect(run.signals).toEqual([])
+      expect(run.checkedDependencies ?? 0).toBe(checked)
+    } finally {
+      await cleanup()
+    }
+  })
+
   it.runIf(isPosix)('runs `scan source` with safe flags and accepts exit code 1', async () => {
     const { dir, cleanup } = await makeTempDir()
     try {
@@ -365,6 +417,7 @@ describe('osv-scanner', () => {
         offline: false,
       })
       expect(run.status.available).toBe(true)
+      expect(run.checkedDependencies).toBe(1)
       expect(run.signals).toHaveLength(1)
       const { readFile } = await import('node:fs/promises')
       const args = JSON.parse(await readFile(argsFile, 'utf8')) as string[]

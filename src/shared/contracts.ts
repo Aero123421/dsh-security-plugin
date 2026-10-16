@@ -251,6 +251,8 @@ export interface ThreatModelView {
 }
 
 export interface ScanEstimate {
+  /** Supported dependency manifest/lock files; absent on older Hosts. */
+  readonly dependencyManifests?: number
   readonly files: number
   readonly bytes: number
   readonly excluded: number

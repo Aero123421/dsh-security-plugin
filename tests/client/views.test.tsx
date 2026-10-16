@@ -162,6 +162,57 @@ describe('New Scan dialog', () => {
     await flush()
   }
 
+  it('explains unchecked dependencies and opens Settings without changing consent', async () => {
+    const { dialog, controller: c, container, api } = await openDialog()
+    const project = select(dialog, 'Project')
+    expect(project.value).toBe('ws-1')
+    expect(project.disabled).toBe(true)
+    expect(project.selectedOptions[0]?.textContent).toBe('Demo — ~/demo')
+    expect(dialog.textContent).toContain('Dependency vulnerability lookup is off')
+    expect(dialog.textContent).toContain('unless offline OSV-Scanner returns results')
+    expect(dialog.textContent).toContain('never code or paths')
+    await click(approach(dialog, 'builtin'))
+    expect(dialog.textContent).toContain('Dependency vulnerability lookup is off')
+    await click(byText(dialog, 'button', 'Open privacy settings'))
+    await flush(10)
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.store.getState().tab).toBe('settings')
+    expect(container.textContent).toContain('Look up known vulnerabilities online (OSV)')
+    expect(api.callsOf('updateSettings')).toHaveLength(0)
+    expect(api.callsOf('createScan')).toHaveLength(0)
+  })
+
+  it('hides the dependency hint when lookup is enabled', async () => {
+    const settings = makeSettings({ ...withModel, privacy: { ...withModel.privacy, allowDependencyLookup: true } })
+    const { dialog } = await openDialog({}, makeBootstrap({ settings }))
+    expect(dialog.textContent).not.toContain('Dependency vulnerability lookup is off')
+  })
+
+  it.each([0, 1])('uses the supported dependency manifest estimate (%s files)', async count => {
+    const { dialog } = await openDialog({
+      estimateScan: () =>
+        ok({
+          files: 1,
+          bytes: 1,
+          excluded: 0,
+          languages: [],
+          frameworks: [],
+          endpoints: 0,
+          plannedTasks: 0,
+          tokens: { min: 0, max: 0 },
+          truncated: false,
+          dependencyManifests: count,
+        }),
+    })
+    expect(dialog.textContent?.includes('Dependency vulnerability lookup is off')).toBe(count > 0)
+  })
+
+  it('keeps the conditional hint when the estimate fails', async () => {
+    const { dialog } = await openDialog({ estimateScan: () => fail('security/workspace-unavailable') })
+    expect(dialog.textContent).toContain('Dependency vulnerability lookup is off')
+    expect(dialog.textContent).toContain('If this project has dependencies')
+  })
+
   it('passes the optional subfolder to estimates and scan creation', async () => {
     const { dialog, api } = await openDialog(
       { createScan: () => ok({ scanId: 'subpath-scan' }) },
@@ -520,6 +571,37 @@ describe('finding detail', () => {
     await flush(5)
     expect(page.api.callsOf('setTriage')).toEqual([{ scanId: 'scan-1', findingId: 'f-1', triage: 'false_positive' }])
     expect(page.container.textContent).toContain('Decision saved.')
+  })
+})
+
+describe('completed scan coverage', () => {
+  it('renders the unchecked-dependency gap through the existing Coverage UI', async () => {
+    const gap =
+      '2 dependencies were found but not checked for known vulnerabilities: OSV lookup is off and OSV-Scanner is not installed.'
+    const { container } = await renderPage(
+      baseHandlers({
+        listScans: () => ok([makeScan()]),
+        listFindings: () => ok([]),
+        getScan: () =>
+          ok(
+            makeDetail(
+              {},
+              {
+                coverage: {
+                  files: { total: 1, analyzed: 1, readByAi: 0, excluded: 0 },
+                  endpoints: { total: 0, reviewed: 0 },
+                  tasks: { planned: 0, completed: 0, skipped: 0, failed: 0 },
+                  analyzers: [],
+                  discardedUnverifiable: 0,
+                  gaps: [gap],
+                },
+              },
+            ),
+          ),
+      }),
+    )
+    expect(container.querySelector('.dshsec-coverage')?.textContent).toContain('Known gaps')
+    expect(container.querySelector('.dshsec-coverage')?.textContent).toContain(gap)
   })
 })
 
