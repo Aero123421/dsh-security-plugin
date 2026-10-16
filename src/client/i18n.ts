@@ -126,7 +126,8 @@ const en = {
   'consent.withheldExtra': 'You also chose to never send: {globs}',
   'consent.remote':
     'This page is open from another device. The host’s operator may only allow this from the host machine itself.',
-  'consent.checkbox': 'I agree to send redacted code excerpts to these providers',
+  'consent.checkbox':
+    'I agree to send redacted code excerpts to these providers. This saves the setting for future scans until I turn it off in Settings.',
   'consent.required': 'Tick the box above to continue.',
 
   'error.security/bad-request': 'The host rejected the request as invalid.',
@@ -335,6 +336,7 @@ const en = {
   'findings.search': 'Search findings',
   'findings.searchPlaceholder': 'Title, file or keyword',
   'findings.count': 'Showing {shown} of {total}',
+  'findings.showMore': 'Show more',
   'findings.empty': 'No findings match these filters.',
   'findings.emptyScan': 'This scan reported no findings.',
   'findings.noScan': 'No results yet. Run a scan to see findings here.',
@@ -659,7 +661,8 @@ const ja = {
   'consent.withheldExtra': '次のファイルも送信しないよう設定されています: {globs}',
   'consent.remote':
     'このページは別の端末から開かれています。管理者の設定によっては、DSH が動いているコンピューター本体からしか許可できません。',
-  'consent.checkbox': '伏せ字にしたコードの一部を、上記の送信先に送ることに同意します',
+  'consent.checkbox':
+    '伏せ字にしたコードの一部を、上記の送信先に送ることに同意します。この設定は今後のスキャンにも保存され、「設定」でオフにするまで有効です。',
   'consent.required': '続けるには、上のチェックボックスにチェックを入れてください。',
 
   'error.security/bad-request': 'リクエストの内容が正しくないため、ホストに拒否されました。',
@@ -872,6 +875,7 @@ const ja = {
   'findings.search': '検出結果を検索',
   'findings.searchPlaceholder': 'タイトル・ファイル名・キーワード',
   'findings.count': '{total} 件中 {shown} 件を表示',
+  'findings.showMore': 'さらに表示',
   'findings.empty': 'この条件に当てはまる検出結果はありません。',
   'findings.emptyScan': 'このスキャンでは検出結果はありませんでした。',
   'findings.noScan': 'まだ結果がありません。スキャンを実行すると、ここに検出結果が表示されます。',
@@ -1183,7 +1187,8 @@ const zh = {
     '发送之前，API 密钥、密码等机密信息会被替换为占位符。.env 文件、私钥、证书等敏感文件永远不会发送。',
   'consent.withheldExtra': '你还设置了不发送：{globs}',
   'consent.remote': '此页面是从另一台设备打开的。主机管理员可能只允许在主机本机上进行此操作。',
-  'consent.checkbox': '我同意将已脱敏的代码片段发送给上述服务商',
+  'consent.checkbox':
+    '我同意将已脱敏的代码片段发送给上述服务商。此设置会保存并用于今后的扫描，直到我在设置中将其关闭。',
   'consent.required': '请勾选上方的复选框以继续。',
 
   'error.security/bad-request': '请求无效，已被主机拒绝。',
@@ -1388,6 +1393,7 @@ const zh = {
   'findings.search': '搜索问题',
   'findings.searchPlaceholder': '标题、文件或关键词',
   'findings.count': '显示 {shown} / {total}',
+  'findings.showMore': '显示更多',
   'findings.empty': '没有符合筛选条件的问题。',
   'findings.emptyScan': '本次扫描没有报告任何问题。',
   'findings.noScan': '还没有结果。运行扫描后，问题会显示在这里。',

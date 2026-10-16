@@ -8,6 +8,16 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- Settings saves preserve edits made while saving. Superseded scan and finding loads no longer replace newer results;
+  finding selection stays scoped to the scan being viewed.
+- Dialog focus stays inside while a focused control is busy, and returns to that control after a failed action.
+- Scan estimates expire after 30 seconds and refresh with the project list. Large finding lists initially show
+  200 rows with a Show more button, and reuse search fields and unchanged rows.
+- New Scan explains that AI code-sharing consent is saved for future scans until disabled in Settings. Failed
+  scan creation best-effort restores consent enabled by that attempt without overwriting newer settings.
+
 ## [0.2.1] - 2026-10-16
 
 ### Fixed

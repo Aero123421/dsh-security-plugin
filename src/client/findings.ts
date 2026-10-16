@@ -49,32 +49,43 @@ function rankOf(severity: Severity): number {
   return rank < 0 ? SEVERITIES.length : rank
 }
 
-export function matchesText(finding: FindingSummary, query: string): boolean {
-  const needle = query.trim().toLowerCase()
-  if (!needle) return true
-  const haystack = [
-    finding.title,
-    finding.summary,
-    finding.location?.path,
-    finding.cwe,
-    finding.ruleId,
-    finding.category,
-  ]
+function searchText(finding: FindingSummary): string {
+  return [finding.title, finding.summary, finding.location?.path, finding.cwe, finding.ruleId, finding.category]
     .filter((part): part is string => typeof part === 'string')
     .join('\n')
     .toLowerCase()
-  return needle.split(/\s+/).every(word => haystack.includes(word))
+}
+
+export function matchesText(finding: FindingSummary, query: string): boolean {
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return true
+  const haystack = searchText(finding)
+  return words.every(word => haystack.includes(word))
+}
+
+// Findings are immutable store snapshots. Weak keys let replaced scans and their
+// lowercased search fields be collected rather than retaining them indefinitely.
+const searchIndexes = new WeakMap<readonly FindingSummary[], readonly string[]>()
+function searchIndex(findings: readonly FindingSummary[]): readonly string[] {
+  let index = searchIndexes.get(findings)
+  if (!index) {
+    index = findings.map(searchText)
+    searchIndexes.set(findings, index)
+  }
+  return index
 }
 
 export function filterFindings(findings: readonly FindingSummary[], filter: FindingsFilter): FindingSummary[] {
+  const words = filter.text.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const index = words.length ? searchIndex(findings) : undefined
   return findings
     .filter(
-      f =>
+      (f, i) =>
         filter.severities.includes(f.severity) &&
         filter.closures.includes(f.closure) &&
         (filter.source === 'all' || f.source === filter.source) &&
         filter.triage.includes(f.triage) &&
-        matchesText(f, filter.text),
+        (!index || words.every(word => index[i]!.includes(word))),
     )
     .sort(compareFindings)
 }

@@ -1,6 +1,6 @@
 /** Small view pieces shared by several tabs. */
 
-import { type KeyboardEvent, type ReactNode, useState } from 'react'
+import { type KeyboardEvent, memo, type ReactNode, useState } from 'react'
 import type { FindingSummary, ReportFormat, ScanSummary } from '../../shared/contracts.ts'
 import type { ScanMode } from '../../shared/domain.ts'
 import { Badge, SeverityBadge, TriageBadge, VerificationBadge } from '../components/Badge.tsx'
@@ -144,13 +144,13 @@ export function FirstRun(props: { readonly workspaceId: string | undefined }) {
 }
 
 /** One finding in a list: severity, title, certainty, location, tags. */
-export function FindingRow(props: {
+export const FindingRow = memo(function FindingRow(props: {
   readonly finding: FindingSummary
   readonly selected?: boolean
-  readonly onSelect: () => void
+  readonly onSelect: (finding: FindingSummary) => void
   /** Roving tabindex: only the active row is in the Tab order. */
   readonly tabIndex?: number
-  readonly onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void
+  readonly onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>, finding: FindingSummary) => void
 }) {
   const tr = useT()
   const f = props.finding
@@ -162,8 +162,8 @@ export function FindingRow(props: {
       aria-current={props.selected ? 'true' : undefined}
       data-finding-row={f.id}
       tabIndex={props.tabIndex}
-      onClick={props.onSelect}
-      onKeyDown={props.onKeyDown}
+      onClick={() => props.onSelect(f)}
+      onKeyDown={event => props.onKeyDown?.(event, f)}
     >
       <span className="dshsec-frow-sev">
         <SeverityBadge severity={f.severity} />
@@ -181,7 +181,7 @@ export function FindingRow(props: {
       </span>
     </button>
   )
-}
+})
 
 /** Export menu (History rows) — downloads through the controller. */
 export function ExportMenu(props: { readonly scanId: string; readonly size?: 'sm' | 'md' }) {
