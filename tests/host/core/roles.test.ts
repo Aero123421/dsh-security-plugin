@@ -161,6 +161,7 @@ describe('task prompts', () => {
       endpoints: [endpointOf('GET', '/orders/:id', 'src/routes/orders.ts', 6)],
       signals: [
         { id: 'S1', signal: signalOf({ location: { path: 'src/routes/orders.ts', startLine: 7, endLine: 7 } }) },
+        { id: 'S2', signal: signalOf({ kind: 'sink', ruleId: 'routes.unguarded', title: 'No static auth hints' }) },
       ],
       hypothesis: 'Orders are not scoped\nCheck the query.',
       threatModelSummary: 'A shop.',
@@ -173,6 +174,9 @@ describe('task prompts', () => {
     expect(task).toContain('Hypothesis from the planner (unverified — check it, do not assume it):')
     expect(task).toContain('GET /orders/:id  declared at src/routes/orders.ts:6')
     expect(task).toMatch(/^S1: js\.sql-injection — SQL injection at src\/routes\/orders\.ts:7-7/m)
+    expect(task).toContain('Review steering observations (not findings;')
+    expect(task).toContain('routes.unguarded — No static auth hints')
+    expect(task).not.toContain('S2:')
     expect(task).toContain('Start with these files:\n- src/routes/orders.ts')
     expect(task).toContain('do not report them again):\n- Hard-coded secret (src/config.ts:3)')
   })
@@ -289,17 +293,18 @@ describe('hunterSubmitTool', () => {
     expect(output?.reviewedPaths).toEqual(['src/routes/orders.ts'])
   })
 
-  it('rejects findings without a verified quote at most twice, then accepts', () => {
+  it('rejects findings without a verified quote at most three times, then accepts', () => {
     const tool = hunterSubmitTool(source)
     const args = { findings: [hunterFindingArgs([fake()])], reviewed_paths: [] }
     const first = validate(tool, args)
     expect(first.error).toContain('Finding 1 ("IDOR on orders"): none of its quotes match the source.')
     expect(first.error).toContain('- step 1: src/routes/orders.ts:1-1 — quote not found')
     expect(validate(tool, args).error).toBeDefined()
-    const third = validate(tool, args)
-    expect(third.error).toBeUndefined()
+    expect(validate(tool, args).error).toBeDefined()
+    const fourth = validate(tool, args)
+    expect(fourth.error).toBeUndefined()
     // The unverifiable finding reaches the host marked as such; the host discards it.
-    expect(third.output?.findings[0]?.attackPath[0]?.quoteCheck).toBe('mismatch')
+    expect(fourth.output?.findings[0]?.attackPath[0]?.quoteCheck).toBe('mismatch')
   })
 
   it('honours a custom rejection limit and accepts an empty submission at once', () => {

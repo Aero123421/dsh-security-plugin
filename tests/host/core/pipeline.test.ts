@@ -322,7 +322,28 @@ describe('new findings across scans', () => {
 })
 
 describe('quick scan', () => {
-  it('only triages rule hits: no planner and no reviewer', async () => {
+  it('reviews endpoints in the rule-clean Flask fixture and receives route steering sinks', async () => {
+    const copy = await copyFixture('flask-secure')
+    try {
+      const llm = await oracleLlm()
+      const h = createHarness({ llm, workspaces: [workspace(copy.root)], settings: AI_SETTINGS })
+      const id = await runScan(h, { mode: 'quick' })
+      const scan = h.store.getScan(id)
+      expect(scan?.status).toBe('completed')
+      const tasks = h.store.listTasks(id)
+      expect(tasks.length).toBeGreaterThan(0)
+      expect(tasks.length).toBeLessThanOrEqual(scan?.budget.maxTasks ?? 0)
+      expect(tasks.every(t => t.kind === 'hunt-endpoints' && t.status === 'done')).toBe(true)
+      const prompts = JSON.stringify(llm.calls)
+      expect(prompts).toContain('routes.unguarded')
+      expect(prompts).toContain('Review steering observations (not findings;')
+      expect(h.store.listFindings(id).every(f => f.source === 'ai')).toBe(true)
+    } finally {
+      await copy.cleanup()
+    }
+  })
+
+  it('triages rule hits and fills spare slots with endpoints: no planner and no reviewer', async () => {
     const llm = await oracleLlm()
     const h = createHarness({ llm, workspaces: [workspace()], settings: AI_SETTINGS })
     const id = await runScan(h, { mode: 'quick' })
@@ -335,7 +356,10 @@ describe('quick scan', () => {
     const tasks = h.store.listTasks(id)
     expect(tasks.length).toBeGreaterThan(0)
     expect(tasks.length).toBeLessThanOrEqual(scan?.budget.maxTasks ?? 0)
-    expect(tasks.every(t => t.kind === 'triage-signals' && t.status === 'done')).toBe(true)
+    expect(tasks.every(t => ['triage-signals', 'hunt-endpoints'].includes(t.kind) && t.status === 'done')).toBe(true)
+    expect(tasks.some(t => t.kind === 'triage-signals')).toBe(true)
+    expect(tasks.some(t => t.kind === 'hunt-endpoints')).toBe(true)
+    expect(scan?.usage.llmCalls).toBeLessThanOrEqual(scan?.budget.maxLlmCalls ?? 0)
     const sql = byLocation(h.store.listFindings(id), 'src/routes/products.ts', 27)
     // Enriched by the hunter but not independently reviewed.
     expect(sql).toMatchObject({ title: 'SQL injection in product search', verification: 'potential' })

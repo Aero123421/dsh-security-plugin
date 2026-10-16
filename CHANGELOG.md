@@ -24,6 +24,13 @@ changes; they are called out explicitly.
 
 ### Changed
 
+- Deep and Research AI review now sweep otherwise-untargeted source files within the existing task budget,
+  after higher-priority review work. Configuration, settings, cookie and security-related names also steer file review.
+- Quick AI review now fills spare task slots with the riskiest endpoints after rule-hit triage, without raising
+  its task or model-call limits. Unguarded mutating and sensitive routes steer review but are not findings.
+- Hunters can retry rejected citations three times (was two). Ambiguous-quote errors list candidate lines so
+  the model can correct its citation; evidence verification requirements are unchanged.
+
 - Managed analyzer downloads now pin Gitleaks 8.30.1 (was 8.28.0) and OSV-Scanner 2.7.0 (was 2.2.2) in
   `toolkit.lock.json`, with SHA-256 hashes verified against the upstream checksums files. Newer OSV-Scanner
   releases enable more lockfile extractors by default, so scans may report packages older pins did not see.

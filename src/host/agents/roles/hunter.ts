@@ -171,8 +171,15 @@ export function hunterTask(input: HunterTaskInput): string {
       `Endpoints in scope (detected statically; middleware applied when routers are mounted elsewhere may be missing from this list, so check how and where these routes are mounted):\n${bullets(rows)}\n\nFor each endpoint ask: who can call it? Is authentication enforced (including app- or router-level middleware)? Is access to the specific object or tenant checked against the caller? What happens to user input?`,
     )
   }
-  if (input.signals.length > 0) {
-    const rows = input.signals.map(
+  const reportable = input.signals.filter(({ signal }) => signal.kind !== 'sink')
+  const sinks = input.signals.filter(({ signal }) => signal.kind === 'sink')
+  if (sinks.length > 0) {
+    sections.push(
+      `Review steering observations (not findings; missing static auth hints do not prove missing protection):\n${bullets(sinks.map(({ signal }) => `${signal.ruleId} — ${clipLine(signal.title, 100)} at ${signal.location.path}:${signal.location.startLine}\n    ${clipLine(signal.snippet, 240)}`))}\nCheck reachability, inherited protections and intended public access; do not assess these as rule-hit findings.`,
+    )
+  }
+  if (reportable.length > 0) {
+    const rows = reportable.map(
       ({ id, signal }) =>
         `${id}: ${signal.ruleId} — ${clipLine(signal.title, 100)} at ${signal.location.path}:${signal.location.startLine}-${signal.location.endLine} (rule confidence ${signal.confidence})\n    ${clipLine(signal.snippet, 240)}`,
     )
@@ -195,11 +202,11 @@ export function hunterTask(input: HunterTaskInput): string {
 
 /**
  * Terminal tool for hunters. Citations are verified while validating: a
- * finding without a single matching quote is sent back once or twice so the
+ * finding without a single matching quote is sent back up to three times so the
  * model can correct it; after that the submission is accepted and the host
  * drops unverifiable findings.
  */
-export function hunterSubmitTool(source: QuoteSource, maxRejections = 2): WorkerTool<Submission, HunterOutput> {
+export function hunterSubmitTool(source: QuoteSource, maxRejections = 3): WorkerTool<Submission, HunterOutput> {
   let rejections = 0
   return defineTool<Submission, HunterOutput>({
     name: 'submit_findings',

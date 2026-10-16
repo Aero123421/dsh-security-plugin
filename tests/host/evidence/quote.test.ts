@@ -192,7 +192,10 @@ describe('verifyQuote: mismatch', () => {
     // Only once in the file: relocated. `(req, res) =>` occurs twice: ambiguous.
     expect(result.check).toBe('relocated')
     const twice = verifyQuote(source, { path: 'src/app.ts', startLine: 1, endLine: 1, quote: '(req, res) =>' })
-    expect(twice).toEqual({ check: 'mismatch', reason: 'quote ambiguous' })
+    expect(twice).toEqual({
+      check: 'mismatch',
+      reason: 'quote ambiguous; candidate lines: 6, 13; cite the exact lines of one occurrence',
+    })
   })
 
   it('prefers the cited occurrence over ambiguity', () => {
@@ -363,11 +366,15 @@ describe('verifyQuote: cited ranges are narrowed and bounded', () => {
   const CONFIG = 'const config = loadConfig(process.env.CONFIG_PATH)'
 
   it('does not let a wide cited range verify a quote that occurs twice (audit repro)', () => {
-    expect(cite(20, 20, 'isAdmin(req.user)')).toEqual({ check: 'mismatch', reason: 'quote ambiguous' })
+    expect(cite(20, 20, 'isAdmin(req.user)')).toEqual({
+      check: 'mismatch',
+      reason: 'quote ambiguous; candidate lines: 8, 30; cite the exact lines of one occurrence',
+    })
     const wide = cite(1, 40, 'isAdmin(req.user)')
     expect(wide).toEqual({
       check: 'mismatch',
-      reason: 'quote ambiguous: it occurs 2 times in lines 1-43; cite the exact lines of one occurrence',
+      reason:
+        'quote ambiguous: it occurs 2 times in lines 1-43; candidate lines: 8, 30; cite the exact lines of one occurrence',
     })
   })
 
@@ -420,7 +427,7 @@ describe('verifyQuote: cited ranges are narrowed and bounded', () => {
     expect(at(5, 5)).toMatchObject({ check: 'match', location: { startLine: 4, endLine: 4 } })
     expect(at(1, 7)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } }) // 7 <= 1 + 2 × 3
     expect(at(1, 8).reason).toBe(
-      'quote ambiguous: it occurs 2 times in lines 1-10; cite the exact lines of one occurrence',
+      'quote ambiguous: it occurs 2 times in lines 1-10; candidate lines: 2, 4; cite the exact lines of one occurrence',
     )
     expect(at(2, 4, { slackLines: 0 }).reason).toMatch(/^quote ambiguous: it occurs 2 times in lines 2-4/)
     expect(at(2, 2, { slackLines: 0 })).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
