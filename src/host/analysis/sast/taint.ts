@@ -170,9 +170,18 @@ interface AliasEvent {
 }
 
 interface ScopeState {
-  readonly aliases: Map<string, Taint>
+  readonly aliases: Pick<ReadonlyMap<string, Taint>, 'get'>
   /** Names bound to a whole request body (`const data = req.body`). */
+  readonly wholeBody: Pick<ReadonlyMap<string, string>, 'get'>
+}
+
+interface ScopeCursor {
+  at: number
+  index: number
+  readonly aliases: Map<string, Taint>
   readonly wholeBody: Map<string, string>
+  readonly assignedInside: Set<string>
+  readonly view: ScopeState
 }
 
 const WHOLE_BODY_JS =
@@ -185,6 +194,7 @@ export class Expr {
   readonly model: FileModel
   readonly #sources: readonly SourcePattern[]
   readonly #keywords: ReadonlySet<string>
+  readonly #stateByFn = new Map<FnFact | undefined, ScopeCursor>()
   readonly #eventsByFn = new Map<FnFact | undefined, AliasEvent[]>()
   readonly #paramTaint = new Map<FnFact, Map<string, Taint>>()
   #flaskConverters: Map<FnFact, Set<string>> | undefined
@@ -745,39 +755,51 @@ export class Expr {
     return method !== undefined && JS_TRANSPARENT_METHODS.has(method)
   }
 
-  /** Alias state at offset `at`, replaying the precomputed events of the innermost function. */
+  /** Reuse the per-function cursor for increasing offsets; backward queries rebuild exact state.
+   * The cache belongs to this immutable file model/Expr only and is released with it.
+   */
   #stateAt(at: number): ScopeState {
     const fn = innermostFn(this.model.fns, at)
     const events = this.#events(fn)
-    const aliases = new Map<string, Taint>()
-    const wholeBody = new Map<string, string>()
-    for (const chainFn of [...fnChain(fn)].reverse()) {
-      for (const [name, taint] of this.#paramTaints(chainFn)) aliases.set(name, taint)
+    let cursor = this.#stateByFn.get(fn)
+    if (!cursor || at < cursor.at) {
+      const aliases = new Map<string, Taint>()
+      const wholeBody = new Map<string, string>()
+      for (const chainFn of [...fnChain(fn)].reverse()) {
+        for (const [name, taint] of this.#paramTaints(chainFn)) aliases.set(name, taint)
+      }
+      const own = fn ? this.#paramTaints(fn) : undefined
+      const shadowed = new Set(fn?.params.flatMap(param => param.names.filter(name => !own?.has(name))))
+      const assignedInside = new Set<string>()
+      const hidden = (name: string) => shadowed.has(name) && !assignedInside.has(name)
+      cursor = {
+        at: Number.NEGATIVE_INFINITY,
+        index: 0,
+        aliases,
+        wholeBody,
+        assignedInside,
+        // Filter shadowed parameters without copying every alias map or mutating the replay state.
+        view: {
+          aliases: { get: name => (hidden(name) ? undefined : aliases.get(name)) },
+          wholeBody: { get: name => (hidden(name) ? undefined : wholeBody.get(name)) },
+        },
+      }
+      this.#stateByFn.set(fn, cursor)
     }
-    for (const event of events) {
+    while (cursor.index < events.length) {
+      const event = events[cursor.index]!
       if (event.at > at) break
+      cursor.index++
       for (const name of event.names) {
-        if (event.taint) aliases.set(name, event.taint)
-        else if (!event.augmented) aliases.delete(name)
-        if (event.whole) wholeBody.set(name, event.whole)
-        else if (!event.augmented) wholeBody.delete(name)
+        if (event.taint) cursor.aliases.set(name, event.taint)
+        else if (!event.augmented) cursor.aliases.delete(name)
+        if (event.whole) cursor.wholeBody.set(name, event.whole)
+        else if (!event.augmented) cursor.wholeBody.delete(name)
+        if (fn && event.at >= fn.start) cursor.assignedInside.add(name)
       }
     }
-    if (fn) {
-      // Parameters of the innermost function shadow outer aliases of the same name.
-      const own = this.#paramTaints(fn)
-      for (const param of fn.params) {
-        for (const name of param.names) {
-          if (own.has(name)) continue
-          const setInside = events.some(e => e.at <= at && e.at >= fn.start && e.names.includes(name))
-          if (!setInside) {
-            aliases.delete(name)
-            wholeBody.delete(name)
-          }
-        }
-      }
-    }
-    return { aliases, wholeBody }
+    cursor.at = at
+    return cursor.view
   }
 
   #events(fn: FnFact | undefined): AliasEvent[] {
@@ -786,7 +808,7 @@ export class Expr {
     const scope = new Set<FnFact | undefined>([undefined, ...fnChain(fn)])
     const relevant = this.model.assigns.filter(assign => scope.has(assign.fn))
     const events: AliasEvent[] = []
-    const state: ScopeState = { aliases: new Map(), wholeBody: new Map() }
+    const state = { aliases: new Map<string, Taint>(), wholeBody: new Map<string, string>() }
     for (const chainFn of [...fnChain(fn)].reverse()) {
       for (const [name, taint] of this.#paramTaints(chainFn)) state.aliases.set(name, taint)
     }

@@ -14,7 +14,7 @@ import { RpcError } from '../rpc/errors.ts'
 import { roleRoute, type SettingsService } from '../settings.ts'
 import { resolveScanRoot } from './root.ts'
 import { newId } from './findings.ts'
-import { initialPhases, type PipelineDeps, ScanJob } from './pipeline.ts'
+import { initialPhases, MAX_TASK_ATTEMPTS, type PipelineDeps, ScanJob } from './pipeline.ts'
 
 export interface ControllerDeps extends Omit<PipelineDeps, 'live'> {
   readonly settings: SettingsService
@@ -108,6 +108,41 @@ export class ScanController {
           { roles: missing },
         )
       }
+      // Resolution validates exact model identity; cache only for this creation, never across settings/HMR.
+      const resolved = new Map<string, Awaited<ReturnType<typeof llm.resolveModelInfo>>>()
+      for (const role of ROLE_NAMES) {
+        const route = models[role]
+        if (!route) continue
+        const key = JSON.stringify([route.provider, route.model])
+        let info = resolved.get(key)
+        if (!info) {
+          try {
+            info = await llm.resolveModelInfo(route.provider, route.model)
+          } catch {
+            throw new RpcError(
+              'security/no-model',
+              `The selected ${role} model (${route.provider}/${route.model}) could not be resolved. Update Security model settings.`,
+              { role },
+            )
+          }
+          resolved.set(key, info)
+        }
+        if (route.reasoningEffort !== undefined && !info.reasoning?.efforts.some(e => e.id === route.reasoningEffort)) {
+          throw new RpcError(
+            'security/no-model',
+            `The selected ${role} model does not support reasoning effort "${route.reasoningEffort}". Update Security model settings.`,
+            { role },
+          )
+        }
+        // DSH exposes a default output count, not an output ceiling. Never mistake that default for a maximum.
+        if (route.maxOutputTokens !== undefined && info.context && route.maxOutputTokens > info.context.contextWindow) {
+          throw new RpcError(
+            'security/no-model',
+            `The selected ${role} maxOutputTokens (${route.maxOutputTokens}) exceeds the model context limit (${info.context.contextWindow}).`,
+            { role },
+          )
+        }
+      }
       if (!settings.privacy.sendCodeToModel) {
         throw new RpcError(
           'security/consent-required',
@@ -169,8 +204,18 @@ export class ScanController {
     const scan = this.require(id)
     if (!['paused', 'interrupted', 'failed'].includes(scan.status)) throw invalidState(scan, 'resume')
     const { store } = this.deps
+    const busy = store
+      .listScans({ workspaceId: scan.workspaceId, workspaceRoot: scan.workspaceRoot, statuses: ACTIVE, limit: 500 })
+      .find(other => other.id !== id)
+    if (busy)
+      throw new RpcError('security/busy', 'A scan of this project is already queued or running.', { scanId: busy.id })
     const updated = store.transaction(() => {
       for (const task of store.listTasks(id, ['running'])) store.updateTask(task.id, { status: 'pending' })
+      // Explicit resume alone retries failed work. Crash recovery deliberately leaves failures untouched.
+      // Attempts count worker runs, including interrupted runs, and never reset across resumes.
+      for (const task of store.listTasks(id, ['failed'])) {
+        if (task.attempts < MAX_TASK_ATTEMPTS) store.updateTask(task.id, { status: 'pending' })
+      }
       for (const run of store.listAgentRuns(id)) {
         if (run.status === 'running') {
           store.updateAgentRun(run.id, {
@@ -179,6 +224,14 @@ export class ScanController {
             finishedAt: this.deps.now().toISOString(),
           })
         }
+      }
+      if (scan.pluginVersion !== this.deps.pluginVersion) {
+        store.appendEvent(
+          id,
+          'info',
+          'plugin-version-changed',
+          'The plugin version changed since scan creation. Pending tasks will be refreshed from the new analysis; completed tasks are retained.',
+        )
       }
       const queued = store.updateScan(id, { status: 'queued', clearError: true, clearFinishedAt: true })
       store.appendEvent(id, 'info', 'resumed', 'Scan queued to resume')

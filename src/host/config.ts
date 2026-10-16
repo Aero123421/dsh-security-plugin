@@ -22,6 +22,8 @@ export const Config = z.object({
   maxConcurrentScans: positiveInt(8).default(1),
   /** Files read into one snapshot. */
   maxFiles: positiveInt(1_000_000).default(20_000),
+  /** Walked entries, including directories and excluded files (bounds excluded-only trees). */
+  maxEntries: positiveInt(10_000_000).default(100_000),
   /** Largest single file read into a snapshot, in bytes. */
   maxFileBytes: positiveInt(64 * 1024 * 1024).default(1024 * 1024),
   /** Total snapshot size, in bytes. */

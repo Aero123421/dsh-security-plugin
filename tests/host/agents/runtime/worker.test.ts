@@ -614,11 +614,11 @@ describe('runWorker: retries', () => {
     expect(result.error).toEqual({ code: 'INTERNAL', message: 'listener exploded' })
   })
 
-  it('treats a stream without a finish chunk as INTERNAL', async () => {
-    const llm = new FakeLlm([textBlock(0, 'no finish')])
+  it('accepts a nonempty clean EOF as stop and nudges for submission', async () => {
+    const llm = new FakeLlm([textBlock(0, 'no finish'), callReply('s', 'submit_report', SUBMISSION)])
     const result = await runWorker(makeSpec(llm).spec)
-    expect(result.status).toBe('failed')
-    expect(result.error?.code).toBe('INTERNAL')
+    expect(result.status).toBe('submitted')
+    expect(llm.calls).toHaveLength(2)
   })
 })
 

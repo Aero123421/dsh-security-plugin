@@ -118,12 +118,14 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 Quick mode asks the AI only to confirm or dismiss rule hits. It does not look for logic flaws such as broken
 authorization. If the built-in rules find nothing, Quick runs no AI tasks.
 
-When any budget limit is reached, the scan stops starting new work, finishes, and lists what was skipped. Budgets
+When an AI budget limit is reached, the scan stops starting new work, finishes, and lists what was skipped. Budgets
 are editable per mode in Settings and are capped by the operator limits (see
-[docs/configuration.md](docs/configuration.md)). Each scan keeps the settings, models and budget it started with,
-except two privacy settings: turning off *Send code to the AI model* also stops the AI review of scans that are queued,
-paused or running (they finish with the built-in analyzers' results), and new *Never send these files* patterns apply
-when a scan starts or resumes. The time limit is a deadline: requests still running when it passes are stopped.
+[configuration](<docs/configuration.md>)). The time limit also bounds deterministic analysis and external tools:
+if it expires during analysis, the scan remains interrupted with an incomplete-coverage gap, rather than claiming
+completion. Resume re-analyzes within the original remaining time; start a new scan with a larger budget if needed.
+Each scan keeps its models and budget. Turning off *Send code to the AI model* also stops the AI review of scans
+that are queued, paused or running; new *Never send these files* patterns apply when a scan starts or resumes.
+*Keep transcripts* is re-read at worker completion, so turning it off stops further transcript saves.
 
 ## Privacy and data flow
 

@@ -112,6 +112,8 @@ export interface WorkerResult<T> {
    * i.e. reported `inputTokens + cacheReadTokens + cacheWriteTokens`.
    */
   readonly usage: { readonly inputTokens: number; readonly outputTokens: number; readonly llmCalls: number }
+  /** Any non-terminal stream chunk received across attempts (error finish alone is a rejection). */
+  readonly receivedAnyStreamChunk: boolean
   readonly transcript: readonly TranscriptEntry[]
   /** The provider (or internal) failure behind `failed` / `blocked_by_provider`. */
   readonly error?: { readonly code: string; readonly message: string }
@@ -227,7 +229,7 @@ interface Reply {
   readonly replayState: unknown
 }
 
-type AttemptOutcome =
+type AttemptOutcome = { readonly receivedAnyStreamChunk: boolean } & (
   | {
       readonly ok: true
       readonly blocks: LlmContentBlock[]
@@ -241,6 +243,7 @@ type AttemptOutcome =
       readonly finish: string
       readonly failure: LlmFailure
     }
+)
 
 type Verdict<T> = { readonly ok: true; readonly output: T } | { readonly ok: false; readonly result: ToolResult }
 
@@ -259,6 +262,7 @@ class WorkerRun<T> {
   private inputTokens = 0
   private outputTokens = 0
   private llmCalls = 0
+  private receivedAnyStreamChunk = false
 
   constructor(private readonly spec: WorkerSpec<T>) {
     this.sessionId = spec.sessionId ?? randomUUID()
@@ -313,6 +317,7 @@ class WorkerRun<T> {
         spec.signal,
         spec.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       )
+      this.receivedAnyStreamChunk ||= outcome.receivedAnyStreamChunk
       const usage: LlmTokenUsage = outcome.usage ? { ...outcome.usage } : { inputTokens: 0, outputTokens: 0 }
       this.recordUsage(usage)
       this.transcript.push({ kind: 'usage', at: now(), turn, usage, finish: outcome.finish })
@@ -646,6 +651,7 @@ class WorkerRun<T> {
       toolCalls: this.toolCalls,
       usage: { inputTokens: this.inputTokens, outputTokens: this.outputTokens, llmCalls: this.llmCalls },
       transcript: this.transcript.slice(),
+      receivedAnyStreamChunk: this.receivedAnyStreamChunk,
     }
     if (status === 'submitted') {
       result.output = fields.output
@@ -678,7 +684,18 @@ async function consumeStream(
   signal: AbortSignal,
   idleMs: number,
 ): Promise<AttemptOutcome> {
+  // Same open-block tolerance as DSH BlockAssembler; first close wins.
   const blocks = new Map<number, LlmContentBlock>()
+  const partials = new Map<number, { type: string; text: string; id: string; name: string; args: string }>()
+  let receivedAnyStreamChunk = false
+  const partial = (index: number, type: string) => {
+    let value = partials.get(index)
+    if (!value) {
+      value = { type, text: '', id: `call-${index}`, name: '', args: '' }
+      partials.set(index, value)
+    }
+    return value
+  }
   let usage: LlmTokenUsage | undefined
   let reason: LlmFinishReason | undefined
   let replayState: unknown
@@ -698,23 +715,53 @@ async function consumeStream(
       }
       if (next.done) break
       const chunk = next.value
-      if (chunk.type === 'block-end') {
-        blocks.set(chunk.index, chunk.block)
+      // Error finish chunks are also emitted for immediate HTTP rejections.
+      if (chunk.type !== 'finish') receivedAnyStreamChunk = true
+      if (chunk.type === 'block-start') {
+        partial(chunk.index, chunk.blockType)
+      } else if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+        if (!blocks.has(chunk.index))
+          partial(chunk.index, chunk.type === 'text-delta' ? 'text' : 'reasoning').text += chunk.text
+      } else if (chunk.type === 'tool-call-delta') {
+        if (!blocks.has(chunk.index)) {
+          const value = partial(chunk.index, 'tool-call')
+          value.id = chunk.id
+          if (chunk.name) value.name = chunk.name
+          value.args += chunk.argumentsDelta
+        }
+      } else if (chunk.type === 'block-end') {
+        partial(chunk.index, chunk.block.type)
+        if (!blocks.has(chunk.index)) blocks.set(chunk.index, chunk.block)
       } else if (chunk.type === 'usage') {
         usage = chunk.usage
       } else if (chunk.type === 'finish') {
         reason = chunk.reason
         replayState = chunk.replayState
         // Like `break` in `for await`: let the provider clean up.
-        await iterator.return?.()
+        abandon(iterator)
         break
       }
     }
   } catch (error) {
     // A throw after the terminal finish (e.g. from iterator cleanup) does not undo the response.
     if (!reason) {
-      const code = signal.aborted ? 'ABORTED' : 'INTERNAL'
-      return { ok: false, usage, finish: 'error', failure: { code, message: errorText(error) } }
+      const providerError = error as { code?: unknown; status?: number }
+      const code = signal.aborted
+        ? 'ABORTED'
+        : typeof providerError?.code === 'string'
+          ? providerError.code
+          : 'INTERNAL'
+      return {
+        ok: false,
+        receivedAnyStreamChunk,
+        usage,
+        finish: 'error',
+        failure: {
+          code,
+          message: errorText(error),
+          ...(providerError?.status ? { status: providerError.status } : {}),
+        },
+      }
     }
   } finally {
     signal.removeEventListener('abort', forward)
@@ -727,26 +774,43 @@ async function consumeStream(
     const seconds = Math.max(1, Math.round(idleMs / 1000))
     return {
       ok: false,
+      receivedAnyStreamChunk,
       usage,
       finish: 'error',
       failure: { code: 'TIMEOUT', message: `The model sent no data for ${seconds} s; the request was abandoned` },
     }
   }
   if (abandoned === ABORTED) {
-    return { ok: false, usage, finish: 'aborted', failure: { code: 'ABORTED', message: 'The request was aborted' } }
+    return {
+      ok: false,
+      receivedAnyStreamChunk,
+      usage,
+      finish: 'aborted',
+      failure: { code: 'ABORTED', message: 'The request was aborted' },
+    }
   }
+  for (const [index, value] of partials) {
+    if (blocks.has(index)) continue
+    if (value.type === 'text' || value.type === 'reasoning') blocks.set(index, { type: value.type, text: value.text })
+    else if (value.type === 'tool-call')
+      blocks.set(index, { type: 'tool-call', id: value.id, name: value.name, arguments: value.args })
+  }
+  // A clean EOF is stop only with an assembled block. Empty EOF remains retryable;
+  // adapter-reported STREAM_CLOSED/errors above are never converted into success.
+  if (!reason && blocks.size > 0) reason = { kind: 'stop' }
   if (!reason) {
     return {
       ok: false,
+      receivedAnyStreamChunk,
       usage,
       finish: 'error',
       failure: { code: 'INTERNAL', message: 'The model stream ended without a finish chunk' },
     }
   }
   const failure = failureOf(reason)
-  if (failure) return { ok: false, usage, finish: reason.kind, failure }
+  if (failure) return { ok: false, receivedAnyStreamChunk, usage, finish: reason.kind, failure }
   const ordered = [...blocks.entries()].sort((a, b) => a[0] - b[0]).map(([, block]) => block)
-  return { ok: true, blocks: ordered, usage, finish: reason.kind, replayState }
+  return { ok: true, receivedAnyStreamChunk, blocks: ordered, usage, finish: reason.kind, replayState }
 }
 
 /** The next chunk, or {@link IDLE} after `idleMs` without one, or {@link ABORTED} once `signal` aborts. */
