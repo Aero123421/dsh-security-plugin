@@ -549,6 +549,8 @@ describe('osv-scanner', () => {
       expect(legacy[legacy.indexOf('--config') + 1]).toMatch(/osv-scanner\.toml$/)
       expect(legacy).toContain('--no-call-analysis=all')
       expect(legacy).not.toContain('--docker')
+      expect(legacy).not.toContain(dir)
+      expect(legacy.at(-1)).toMatch(/dsh-osv-scanner-[^/]+\/snapshot$/)
     } finally {
       await cleanup()
     }

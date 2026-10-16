@@ -237,7 +237,7 @@ directory, and under `externalTimeoutMs`. Their results are limited to files in 
 | Tool | How it runs | Produces |
 | --- | --- | --- |
 | **Gitleaks** (8.19+ uses `gitleaks dir`, older uses `detect --no-git`) | Plugin-written config with the default rules (the repository's `.gitleaks.toml` and ignore file have no effect), `--redact`, `--ignore-gitleaks-allow` (inline suppression disabled), max target 10 MB per file; a private JSON report is checked every 25 ms and the process tree is killed immediately once observed over 128 MiB (the final read rechecks the cap) | `secret` signals (critical for private keys, medium/low for generic rules, high otherwise) |
-| **OSV-Scanner** (v2 preferred, v1 supported) | `scan source --recursive --no-resolve --no-call-analysis=all --config <empty plugin-written file>` (the repository's `osv-scanner.toml` ignores have no effect), plus `--offline` unless OSV lookups are on. Offline with no local database → reported unavailable. | `dependency` signals, same shape as the built-in OSV lookup |
+| **OSV-Scanner** (v2 preferred, v1 supported) | Targets only staged, non-withheld snapshot dependency files, never the live repository. `scan source --recursive --no-resolve --no-call-analysis=all --config <empty plugin-written file>` (the repository's `osv-scanner.toml` ignores have no effect), plus `--offline` unless OSV lookups are on. Offline with no local database → reported unavailable. | `dependency` signals, same shape as the built-in OSV lookup |
 | **Semgrep** | Only if `semgrepConfig` is set: `semgrep scan --json --metrics=off --disable-version-check --disable-nosem --no-git-ignore --config <path>`, 2 MB per file, 30 s per rule. Registry rules are never used; `nosemgrep` comments are ignored, but a `.semgrepignore` file in the project still applies. | `vulnerability` signals, categorized from CWE metadata |
 
 Semgrep's `--no-git-ignore` avoids git-aware target discovery: repository-local `core.fsmonitor` must not run.
@@ -248,7 +248,8 @@ Gitleaks' suppression flag was verified with the pinned 8.30.1 binary; versions 
 retrying with suppression enabled. Gitleaks directory mode (and legacy `--no-git`) do not scan git history.
 OSV-Scanner 1.9.2 reads repository state with go-git rather than invoking Git; 2.7.0 source scanning was also checked
 against a repository fsmonitor hook. No equivalent Git-command execution reproduced in these runners. OSV's
-package-manager resolution and call/build analysis remain disabled. Report polling bounds ongoing growth, but
+staged target contains no repository Git configuration; disabled package-manager resolution and call/build analysis
+remain defense in depth in both runner versions. Report polling bounds ongoing growth, but
 writes between polls can exceed the threshold briefly; the oversized report is never parsed.
 
 Builtin and external results for the same location and category are de-duplicated (the first one wins).
