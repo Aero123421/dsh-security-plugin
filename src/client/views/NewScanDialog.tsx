@@ -7,6 +7,7 @@ import { Callout } from '../components/Callout.tsx'
 import { ChoiceCards } from '../components/Choice.tsx'
 import { Field, Select, type SelectOption } from '../components/Field.tsx'
 import { Modal } from '../components/Modal.tsx'
+import { ProjectSelect } from '../components/ProjectSelect.tsx'
 import { useController, useSecurity, useT } from '../context.tsx'
 import type { NewScanRequest } from '../controller.ts'
 import { DASH, formatCompact, formatNumber } from '../format.ts'
@@ -147,11 +148,6 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
     setError(result.error)
   }
 
-  const workspaceOptions = workspaces.map(w => ({
-    value: w.id,
-    label: w.title && w.displayPath ? `${w.title} — ${w.displayPath}` : w.title || w.displayPath || w.id,
-  }))
-
   return (
     <Modal
       title={tr.t('newScan.title')}
@@ -179,14 +175,17 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
         }}
       >
         <Field label={tr.t('newScan.project')} hint={tr.t('project.managedHint')}>
-          {({ id, describedBy }) => (
+          {({ id, describedBy, invalid }) => (
             <>
-              <Select
+              <ProjectSelect
                 id={id}
+                variant="field"
+                ariaLabel={tr.t('newScan.project')}
                 value={workspaceId}
-                options={workspaceOptions}
-                disabled={workspaceOptions.length <= 1 || addingProject || submitting}
+                workspaces={workspaces}
+                disabled={addingProject || submitting}
                 describedBy={describedBy}
+                invalid={invalid}
                 onChange={value => {
                   setWorkspaceId(value)
                   setSubpath('')

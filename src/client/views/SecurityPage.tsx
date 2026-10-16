@@ -3,12 +3,13 @@ import type { WorkspaceSummary } from '../../shared/contracts.ts'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
 import { ErrorBoundary } from '../components/ErrorBoundary.tsx'
+import { ProjectSelect } from '../components/ProjectSelect.tsx'
 import { Tabs, tabPanelProps } from '../components/Tabs.tsx'
 import { ControllerProvider, PageWidthContext, useController, useSecurity, useT } from '../context.tsx'
 import { TAB_IDS, type SecurityController, type TabId } from '../controller.ts'
 import { useElementWidth } from '../hooks.ts'
 import { errorText } from '../i18n.ts'
-import { IconChevronDown, IconFolder, IconPlus, IconRefresh } from '../icons.tsx'
+import { IconPlus, IconRefresh } from '../icons.tsx'
 import { AddProjectFolder } from './AddProjectFolder.tsx'
 import { FindingsView, SPLIT_MIN_WIDTH } from './Findings.tsx'
 import { HistoryView } from './History.tsx'
@@ -121,47 +122,14 @@ function PageHeader() {
   )
 }
 
-/**
- * The current project as a quiet line (title, then the path in secondary
- * text, truncated). With several projects a transparent native select sits on
- * top, so picking stays keyboard- and screen-reader-friendly.
- */
+/** The current project as a quiet line, with a themed listbox when there is a choice. */
 export function ProjectPicker(props: {
   readonly workspaces: readonly WorkspaceSummary[]
   readonly value: string | undefined
   readonly onChange: (workspaceId: string) => void
 }) {
   const tr = useT()
-  const { workspaces } = props
-  const current = workspaces.find(w => w.id === props.value) ?? workspaces[0]
-  const title = current?.title || current?.displayPath || current?.id || ''
-  const path = current?.title && current.displayPath ? current.displayPath : ''
-  const many = workspaces.length > 1
-  return (
-    <div className={`dshsec-project${many ? ' is-picker' : ''}`} title={path || title}>
-      <IconFolder size={16} />
-      <span className="dshsec-project-title">{title}</span>
-      {path ? <span className="dshsec-project-path">{path}</span> : null}
-      {many ? (
-        <>
-          <IconChevronDown size={14} />
-          <select
-            aria-label={tr.t('page.workspace')}
-            value={current?.id ?? ''}
-            onChange={event => props.onChange(event.target.value)}
-          >
-            {workspaces.map(w => (
-              <option key={w.id} value={w.id}>
-                {w.title && w.displayPath ? `${w.title} — ${w.displayPath}` : w.title || w.displayPath || w.id}
-              </option>
-            ))}
-          </select>
-        </>
-      ) : (
-        <span className="dshsec-visually-hidden">{tr.t('page.workspace')}</span>
-      )}
-    </div>
-  )
+  return <ProjectSelect {...props} variant="quiet" ariaLabel={tr.t('page.workspace')} />
 }
 
 function GlobalBanners() {
