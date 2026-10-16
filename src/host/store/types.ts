@@ -51,7 +51,7 @@ export type ScanPatch = Partial<
     | 'models'
     | 'snapshotDigest'
   >
-> & { readonly clearError?: boolean; readonly clearProgress?: boolean }
+> & { readonly clearError?: boolean; readonly clearProgress?: boolean; readonly clearFinishedAt?: boolean }
 
 export type TaskPatch = Partial<
   Pick<TaskRecord, 'status' | 'attempts' | 'error' | 'outcome' | 'startedAt' | 'finishedAt'>
@@ -123,6 +123,8 @@ export interface SecurityStore {
   updateScan(id: string, patch: ScanPatch): ScanRecord
   getScan(id: string): ScanRecord | undefined
   listScans(query?: ScanQuery): ScanRecord[]
+  /** All running scans, plus interrupted scans with unfinished worker/task cleanup. No history-list limit. */
+  scansNeedingRecovery(): ScanRecord[]
   /** The newest `completed` scan of an effective root created before `before` (exclusive), if any. */
   previousCompletedScan(rootKey: string, before: string): ScanRecord | undefined
   /** Delete a scan and everything that belongs to it. Returns false when absent. */
@@ -172,7 +174,7 @@ export interface SecurityStore {
   ): { readonly counts: SeverityCounts; readonly confirmed: number }
 
   // Triage ---------------------------------------------------------------------
-  /** Recover retained UUID-keyed v1 triage once its registered canonical path is known. */
+  /** Re-key UUID triage and canonical-equivalent legacy scan/triage paths on workspace registration. */
   reconcileTriageRoot(workspaceId: string, rootKeyBase: string): void
   getTriage(rootKeyBase: string, fingerprints: readonly string[]): Map<string, TriageRecord>
   setTriage(rootKeyBase: string, fingerprint: string, state: TriageState, note: string | undefined): TriageRecord

@@ -15,6 +15,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { isBuiltin } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -106,6 +107,34 @@ if (clientBytes >= CLIENT_MAX_BYTES) {
 const host = readFileSync(join(root, 'lib/index.js'), 'utf8')
 if (host.trim() === '') fail('lib/index.js is empty')
 else if (!/export\s*\{[^}]*\bapply\b[^}]*\}/.test(host)) fail('lib/index.js does not export `apply` (the plugin entry)')
+
+// Check runtime specifiers, including ast-grep's constant-valued dynamic imports.
+// Dev dependencies are bundled, not available to consumers of the tarball.
+const declared = { ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies }
+const code = host
+  .split('\n')
+  .filter(line => !/^\s*(?:\/\/|\*|\/\*)/.test(line))
+  .join('\n')
+const constants = new Map(
+  [...code.matchAll(/\b(?:const|var|let)\s+(\w+)\s*=\s*["']([^"']+)["']/g)].map(m => [m[1], m[2]]),
+)
+const specifiers = new Set()
+for (const match of code.matchAll(/(?<![\w.])(?:import|(?:__)?require)\(\s*([^\s?)][^\n)]*)\s*\)(?!\s*\{)/g)) {
+  const expression = match[1].trim()
+  const literal = /^["']([^"']+)["']$/.exec(expression)?.[1]
+  const specifier = literal ?? constants.get(expression)
+  if (specifier) specifiers.add(specifier)
+  else fail(`lib/index.js: cannot verify dynamic module specifier ${expression}`)
+}
+for (const match of code.matchAll(/^import\s+(?:[^\n]*?\s+from\s+)?["']([^"']+)["']/gm)) specifiers.add(match[1])
+for (const specifier of specifiers) {
+  if (isBuiltin(specifier)) continue
+  const name = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0]
+  if (!Object.hasOwn(declared, name))
+    fail(
+      `lib/index.js: runtime module ${specifier} is not declared in package.json dependencies, optionalDependencies or peerDependencies`,
+    )
+}
 
 // -- package.json -------------------------------------------------------------
 

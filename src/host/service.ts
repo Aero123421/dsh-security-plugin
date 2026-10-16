@@ -73,15 +73,15 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
   const reconciledTriage = new Map<string, string>()
   const reconcileTriage = (): void => {
     for (const workspace of deps.workspaces()?.list() ?? []) {
-      if (reconciledTriage.get(workspace.id) === workspace.path) continue
       let root: string
       try {
         root = realpathSync(workspace.path)
       } catch {
         continue
       }
+      if (reconciledTriage.get(workspace.id) === root) continue
       store.reconcileTriageRoot(workspace.id, root)
-      reconciledTriage.set(workspace.id, workspace.path)
+      reconciledTriage.set(workspace.id, root)
     }
   }
   // Registry services can appear after this plugin starts; read paths retry lazily.
@@ -254,7 +254,14 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
           ? { id: 'osv', available: true, source: 'builtin' }
           : { id: 'osv', available: false, source: 'disabled', reason: 'dependency lookup is turned off' },
         astGrep
-          ? { id: 'ast-grep', available: true, source: 'builtin' }
+          ? {
+              id: 'ast-grep',
+              available: true,
+              source: 'builtin',
+              reason: astGrep.supportsPython
+                ? 'Python AST available'
+                : 'Python AST unavailable; Python uses the built-in parser',
+            }
           : {
               id: 'ast-grep',
               available: false,
@@ -280,6 +287,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     },
 
     async listWorkspaces() {
+      reconcileTriage()
       const registry = deps.workspaces()
       if (!registry) return []
       return registry.list().map((workspace): WorkspaceSummary => {
@@ -396,11 +404,13 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     },
 
     async createScan(payload) {
+      reconcileTriage()
       const scan = await controller.create(payload)
       return { scanId: scan.id }
     },
 
     async listScans(payload) {
+      reconcileTriage()
       return store
         .listScans({
           ...(payload.workspaceId

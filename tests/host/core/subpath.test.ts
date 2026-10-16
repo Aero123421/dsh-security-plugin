@@ -15,7 +15,7 @@ import { createHandlers } from '../../../src/host/service.ts'
 import { scanParams } from '../../../src/host/store/records.ts'
 import { MIGRATIONS } from '../../../src/host/store/schema.ts'
 import { openSecurityStore } from '../../../src/host/store/sqlite.ts'
-import { scanOf } from '../store/fixtures.ts'
+import { findingOf, scanOf } from '../store/fixtures.ts'
 import { copyFixture, createHarness, type Harness, noNetwork, registryOf } from './helpers.ts'
 
 let root: string
@@ -250,6 +250,32 @@ it('confines workers to scoped content while retaining workspace paths and git m
   ).toEqual([])
 })
 
+it.each([
+  { status: 'paused', subpath: undefined },
+  { status: 'paused', subpath: 'packages/a' },
+  { status: 'queued', subpath: undefined },
+] as const)('runs a legacy $status scan under a canonical-equivalent root ($subpath)', async ({ status, subpath }) => {
+  await symlink(root, join(root, 'legacy-alias'), 'dir')
+  h.store.insertScan(
+    scanOf({
+      id: 'legacy-resume',
+      workspaceRoot: `${root}/legacy-alias/`,
+      workspaceId: workspace().id,
+      status,
+      subpath,
+      startedAt: '2026-10-01T10:00:00.000Z',
+      finishedAt: '2026-10-01T10:01:00.000Z',
+    }),
+  )
+  if (status === 'paused') expect(h.controller.resume('legacy-resume')).not.toHaveProperty('finishedAt')
+  else h.controller.start()
+  // Job start clears old terminal times even for an already-queued legacy row.
+  expect(h.store.getScan('legacy-resume')?.status).toBe('running')
+  expect(h.store.getScan('legacy-resume')).not.toHaveProperty('finishedAt')
+  expect(await h.settle('legacy-resume')).toBe('completed')
+  expect(h.store.getScan('legacy-resume')?.error).toBeUndefined()
+})
+
 it('refuses a resumed scan whose selected folder was retargeted by a symlink', async () => {
   h.store.insertScan(
     scanOf({
@@ -269,66 +295,112 @@ it('refuses a resumed scan whose selected folder was retargeted by a symlink', a
   expect(JSON.stringify(await handlers().getScan({ scanId: 'paused-scope' }, call()))).not.toContain(root)
 })
 
-it('migrates v1 orphan-UUID history and triage to the re-registered project path', async () => {
-  const dbPath = join(root, 'legacy.db')
-  const legacy = new DatabaseSync(dbPath)
-  legacy.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT')
-  legacy.exec("INSERT INTO meta VALUES ('schema_version', '1')")
-  for (const step of MIGRATIONS[0] ?? []) legacy.exec(step)
-  const old = scanOf({ id: 'legacy', workspaceId: 'orphan', workspaceRoot: root, status: 'completed' })
-  const params = scanParams(old).slice(0, -1)
-  legacy
-    .prepare(
-      'INSERT INTO scans (id,workspace_id,status,mode,phase,created_at,updated_at,started_at,finished_at,data) VALUES (?,?,?,?,?,?,?,?,?,?)',
-    )
-    .run(...params)
-  legacy.prepare('INSERT INTO triage VALUES (?,?,?,?,?)').run('orphan', 'fp', 'accepted_risk', 'kept', old.createdAt)
-  // Same root under a second UUID: the most recent triage decision wins.
-  legacy
-    .prepare(
-      'INSERT INTO scans (id,workspace_id,status,mode,phase,created_at,updated_at,started_at,finished_at,data) VALUES (?,?,?,?,?,?,?,?,?,?)',
-    )
-    .run(...scanParams({ ...old, id: 'second', workspaceId: 'another-orphan' }).slice(0, -1))
-  legacy
-    .prepare('INSERT INTO triage VALUES (?,?,?,?,?)')
-    .run('another-orphan', 'fp', 'fixed', 'latest', '2026-10-02T00:00:00.000Z')
-  legacy.close()
-  const migrated = openSecurityStore(dbPath)
-  try {
-    expect(
-      migrated
-        .listScans({ workspaceId: workspace().id, workspaceRoot: root })
-        .map(s => s.id)
-        .sort(),
-    ).toEqual(['legacy', 'second'])
-    expect(migrated.getTriage(root, ['fp']).get('fp')).toMatchObject({
-      state: 'fixed',
-      note: 'latest',
-      rootKeyBase: root,
+it.each(['v1', 'already-v2'])(
+  'reconciles %s symlink and trailing-slash history and triage on registration',
+  async version => {
+    await symlink(root, join(root, 'legacy-alias'), 'dir')
+    const dbPath = join(root, 'legacy.db')
+    const legacy = new DatabaseSync(dbPath)
+    legacy.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT')
+    legacy.exec("INSERT INTO meta VALUES ('schema_version', '1')")
+    for (const step of MIGRATIONS[0] ?? []) legacy.exec(step)
+    const old = scanOf({
+      id: 'legacy',
+      workspaceId: 'orphan',
+      workspaceRoot: `${root}/legacy-alias/`,
+      status: 'completed',
     })
-    expect(migrated.previousCompletedScan(root, '2026-11-01T00:00:00.000Z')?.id).toBe('second')
-    const rpc = createHandlers({
-      ...h,
-      store: migrated,
-      llm: () => undefined,
-      workspaces: () => registryOf([workspace()]),
-      astGrep: async () => undefined,
-      toolkit: undefined,
-      pluginVersion: 'test',
-      now: () => new Date(),
-    })
-    const list = await rpc.listScans({ workspaceId: workspace().id }, call())
-    expect(list).toHaveLength(2)
-    expect(list.every(scan => scan.workspaceId === workspace().id)).toBe(true)
-    expect(JSON.stringify(list)).not.toContain(root)
-    expect((await rpc.listWorkspaces({}, call()))[0]?.lastScan?.id).toBe('second')
-    migrated.deleteScan('legacy')
-    migrated.deleteScan('second')
-    expect(migrated.getTriage(root, ['fp']).get('fp')?.state).toBe('fixed')
-  } finally {
-    migrated.close()
-  }
-})
+    const params = scanParams(old).slice(0, -1)
+    legacy
+      .prepare(
+        'INSERT INTO scans (id,workspace_id,status,mode,phase,created_at,updated_at,started_at,finished_at,data) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(...params)
+    legacy.prepare('INSERT INTO triage VALUES (?,?,?,?,?)').run('orphan', 'fp', 'accepted_risk', 'kept', old.createdAt)
+    // Same root under a second UUID: the most recent triage decision wins.
+    legacy
+      .prepare(
+        'INSERT INTO scans (id,workspace_id,status,mode,phase,created_at,updated_at,started_at,finished_at,data) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        ...scanParams({ ...old, id: 'second', workspaceId: 'another-orphan', workspaceRoot: `${root}/` }).slice(0, -1),
+      )
+    legacy
+      .prepare('INSERT INTO triage VALUES (?,?,?,?,?)')
+      .run('another-orphan', 'fp', 'fixed', 'latest', '2026-10-02T00:00:00.000Z')
+    legacy.close()
+    // Simulate users who already ran the SQL-only v2 migration in a released version.
+    if (version === 'already-v2') openSecurityStore(dbPath).close()
+    const migrated = openSecurityStore(dbPath, { now: () => new Date('2026-10-02T00:00:00.000Z') })
+    migrated.setTriage(`${root}/`, 'tie', 'fixed', 'alias tie loses')
+    const canonicalTie = migrated.setTriage(root, 'tie', 'open', 'canonical tie wins')
+    // Compose root-spelling reconciliation with triage stored only under a
+    // merged fingerprint, rather than this finding's current primary identity.
+    migrated.insertFinding(
+      findingOf({ id: 'legacy-finding', scanId: 'legacy', fingerprint: 'primary-fp', mergedFingerprints: ['fp'] }),
+    )
+    try {
+      expect(migrated.previousCompletedScan(root, '2026-11-01T00:00:00.000Z')).toBeUndefined()
+      const registered = version === 'v1' ? [workspace()] : []
+      const rpc = createHandlers({
+        ...h,
+        store: migrated,
+        llm: () => undefined,
+        workspaces: () => registryOf(registered),
+        astGrep: async () => undefined,
+        toolkit: undefined,
+        pluginVersion: 'test',
+        now: () => new Date(),
+      })
+      if (version === 'already-v2') {
+        expect(migrated.getTriage(root, ['fp']).size).toBe(0)
+        registered.push(workspace())
+        // The first project-list read must reconcile before querying history.
+        expect((await rpc.listWorkspaces({}, call()))[0]?.lastScan?.id).toBe('second')
+      }
+      expect(migrated.getTriage(root, ['fp']).get('fp')).toMatchObject({
+        state: 'fixed',
+        note: 'latest',
+        rootKeyBase: root,
+      })
+      expect(migrated.getTriage(root, ['tie']).get('tie')).toEqual(canonicalTie)
+      expect(migrated.getTriage(`${root}/legacy-alias/`, ['fp']).size).toBe(0)
+      expect(migrated.getTriage(`${root}/`, ['fp']).size).toBe(0)
+      expect(migrated.previousCompletedScan(root, '2026-11-01T00:00:00.000Z')?.id).toBe('second')
+      expect(migrated.getScan('legacy')?.workspaceRoot).toBe(root)
+      migrated.reconcileTriageRoot(workspace().id, root)
+      expect(migrated.getScan('legacy')?.updatedAt).toBe(old.updatedAt)
+      const list = await rpc.listScans({ workspaceId: workspace().id }, call())
+      expect(list).toHaveLength(2)
+      expect(list.every(scan => scan.workspaceId === workspace().id)).toBe(true)
+      expect(list.find(scan => scan.id === 'legacy')?.counts.high).toBe(0)
+      expect(await rpc.listFindings({ scanId: 'legacy' }, call())).toMatchObject([
+        { id: 'legacy-finding', triage: 'fixed' },
+      ])
+      expect(await rpc.getFinding({ scanId: 'legacy', findingId: 'legacy-finding' }, call())).toMatchObject({
+        triage: 'fixed',
+        triageNote: 'latest',
+      })
+      const report = JSON.parse((await rpc.exportReport({ scanId: 'legacy', format: 'json' }, call())).content)
+      expect(report.findings[0]).toMatchObject({ id: 'legacy-finding', triage: 'fixed' })
+      await rpc.setTriage(
+        { scanId: 'legacy', findingId: 'legacy-finding', triage: 'accepted_risk', note: 'all aliases' },
+        call(),
+      )
+      expect([...migrated.getTriage(root, ['primary-fp', 'fp']).values()].map(triage => triage.state)).toEqual([
+        'accepted_risk',
+        'accepted_risk',
+      ])
+      expect(JSON.stringify(list)).not.toContain(root)
+      expect((await rpc.listWorkspaces({}, call()))[0]?.lastScan?.id).toBe('second')
+      migrated.deleteScan('legacy')
+      migrated.deleteScan('second')
+      expect(migrated.getTriage(root, ['fp']).get('fp')?.state).toBe('accepted_risk')
+    } finally {
+      migrated.close()
+    }
+  },
+)
 
 it.each([undefined, 'packages/a'])('masks workspace-base and sibling absolute paths for scope %s', async subpath => {
   const content = `${root}\n${root}/packages/b/private.ts\n${root}/packages/a/app.ts\n`

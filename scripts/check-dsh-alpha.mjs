@@ -48,6 +48,9 @@ const readyMs = 90_000
 const installMs = 180_000
 
 const workspaceProtocols = new Set(['workspace:^', 'workspace:~', 'workspace:*'])
+// npm/pnpm/npx are .cmd launchers on Windows (same convention as release-pack).
+const windows = process.platform === 'win32'
+const executable = command => (windows && ['npm', 'pnpm', 'npx'].includes(command) ? `${command}.cmd` : command)
 
 let server
 let serverOutput = { stdout: '', stderr: '' }
@@ -199,7 +202,8 @@ async function bootWebProfile(alpha) {
     run('npx', ['dsh', 'plugin', '--profile', 'web', 'add', '-w', root], { cwd: installDir, env, timeout: installMs })
 
     serverOutput = { stdout: '', stderr: '' }
-    server = spawn('npx', ['dsh', '--profile', 'web', '--no-open', '--port', '0'], {
+    server = spawn(executable('npx'), ['dsh', '--profile', 'web', '--no-open', '--port', '0'], {
+      shell: windows,
       cwd: installDir,
       env,
       detached: true,
@@ -363,7 +367,7 @@ function npmJson(viewArgs) {
 }
 
 function capture(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8' })
+  const result = spawnSync(executable(command), args, { encoding: 'utf8', shell: windows })
   if (result.error) throw result.error
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(' ')} exited ${result.status}\n${result.stderr ?? ''}`)
@@ -373,7 +377,11 @@ function capture(command, args) {
 
 function run(command, args, options = {}) {
   const { quiet, ...spawnOptions } = options
-  const result = spawnSync(command, args, { stdio: quiet ? 'ignore' : 'inherit', ...spawnOptions })
+  const result = spawnSync(executable(command), args, {
+    stdio: quiet ? 'ignore' : 'inherit',
+    shell: windows,
+    ...spawnOptions,
+  })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited ${result.status}`)
 }

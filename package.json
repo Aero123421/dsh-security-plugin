@@ -87,6 +87,7 @@
     }
   },
   "optionalDependencies": {
+    "@ast-grep/lang-python": "0.0.6",
     "@ast-grep/napi": "0.51.0"
   },
   "devDependencies": {

@@ -20,6 +20,17 @@ describe('loadAstGrep', () => {
     expect(a === undefined).toBe(astGrep === undefined)
   })
 
+  it.runIf(process.platform === 'linux' && process.arch === 'x64' && astGrep)(
+    'registers the distributed Python grammar with napi 0.51',
+    async () => {
+      const handle = await loadAstGrep()
+      expect(handle?.supportsPython).toBe(true)
+      expect(handle?.Lang.Python).toBe('python')
+      expect(parseSafely(handle, 'python', 'def example():\n    return 1\n')?.kind()).toBe('module')
+      expect(modelFor(fileOf('app.py', 'def example():\n    return 1\n'), handle)?.mode).toBe('ast')
+    },
+  )
+
   it('rejects modules that do not look like @ast-grep/napi', () => {
     expect(createAstGrepHandle(undefined)).toBeUndefined()
     expect(createAstGrepHandle({ parse: 'nope' })).toBeUndefined()

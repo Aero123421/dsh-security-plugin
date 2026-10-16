@@ -113,7 +113,14 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
     collect(await runSast(snapshot, { ...(options.astGrep ? { astGrep: options.astGrep } : {}), signal }))
     analyzers.push(
       options.astGrep
-        ? { id: 'ast-grep', available: true, source: 'builtin' }
+        ? {
+            id: 'ast-grep',
+            available: true,
+            source: 'builtin',
+            reason: options.astGrep.supportsPython
+              ? 'Python AST available'
+              : 'Python AST unavailable; Python uses the built-in parser',
+          }
         : {
             id: 'ast-grep',
             available: false,
