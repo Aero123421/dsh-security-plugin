@@ -8,6 +8,12 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-16
+
+This minor release contains breaking changes, as allowed before 1.0: the Host/client contract is now version 2
+(mixed old/new pages show the existing reload banner) and the local store migrates to schema v2 (see
+*Upgrade notes* below).
+
 ### Added
 
 - Add a project folder from the Security page or New Scan dialog when DSH’s folder services are available.
@@ -139,6 +145,7 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Aero123421/dsh-security-plugin/releases/tag/v0.1.0

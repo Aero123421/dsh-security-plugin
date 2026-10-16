@@ -11,7 +11,7 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 
 ## できること
 
-- **決まった手順で動く解析ツール**: 秘密情報の検出 25 ルール（伏せ字処理も兼ねています）、JavaScript/TypeScript・Python・Dockerfile・Compose・Kubernetes 向けのパターンルール 50 個、エンドポイント（外部からの入口）の抽出（Express、Fastify、Koa、Hono、NestJS、Next.js、Flask、FastAPI、Django）、npm・PyPI・Go・Cargo のロックファイル解析。オプションで OSV.dev への脆弱性照会と、インストール済みなら Gitleaks・OSV-Scanner・Semgrep も使います。詳しくは [docs/analyzers.md](docs/analyzers.md)。
+- **決まった手順で動く解析ツール**: 秘密情報の検出 25 ルール（伏せ字処理も兼ねています）、JavaScript/TypeScript・Python・Dockerfile・Compose・Kubernetes 向けのパターンルール 52 個、エンドポイント（外部からの入口）の抽出（Express、Fastify、Koa、Hono、NestJS、Next.js、Flask、FastAPI、Django）、npm・PyPI・Go・Cargo のロックファイル解析。オプションで OSV.dev への脆弱性照会と、インストール済みなら Gitleaks・OSV-Scanner・Semgrep も使います。詳しくは [docs/analyzers.md](docs/analyzers.md)。
 - **読み取り専用のマルチエージェント・レビュー**: プランナーが脅威を整理し、ハンターがエンドポイント・ルールの検出箇所・機密性の高いファイル・プランナーの仮説を調べます。リサーチモードでは、組み合わせ分析役が複数の弱点をつなげた攻撃も探します。AI が使えるのはスナップショット内のファイルを一覧・読み取り・検索するツールだけです。シェル、ネットワーク、ファイルの書き込みは使えません。
 - **ホストによる根拠の照合**: AI が引用したコードは、伏せ字処理済みのスナップショットと 1 件ずつ照合されます。引用したコードが実在する場合だけ「照合済み」になります。照合済みの手順が 1 つもない問題は取り下げられ、その件数は「調べた範囲」に表示されます。
 - **独立した検証役**: ディープとリサーチでは、ハンターの推論を見ていない別の AI が、主張と照合済みのコードだけを見て反証を試みます。「問題なし」と判断するには防御しているコードの引用が、「本当の問題」と判断するには照合済みのコードが必要です。
@@ -29,13 +29,13 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 1. **インストール**: DSH の Web UI で「プラグイン → プラグインを追加」を開き、次を入力します。
 
    ```text
-   github:Aero123421/dsh-security-plugin#v0.1.1
+   github:Aero123421/dsh-security-plugin#v0.2.0
    ```
 
    ターミナルから入れる場合（ここでは `web` プロファイル）:
 
    ```sh
-   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.1.1
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.2.0
    ```
 
    `#` の後ろには、入れたい[リリース](https://github.com/Aero123421/dsh-security-plugin/releases)のタグを指定します。タグを省くと、未リリースの `main` ブランチが入ります。各リリースにはビルド済みの `dsh-security-plugin-X.Y.Z.tgz` と `SHA256SUMS` も添付しており、その URL を同じ場所に入れても導入できます。npm には公開していません。有効化し、再起動を求められたら DSH を再起動してください。更新するときは、新しいタグで同じように追加します。動いている版は「設定」タブで確認できます。読み込まれたかどうかは、`dsh --profile web --dump-config` の出力に `# == dsh-security-plugin` というレイヤーがあるかで確認できます。
