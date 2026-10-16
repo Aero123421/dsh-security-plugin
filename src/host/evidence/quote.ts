@@ -28,10 +28,12 @@ export interface QuoteVerification {
   readonly location?: CodeRef
   /** Redacted source lines at `location`: at most 12 lines and 1500 characters. */
   readonly snippet?: string
+  /** Exact redacted matched text, without model/tool line-number prefixes. */
+  readonly quote?: string
   /**
-   * `true` when the matched text lies entirely in comments, docstrings, or
-   * documentation prose. Such a quote is real but shows no code; callers must
-   * not treat it as proof of a defense. Absent otherwise.
+   * `true` when the matched text is non-code evidence: prose, literal text,
+   * punctuation alone, or a comment-led mixed citation. Such a quote is real
+   * but must not count as verified code. Absent otherwise.
    */
   readonly commentOnly?: true
   /**
@@ -374,6 +376,7 @@ function found(
   return {
     check,
     location,
+    quote: prepared.redacted.slice(from, to),
     snippet: snippetOf(prepared, location.startLine, location.endLine),
     ...(commentOnly ? { commentOnly: true as const } : {}),
   }

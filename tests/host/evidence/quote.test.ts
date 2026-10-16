@@ -383,6 +383,7 @@ describe('verifyQuote: cited ranges are narrowed and bounded', () => {
       check: 'match',
       location: { path: 'src/admin.ts', startLine: 50, endLine: 50 },
       snippet: '  const config = loadConfig(process.env.CONFIG_PATH)',
+      quote: CONFIG,
     })
     // An occurrence within the slack window is also reported at its own line.
     expect(cite(11, 11, 'if (!isAdmin(req.user))')).toMatchObject({
@@ -439,6 +440,8 @@ describe('verifyQuote: cited ranges are narrowed and bounded', () => {
       check: 'match',
       location: { path: 'b.ts', startLine: 2, endLine: 2 },
       snippet: '})',
+      quote: '})',
+      commentOnly: true,
     })
   })
 })
@@ -487,7 +490,7 @@ describe('verifyQuote: comment-only quotes', () => {
   it('does not flag quotes that contain code', () => {
     expect(check('src/api.ts', 3, 'const id = clean(req.query.id)').commentOnly).toBeUndefined()
     expect(check('src/api.ts', 3, 'clean(req.query.id) // validated').commentOnly).toBeUndefined()
-    expect(check('src/api.ts', 7, "'https://api.example.com/v1/items'").commentOnly).toBeUndefined()
+    expect(check('src/api.ts', 7, "const url = 'https://api.example.com/v1/items'").commentOnly).toBeUndefined()
     expect(check('app/db.py', 3, 'return run(q)')).toMatchObject({ check: 'match' })
     expect(check('app/db.py', 3, 'return run(q)').commentOnly).toBeUndefined()
   })

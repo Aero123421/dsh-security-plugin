@@ -263,7 +263,7 @@ describe('verifyCitation', () => {
     expect(isVerifiedCode({ quoteCheck: 'relocated' })).toBe(true)
     expect(isVerifiedCode({ quoteCheck: 'mismatch' })).toBe(false)
     expect(describeCommentOnly('counterevidence', verified, [comment, code])).toEqual([
-      '- counterevidence 1: src/guard.ts:2-2 — only comments or documentation, not code',
+      '- counterevidence 1: src/guard.ts:2-2 — non-code evidence (comments, literal text, punctuation, or comment-led excerpt)',
     ])
   })
 
@@ -360,7 +360,9 @@ describe('skepticSubmitTool', () => {
     const refute = { ...base, verdict: 'refuted', counterevidence: [comment] }
     const first = validate(tool, refute)
     expect(first.error).toContain('none of your counterevidence quotes is verified code')
-    expect(first.error).toContain('- counterevidence 1: src/guard.ts:2-2 — only comments or documentation, not code')
+    expect(first.error).toContain(
+      '- counterevidence 1: src/guard.ts:2-2 — non-code evidence (comments, literal text, punctuation, or comment-led excerpt)',
+    )
     expect(first.error).toContain('Comments and documentation do not prove a defense')
     const second = validate(tool, refute)
     expect(second.error).toBeUndefined()

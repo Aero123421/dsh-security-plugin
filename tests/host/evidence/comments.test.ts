@@ -26,14 +26,14 @@ describe('commentMask', () => {
     expect(commentOnly('src/a.ts', ts, '#secret = 1')).toBe(false)
   })
 
-  it('treats comment markers inside strings and template literals as code', () => {
+  it('treats literal-only quotes as non-code, not as comment delimiters', () => {
     const js = ['const url = \'https://example.com/a\' + "/* x */"', 'const t = `line', '// still a string`'].join('\n')
-    expect(commentOnly('a.js', js, '//example.com/a')).toBe(false)
-    expect(commentOnly('a.js', js, '/* x */')).toBe(false)
-    expect(commentOnly('a.js', js, '// still a string')).toBe(false)
+    expect(commentOnly('a.js', js, '//example.com/a')).toBe(true)
+    expect(commentOnly('a.js', js, '/* x */')).toBe(true)
+    expect(commentOnly('a.js', js, '// still a string')).toBe(true)
   })
 
-  it('recognizes hash comments and Python docstrings, but not string literals', () => {
+  it('recognizes hash comments, Python docstrings, and literal-only evidence', () => {
     const py = [
       'def find(q):',
       '    """Input is validated upstream."""',
@@ -45,8 +45,8 @@ describe('commentMask', () => {
     ].join('\n')
     expect(commentOnly('app/db.py', py, '"""Input is validated upstream."""')).toBe(true)
     expect(commentOnly('app/db.py', py, 'Multi-line docstring.')).toBe(true)
-    expect(commentOnly('app/db.py', py, '"""SELECT * FROM t"""')).toBe(false)
-    expect(commentOnly('app/db.py', py, '# b')).toBe(false)
+    expect(commentOnly('app/db.py', py, '"""SELECT * FROM t"""')).toBe(true)
+    expect(commentOnly('app/db.py', py, '# b')).toBe(true)
     expect(commentOnly('app/db.py', py, '# safe')).toBe(true)
     expect(commentOnly('config.yml', 'key: value # note\n# whole line\n', '# whole line')).toBe(true)
     expect(commentOnly('config.yml', 'key: value # note\n', 'key: value')).toBe(false)
@@ -76,8 +76,10 @@ describe('commentMask', () => {
   it('ignores bare punctuation next to a comment, but not real code', () => {
     const ts = 'function f(id) {\n  // input sanitized upstream\n}\n'
     expect(commentOnly('a.ts', ts, '// input sanitized upstream\n}')).toBe(true)
-    expect(commentOnly('a.ts', ts, 'function f(id) {\n  // input sanitized upstream')).toBe(false)
-    expect(commentOnly('a.ts', '}\n);\n', '}\n);')).toBe(false)
+    // A declaration is code on its own, but cannot launder a longer defensive comment.
+    expect(commentOnly('a.ts', ts, 'function f(id) {')).toBe(false)
+    expect(commentOnly('a.ts', ts, 'function f(id) {\n  // input sanitized upstream')).toBe(true)
+    expect(commentOnly('a.ts', '}\n);\n', '}\n);')).toBe(true)
   })
 
   it('recognizes Ruby block comments and extensionless or .org documentation', () => {
@@ -94,6 +96,14 @@ describe('commentMask', () => {
     const mask = commentMask(text, 'a.ts')
     expect(isCommentOnlyRange(text, mask, 4, 6)).toBe(false)
     expect(isCommentOnlyRange(text, mask, 2, 2)).toBe(false)
+  })
+
+  it('respects language nesting rules and keeps an unterminated outer block non-code', () => {
+    const text = '/* outer /* inner */ still inside outer */\nrun(input)'
+    expect(commentOnly('a.rs', text, 'still inside outer')).toBe(true)
+    expect(commentOnly('a.ts', text, 'still inside outer')).toBe(false)
+    expect(commentOnly('a.rs', '/* one /* two /* three */ two */ still outer', 'still outer')).toBe(true)
+    expect(commentOnly('a.rs', text, 'run(input)')).toBe(false)
   })
 
   it('scans a long single line in linear time', () => {

@@ -7,7 +7,7 @@
  *
  * The scanner is a small, string-aware lexer per comment family chosen by
  * file extension. It errs towards "comment" only for text that sits inside a
- * recognized comment, docstring, or documentation file; everything it cannot
+ * recognized comment, string literal, or documentation file; everything it cannot
  * classify counts as code.
  */
 
@@ -20,7 +20,9 @@ interface CommentSyntax {
   readonly lineAtStart: readonly string[]
   /** `[open, close]` block-comment delimiters. */
   readonly block: readonly (readonly [string, string])[]
-  /** Single-character string delimiters whose content is never a comment. */
+  /** Whether block comments of the same kind can nest. */
+  readonly nestedBlocks: boolean
+  /** Single-character string delimiters whose interiors are non-code evidence. */
   readonly quotes: string
   /** Python-style triple-quoted strings; one in statement position is a docstring. */
   readonly tripleQuotes: boolean
@@ -32,6 +34,7 @@ const syntax = (overrides: Partial<CommentSyntax>): CommentSyntax => ({
   line: [],
   lineAtStart: [],
   block: [],
+  nestedBlocks: false,
   quotes: '',
   tripleQuotes: false,
   prose: false,
@@ -47,6 +50,7 @@ const HTML_BLOCKS = [
 ] as const
 
 const C_LIKE = syntax({ line: ['//'], block: [C_BLOCK], quotes: '"\'`' })
+const NESTED_C = syntax({ ...C_LIKE, nestedBlocks: true })
 const CSS = syntax({ block: [C_BLOCK], quotes: '"\'' })
 const PHP = syntax({ line: ['//', '#'], block: [C_BLOCK], quotes: '"\'`' })
 const HASH = syntax({ line: ['#'], quotes: '"\'' })
@@ -55,7 +59,7 @@ const PYTHON = syntax({ line: ['#'], quotes: '"\'', tripleQuotes: true })
 const INI = syntax({ line: ['#'], lineAtStart: [';'], quotes: '"\'' })
 const SQL = syntax({ line: ['--'], block: [C_BLOCK], quotes: '"\'' })
 const LUA = syntax({ line: ['--'], block: [['--[[', ']]']], quotes: '"\'' })
-const HASKELL = syntax({ line: ['--'], block: [['{-', '-}']], quotes: '"' })
+const HASKELL = syntax({ line: ['--'], block: [['{-', '-}']], nestedBlocks: true, quotes: '"' })
 const HTML = syntax({ lineAtStart: ['//'], block: HTML_BLOCKS })
 const COMPONENT = syntax({ lineAtStart: ['//'], block: [...HTML_BLOCKS, C_BLOCK] })
 const PROSE = syntax({ prose: true })
@@ -64,8 +68,9 @@ const GENERIC = syntax({ lineAtStart: ['//', '#'], block: [C_BLOCK, ['<!--', '--
 const BY_EXTENSION: Readonly<Record<string, CommentSyntax>> = {
   ...family(
     C_LIKE,
-    'js jsx ts tsx mjs cjs mts cts java kt kts go c h cc cpp cxx hpp hh cs rs swift scala sc dart groovy gradle sol proto m mm zig scss less',
+    'js jsx ts tsx mjs cjs mts cts java go c h cc cpp cxx hpp hh cs dart groovy gradle sol proto m mm zig scss less',
   ),
+  ...family(NESTED_C, 'rs swift kt kts scala sc'),
   ...family(CSS, 'css'),
   ...family(PHP, 'php phtml'),
   ...family(PYTHON, 'py pyi pyw'),
@@ -118,7 +123,8 @@ function syntaxOf(path: string): CommentSyntax {
 /**
  * Per UTF-16 index of `text`, 1 when the character lies inside a comment,
  * docstring, or documentation prose for the language implied by `path`, and
- * 0 otherwise. String literals are skipped, so `'http://x'` is code.
+ * 2 for string literals, and 0 for code. Literal text is not executable
+ * evidence, but code surrounding a literal (such as a comparison) still is.
  */
 export function commentMask(text: string, path: string): Uint8Array {
   const mask = new Uint8Array(text.length)
@@ -143,8 +149,7 @@ export function commentMask(text: string, path: string): Uint8Array {
     blank = false
     const block = lang.block.find(([open]) => text.startsWith(open, i))
     if (block) {
-      const close = text.indexOf(block[1], i + block[0].length)
-      const end = close < 0 ? n : close + block[1].length
+      const end = blockEnd(text, i, block, lang.nestedBlocks)
       mask.fill(1, i, end)
       i = end
       continue
@@ -161,32 +166,63 @@ export function commentMask(text: string, path: string): Uint8Array {
     if (lang.tripleQuotes && (text.startsWith('"""', i) || text.startsWith("'''", i))) {
       const close = text.indexOf(text.slice(i, i + 3), i + 3)
       const end = close < 0 ? n : close + 3
-      if (atLineStart && isStatementPosition(text, i) && endsStatement(text, end)) mask.fill(1, i, end)
+      mask.fill(atLineStart && isStatementPosition(text, i) && endsStatement(text, end) ? 1 : 2, i, end)
       i = end
       continue
     }
-    i = lang.quotes.includes(c) ? skipString(text, i) : i + 1
+    if (lang.quotes.includes(c)) {
+      const end = skipString(text, i)
+      mask.fill(2, i, end)
+      i = end
+    } else i++
   }
   return mask
 }
 
-/** Code characters that carry no behaviour on their own (`// sanitized upstream` followed by `}`). */
-const BARE_PUNCTUATION = new Set('{}()[];,')
-
 /**
- * Whether `text[from, to)` holds a comment and nothing else that does
- * anything: every non-whitespace character lies in a comment according to
- * `mask`, or is bare punctuation such as a closing brace. An empty or blank
- * range, or one with punctuation but no comment, is not comment-only.
+ * Compatibility name: true means the quote is non-code evidence. Require an
+ * identifier/number outside comments and literals; punctuation alone is not
+ * behaviour. In mixed citations, code must contribute at least as many
+ * non-whitespace characters as comments. Literal contents contribute to
+ * neither side, so `if (x === "admin")` remains code, not string prose.
+ *
+ * This lexical majority rule blocks a defensive prose claim padded with a
+ * short adjacent sink, without guessing whether an expression is a guard.
+ * A code-led guard plus a short explanatory comment still qualifies. This
+ * is not semantic proof of a defense: the independent reviewer must assess
+ * whether that code actually defends the path.
  */
 export function isCommentOnlyRange(text: string, mask: Uint8Array, from: number, to: number): boolean {
-  let sawComment = false
+  let comments = 0
+  let code = 0
+  let substantive = false
+  let nonblank = false
   for (let i = Math.max(0, from); i < Math.min(to, text.length); i++) {
     if (isWhitespace(text.charCodeAt(i))) continue
-    if (mask[i] === 1) sawComment = true
-    else if (!BARE_PUNCTUATION.has(text[i] ?? '')) return false
+    nonblank = true
+    if (mask[i] === 1) comments++
+    else if (mask[i] !== 2) {
+      code++
+      if (/[\p{L}\p{N}_$]/u.test(text[i] ?? '')) substantive = true
+    }
   }
-  return sawComment
+  return nonblank && (!substantive || comments > code)
+}
+
+/** Scan each character once, including nested blocks only where the language allows them. */
+function blockEnd(text: string, start: number, [open, close]: readonly [string, string], nested: boolean): number {
+  let depth = 1
+  let i = start + open.length
+  while (i < text.length) {
+    if (text.startsWith(close, i)) {
+      i += close.length
+      if (--depth === 0) return i
+    } else if (nested && text.startsWith(open, i)) {
+      depth++
+      i += open.length
+    } else i++
+  }
+  return text.length
 }
 
 function lineEnd(text: string, from: number): number {

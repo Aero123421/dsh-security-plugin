@@ -84,10 +84,38 @@ export async function runSast(
   )
   return {
     status: { id: 'sast', available: true, source: 'builtin' },
-    signals,
+    signals: distinguishOccurrences(signals),
     durationMs: Math.round(performance.now() - started),
     warnings,
   }
+}
+
+/**
+ * Distinguish identical expressions after matcher deduplication, in file order.
+ * Single occurrences retain their existing line-independent fingerprint.
+ * Adding/removing identical sinks can renumber occurrences (or return one to
+ * its singleton identity): triage is deliberately not shared across those
+ * identities, since doing so could hide a different, still-vulnerable sink.
+ */
+function distinguishOccurrences(signals: readonly Signal[]): Signal[] {
+  const groups = new Map<string, Signal[]>()
+  for (const signal of signals) {
+    const key = JSON.stringify(signal.fingerprintParts)
+    const group = groups.get(key) ?? []
+    group.push(signal)
+    groups.set(key, group)
+  }
+  const discriminated = new Map<Signal, Signal>()
+  for (const group of groups.values()) {
+    if (group.length < 2) continue
+    group.forEach((signal, index) => {
+      discriminated.set(signal, {
+        ...signal,
+        fingerprintParts: [...signal.fingerprintParts, `occurrence:${index + 1}`],
+      })
+    })
+  }
+  return signals.map(signal => discriminated.get(signal) ?? signal)
 }
 
 /** Scan one file and return its (not yet deduplicated) signals. */
