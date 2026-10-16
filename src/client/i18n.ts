@@ -23,6 +23,13 @@ const en = {
 
   'page.title': 'Security',
   'page.workspace': 'Project',
+  'project.add': 'Add project folder…',
+  'project.addHint': 'Adds the selected folder to DSH’s project list.',
+  'project.managedHint': 'Projects are managed in DSH. Adding a folder registers it in DSH’s project list.',
+  'project.addFailed':
+    'Couldn’t pick or add the folder. Your selection is unchanged. Check DSH’s project list before retrying.',
+  'project.refreshFailed':
+    'The folder is registered in DSH, but Security couldn’t refresh projects. Retry loading this page.',
   'page.newScan': 'New scan',
   'page.sections': 'Security sections',
   'tab.overview': 'Overview',
@@ -541,6 +548,14 @@ const ja = {
 
   'page.title': 'セキュリティ',
   'page.workspace': 'プロジェクト',
+  'project.add': 'プロジェクトフォルダーを追加…',
+  'project.addHint': '選んだフォルダーを DSH のプロジェクト一覧に追加します。',
+  'project.managedHint':
+    'プロジェクトは DSH で管理します。フォルダーを追加すると、DSH のプロジェクト一覧に登録されます。',
+  'project.addFailed':
+    'フォルダーを選択または追加できませんでした。選択中のプロジェクトは変わっていません。再試行する前に DSH のプロジェクト一覧を確認してください。',
+  'project.refreshFailed':
+    'フォルダーは DSH に登録されていますが、セキュリティのプロジェクト一覧を更新できませんでした。このページを再読み込みしてください。',
   'page.newScan': '新しいスキャン',
   'page.sections': 'セキュリティの表示切り替え',
   'tab.overview': '概要',
@@ -1067,6 +1082,11 @@ const zh = {
 
   'page.title': '安全',
   'page.workspace': '项目',
+  'project.add': '添加项目文件夹…',
+  'project.addHint': '将所选文件夹添加到 DSH 的项目列表。',
+  'project.managedHint': '项目由 DSH 管理。添加文件夹会将其注册到 DSH 的项目列表。',
+  'project.addFailed': '无法选择或添加文件夹。当前项目选择未更改。重试前请检查 DSH 的项目列表。',
+  'project.refreshFailed': '文件夹已在 DSH 中注册，但安全页面无法刷新项目列表。请重新加载此页面。',
   'page.newScan': '新建扫描',
   'page.sections': '安全页面分区',
   'tab.overview': '概览',

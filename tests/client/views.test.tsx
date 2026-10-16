@@ -692,10 +692,200 @@ describe('page header', () => {
     expect(head.querySelector('.dshsec-project-title')?.textContent).toBe('Shop')
   })
 
-  it('has no picker for a single project', async () => {
+  it('keeps a single project identity in the header and always shows the dialog Project field', async () => {
     const { container } = await renderPage(baseHandlers())
-    expect(container.querySelector('.dshsec-head select')).toBeNull()
     expect(container.querySelector('.dshsec-project-title')?.textContent).toBe('Demo')
+    await click(byText(container, 'button', 'New scan'))
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    const label = byText<HTMLLabelElement>(dialog, 'label', 'Project')
+    const project = document.getElementById(label.htmlFor) as HTMLSelectElement
+    expect(project.disabled).toBe(true)
+    expect(project.value).toBe('ws-1')
+    expect(project.selectedOptions[0]?.textContent).toContain('Demo — ~/demo')
+    expect(dialog.textContent).toContain('Projects are managed in DSH')
+  })
+})
+
+describe('add project folder', () => {
+  const shop = { id: 'ws-shop', title: 'Shop', displayPath: '~/code/shop' }
+
+  function services(path: string | null = '/code/shop') {
+    let projects = [...WORKSPACES]
+    const pickDirectory = vi.fn(async () => path)
+    const create = vi.fn(async () => {
+      projects = [...WORKSPACES, shop]
+      return { workspaceId: shop.id }
+    })
+    return {
+      pickDirectory,
+      create,
+      handlers: baseHandlers({ listWorkspaces: () => ok(projects) }),
+      host: { uiWorkspace: () => ({ pickDirectory }), workspaces: () => ({ create }) },
+    }
+  }
+
+  it('registers the picked path, refreshes, selects it and opens a scoped scan from the header', async () => {
+    const s = services()
+    const { container, controller: c, api } = await renderPage(s.handlers, s.host)
+    const add = byText<HTMLButtonElement>(container, 'button', 'Add project folder…')
+    expect(container.textContent).toContain('Adds the selected folder to DSH’s project list')
+    await click(add)
+    expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/shop' })
+    expect(api.callsOf('listWorkspaces')).toHaveLength(2)
+    expect(c.store.getState().workspaceId).toBe(shop.id)
+    expect(c.store.getState().newScan).toEqual({ workspaceId: shop.id })
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(dialog.querySelector<HTMLSelectElement>('select')?.value).toBe(shop.id)
+    expect(api.callsOf('createScan')).toHaveLength(0)
+    await click(byText(dialog, 'button', 'Cancel'))
+    expect(document.activeElement).toBe(add)
+  })
+
+  it('can add the first project when the DSH list is empty', async () => {
+    const s = services()
+    let registered = false
+    s.create.mockImplementation(async () => {
+      registered = true
+      return { workspaceId: shop.id }
+    })
+    const { container, controller: c } = await renderPage(
+      baseHandlers({ listWorkspaces: () => ok(registered ? [shop] : []) }),
+      s.host,
+    )
+    await click(byText(container, 'button', 'Add project folder…'))
+    expect(c.store.getState().workspaceId).toBe(shop.id)
+    expect(c.store.getState().newScan?.workspaceId).toBe(shop.id)
+  })
+
+  it('treats picker cancellation as a silent no-op and keeps focus and selection', async () => {
+    const s = services(null)
+    const { container, controller: c, api } = await renderPage(s.handlers, s.host)
+    const add = byText<HTMLButtonElement>(container, 'button', 'Add project folder…')
+    await click(add)
+    expect(s.create).not.toHaveBeenCalled()
+    expect(api.callsOf('listWorkspaces')).toHaveLength(1)
+    expect(c.store.getState().workspaceId).toBe('ws-1')
+    expect(c.store.getState().newScan).toBeUndefined()
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    expect(document.activeElement).toBe(add)
+  })
+
+  it.each(['both', 'picker', 'create'] as const)('hides the action when %s services are absent', async absent => {
+    const s = services()
+    const { container, controller: c } = await renderPage(s.handlers, {
+      ...(absent === 'create' ? { uiWorkspace: s.host.uiWorkspace } : {}),
+      ...(absent === 'picker' ? { workspaces: s.host.workspaces } : {}),
+    })
+    expect(container.textContent).not.toContain('Add project folder…')
+    expect(await c.addProjectFolder()).toBeUndefined()
+    await click(byText(container, 'button', 'New scan'))
+    expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain('Add project folder…')
+    expect(s.pickDirectory).not.toHaveBeenCalled()
+    expect(s.create).not.toHaveBeenCalled()
+  })
+
+  it('selects an already-registered workspace returned by create without adding another row', async () => {
+    const s = services('/code/demo')
+    s.create.mockImplementation(async () => ({ workspaceId: 'ws-1' }))
+    const { container, controller: c } = await renderPage(
+      baseHandlers({ listWorkspaces: () => ok([shop, ...WORKSPACES]) }),
+      s.host,
+    )
+    expect(c.store.getState().workspaceId).toBe(shop.id)
+    await click(byText(container, 'button', 'Add project folder…'))
+    expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/demo' })
+    expect(c.store.getState().workspaceId).toBe('ws-1')
+    expect(c.store.getState().workspaces.value).toHaveLength(2)
+    expect(c.store.getState().newScan?.workspaceId).toBe('ws-1')
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('updates the existing scan dialog project and clears an old project subfolder', async () => {
+    const s = services()
+    const { container, controller: c, api } = await renderPage(s.handlers, s.host)
+    await act(async () => c.openNewScan({ workspaceId: 'ws-1', subpath: 'old/folder' }))
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    const add = byText<HTMLButtonElement>(dialog, 'button', 'Add project folder…')
+    await click(add)
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1)
+    expect(dialog.querySelector<HTMLSelectElement>('select')?.value).toBe(shop.id)
+    expect(dialog.querySelector<HTMLInputElement>('input[placeholder="packages/app"]')?.value).toBe('')
+    expect(api.callsOf('estimateScan').at(-1)).toMatchObject({ workspaceId: shop.id })
+    expect(api.callsOf('estimateScan').at(-1)).not.toHaveProperty('subpath')
+    expect(document.activeElement).toBe(add)
+    expect(container.querySelector('.dshsec-project-title')?.textContent).toBe('Shop')
+  })
+
+  it.each(['picker', 'create'] as const)('shows a localized error when %s fails and keeps selection', async stage => {
+    const s = services()
+    const fail = async () => {
+      throw new Error('private host diagnostic')
+    }
+    if (stage === 'picker') s.pickDirectory.mockImplementation(fail)
+    else s.create.mockImplementation(fail)
+    const { container, controller: c } = await renderPage(s.handlers, s.host)
+    await click(byText(container, 'button', 'Add project folder…'))
+    expect(container.textContent).toContain('Couldn’t pick or add the folder')
+    expect(container.textContent).not.toContain('private host diagnostic')
+    expect(c.store.getState().workspaceId).toBe('ws-1')
+    expect(c.store.getState().newScan).toBeUndefined()
+    expect(c.store.getState().addingProject).toBe(false)
+  })
+
+  it('reports committed registration separately if refreshing projects fails', async () => {
+    const s = services()
+    const { container, controller: c, api } = await renderPage(s.handlers, s.host)
+    api.handlers.listWorkspaces = () => fail('security/transport')
+    await click(byText(container, 'button', 'Add project folder…'))
+    expect(container.textContent).toContain('The folder is registered in DSH')
+    expect(c.store.getState().workspaceId).toBe('ws-1')
+    expect(c.store.getState().newScan).toBeUndefined()
+  })
+
+  it('does not register or reopen a scan after its dialog closes during picking', async () => {
+    const s = services()
+    let resolve!: (path: string) => void
+    s.pickDirectory.mockImplementation(
+      () =>
+        new Promise<string>(done => {
+          resolve = done
+        }),
+    )
+    const { container, controller: c } = await renderPage(s.handlers, s.host)
+    await click(byText(container, 'button', 'New scan'))
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    await click(byText(dialog, 'button', 'Add project folder…'))
+    await click(byText(dialog, 'button', 'Cancel'))
+    await act(async () => resolve('/code/shop'))
+    await flush(10)
+    expect(s.create).not.toHaveBeenCalled()
+    expect(c.store.getState().workspaceId).toBe('ws-1')
+    expect(c.store.getState().newScan).toBeUndefined()
+    expect(c.store.getState().addingProject).toBe(false)
+  })
+
+  it('ignores a picker from the previous DSH connection', async () => {
+    const s = services()
+    let resolve!: (path: string) => void
+    s.pickDirectory.mockImplementation(
+      () =>
+        new Promise<string>(done => {
+          resolve = done
+        }),
+    )
+    const { container, controller: c } = await renderPage(s.handlers, s.host)
+    const add = byText(container, 'button', 'Add project folder…')
+    await click(add)
+    await click(add)
+    expect(s.pickDirectory).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      await c.reload()
+      resolve('/code/shop')
+    })
+    await flush(10)
+    expect(s.create).not.toHaveBeenCalled()
+    expect(c.store.getState().workspaceId).toBe('ws-1')
+    expect(c.store.getState().newScan).toBeUndefined()
   })
 })
 

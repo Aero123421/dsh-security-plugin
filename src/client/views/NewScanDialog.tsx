@@ -20,6 +20,8 @@ import {
   rolesForMode,
 } from '../models.ts'
 
+import { AddProjectFolder } from './AddProjectFolder.tsx'
+
 const EMPTY_WORKSPACES: readonly WorkspaceSummary[] = []
 const EMPTY_PROVIDERS: readonly ProviderOption[] = []
 
@@ -38,6 +40,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
   const tr = useT()
   const workspaces = useSecurity(s => s.workspaces.value ?? EMPTY_WORKSPACES)
   const currentWorkspace = useSecurity(s => s.workspaceId)
+  const addingProject = useSecurity(s => s.addingProject)
   const settings = useSecurity(s => s.bootstrap.value?.settings) ?? DEFAULT_SETTINGS
   const canEditHighRisk = useSecurity(s => s.bootstrap.value?.canEditHighRiskSettings === true)
   const llmAvailable = useSecurity(s => s.bootstrap.value?.capabilities?.llm !== false)
@@ -104,7 +107,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
   }
 
   const submit = async () => {
-    if (!workspaceId || submitting) return
+    if (!workspaceId || submitting || addingProject) return
     if (ai && !configured && !pickedRef) {
       setShowModelHint(true)
       pickerRef.current?.querySelector<HTMLElement>('select:not([disabled])')?.focus()
@@ -144,7 +147,10 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
     setError(result.error)
   }
 
-  const workspaceOptions = workspaces.map(w => ({ value: w.id, label: w.title || w.displayPath || w.id }))
+  const workspaceOptions = workspaces.map(w => ({
+    value: w.id,
+    label: w.title && w.displayPath ? `${w.title} — ${w.displayPath}` : w.title || w.displayPath || w.id,
+  }))
 
   return (
     <Modal
@@ -154,7 +160,12 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
       footer={
         <>
           <Button onClick={controller.closeNewScan}>{tr.t('common.cancel')}</Button>
-          <Button variant="primary" busy={submitting} disabled={!workspaceId} onClick={() => void submit()}>
+          <Button
+            variant="primary"
+            busy={submitting}
+            disabled={!workspaceId || addingProject}
+            onClick={() => void submit()}
+          >
             {submitting ? tr.t('newScan.starting') : ai ? tr.t('newScan.start') : tr.t('newScan.startBuiltin')}
           </Button>
         </>
@@ -167,11 +178,30 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
           void submit()
         }}
       >
-        {workspaceOptions.length > 1 ? (
-          <Field label={tr.t('newScan.project')}>
-            {({ id }) => <Select id={id} value={workspaceId} options={workspaceOptions} onChange={setWorkspaceId} />}
-          </Field>
-        ) : null}
+        <Field label={tr.t('newScan.project')} hint={tr.t('project.managedHint')}>
+          {({ id, describedBy }) => (
+            <>
+              <Select
+                id={id}
+                value={workspaceId}
+                options={workspaceOptions}
+                disabled={workspaceOptions.length <= 1 || addingProject || submitting}
+                describedBy={describedBy}
+                onChange={value => {
+                  setWorkspaceId(value)
+                  setSubpath('')
+                }}
+              />
+              <AddProjectFolder
+                disabled={submitting}
+                onAdded={value => {
+                  setWorkspaceId(value)
+                  setSubpath('')
+                }}
+              />
+            </>
+          )}
+        </Field>
 
         <Field label={tr.t('newScan.subpath')} hint={tr.t('newScan.subpathHint')}>
           {({ id, describedBy }) => (

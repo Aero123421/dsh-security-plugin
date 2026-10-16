@@ -7,7 +7,7 @@
 
 import { createApi } from './api.ts'
 import { createController } from './controller.ts'
-import { asLayout, asUiWorkspace, type DshClientContext, SECURITY_SLOT_ID } from './dsh.ts'
+import { asLayout, asUiWorkspace, asWorkspaces, type DshClientContext, SECURITY_SLOT_ID } from './dsh.ts'
 import { getTranslator } from './i18n.ts'
 import { SecurityPanelIcon } from './icons.tsx'
 import { STYLE_ATTRIBUTE, STYLES } from './styles.ts'
@@ -23,6 +23,7 @@ export function apply(ctx: DshClientContext): void {
     host: {
       layout: () => asLayout(ctx.get('layout')),
       uiWorkspace: () => asUiWorkspace(ctx.get('uiWorkspace')),
+      workspaces: () => asWorkspaces(ctx.get('workspaces')),
       isLoopback: ctx.connection.isLoopback === true,
     },
   })

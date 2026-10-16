@@ -24,7 +24,7 @@ import type { ScanMode, TriageState } from '../shared/domain.ts'
 import type { ModelRef, SecuritySettings, SettingsPatch } from '../shared/settings.ts'
 import { ABORTED_ERROR, failure, type SecurityApi } from './api.ts'
 import { copyText, downloadFile } from './download.ts'
-import { type DshLayout, type DshUiWorkspace, SECURITY_SLOT_ID } from './dsh.ts'
+import { type DshLayout, type DshUiWorkspace, type DshWorkspaces, SECURITY_SLOT_ID } from './dsh.ts'
 import { DEFAULT_FINDINGS_FILTER, type FindingsFilter } from './findings.ts'
 import { type Language, type MessageKey, resolveLanguage } from './i18n.ts'
 import { isPollableStatus, mergeSummary, sortScans } from './selectors.ts'
@@ -87,6 +87,7 @@ export interface SecurityState {
   readonly bootstrap: Loadable<Bootstrap>
   readonly workspaces: Loadable<readonly WorkspaceSummary[]>
   readonly workspaceId: string | undefined
+  readonly addingProject: boolean
   /** Scan lists by workspace id, newest first. */
   readonly scans: Readonly<Record<string, Loadable<readonly ScanSummary[]>>>
   /** A scan picked in History; undefined follows the latest scan. */
@@ -111,8 +112,14 @@ export interface SecurityState {
 export interface ControllerHost {
   layout(): DshLayout | undefined
   uiWorkspace(): DshUiWorkspace | undefined
+  workspaces(): DshWorkspaces | undefined
   readonly isLoopback: boolean
 }
+
+export type AddProjectResult =
+  | { readonly workspaceId: string }
+  | { readonly error: 'project.addFailed' | 'project.refreshFailed' }
+  | undefined
 
 export interface ControllerOptions {
   readonly api: SecurityApi
@@ -186,6 +193,8 @@ export interface SecurityController {
   setDshLocale(locale: string): void
   contractMismatch(): boolean
 
+  canAddProject(): boolean
+  addProjectFolder(signal?: AbortSignal): Promise<AddProjectResult>
   selectWorkspace(workspaceId: string): void
   setTab(tab: TabId): void
   viewScan(scanId: string | undefined): void
@@ -246,6 +255,7 @@ export function createController(options: ControllerOptions): SecurityController
   const host: ControllerHost = {
     layout: () => options.host?.layout?.(),
     uiWorkspace: () => options.host?.uiWorkspace?.(),
+    workspaces: () => options.host?.workspaces?.(),
     isLoopback: options.host?.isLoopback ?? true,
   }
   const dshLocale = options.dshLocale ?? 'en'
@@ -254,6 +264,7 @@ export function createController(options: ControllerOptions): SecurityController
     bootstrap: IDLE,
     workspaces: IDLE,
     workspaceId: readStorage(storage, WORKSPACE_KEY),
+    addingProject: false,
     scans: {},
     viewScanId: undefined,
     details: {},
@@ -452,6 +463,9 @@ export function createController(options: ControllerOptions): SecurityController
 
   async function reload(): Promise<void> {
     loaded = true
+    // A picker/create response from the previous connection must not navigate this one.
+    generations.set('add-project', (generations.get('add-project') ?? 0) + 1)
+    set(s => ({ ...s, addingProject: false }))
     const tasks: Promise<unknown>[] = [reloadBootstrap({ force: true }), refreshWorkspaces(true)]
     const s = get()
     if (s.models.status !== 'idle') tasks.push(loadModels(true))
@@ -478,6 +492,41 @@ export function createController(options: ControllerOptions): SecurityController
   // -------------------------------------------------------------------------
   // Navigation
   // -------------------------------------------------------------------------
+
+  function canAddProject(): boolean {
+    return typeof host.uiWorkspace()?.pickDirectory === 'function' && typeof host.workspaces()?.create === 'function'
+  }
+
+  async function addProjectFolder(signal?: AbortSignal): Promise<AddProjectResult> {
+    if (disposed || signal?.aborted || get().addingProject || !canAddProject()) return undefined
+    return once<AddProjectResult>(
+      'add-project',
+      async isCurrent => {
+        const active = () => isCurrent() && !signal?.aborted
+        set(s => ({ ...s, addingProject: true }))
+        try {
+          const path = await host.uiWorkspace()?.pickDirectory?.()
+          if (!path || !active()) return undefined
+          const workspace = await host.workspaces()?.create?.({ path })
+          if (!workspace || !active()) return undefined
+          await refreshWorkspaces(true)
+          if (!active()) return undefined
+          const list = get().workspaces
+          if (list.status !== 'ready' || !list.value?.some(w => w.id === workspace.workspaceId)) {
+            // Registration may already have committed. Do not select an unlisted project or claim rollback.
+            return { error: 'project.refreshFailed' }
+          }
+          selectWorkspace(workspace.workspaceId)
+          return { workspaceId: workspace.workspaceId }
+        } catch {
+          return active() ? { error: 'project.addFailed' } : undefined
+        } finally {
+          if (isCurrent()) set(s => ({ ...s, addingProject: false }))
+        }
+      },
+      true,
+    )
+  }
 
   function selectWorkspace(workspaceId: string): void {
     if (get().workspaceId === workspaceId) return
@@ -893,12 +942,13 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   function canFixInChat(): boolean {
-    return host.uiWorkspace() !== undefined
+    return typeof host.uiWorkspace()?.startSession === 'function'
   }
 
   async function fixInChat(input: { workspaceId: string; scanId: string; findingId: string }) {
     const ui = host.uiWorkspace()
-    if (!ui) return { ok: false, error: failure('security/invalid-state', 'DSH chat is not available.') } as const
+    if (!ui?.startSession)
+      return { ok: false, error: failure('security/invalid-state', 'DSH chat is not available.') } as const
     const result = await api.call('getFixPrompt', { scanId: input.scanId, findingId: input.findingId })
     if (!result.ok) return result
     try {
@@ -1123,6 +1173,8 @@ export function createController(options: ControllerOptions): SecurityController
     refreshScans,
     setDshLocale,
     contractMismatch,
+    canAddProject,
+    addProjectFolder,
     selectWorkspace,
     setTab,
     viewScan,
