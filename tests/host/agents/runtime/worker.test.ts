@@ -749,11 +749,12 @@ describe('runWorker: budget', () => {
     expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, llmCalls: 1 })
   })
 
-  it('counts cached prompt tokens as input', async () => {
+  it('charges cached prompt tokens at the cache-read rate', async () => {
     const usage = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 90, cacheWriteTokens: 1 }
     const llm = new FakeLlm([reply([callBlock(0, 'c1', 'submit_report', SUBMISSION)], { usage })])
     const result = await runWorker(makeSpec(llm).spec)
-    expect(result.usage).toEqual({ inputTokens: 101, outputTokens: 5, llmCalls: 1 })
+    // 10 uncached + 90 cache reads charged as 9 + 1 cache write = 20.
+    expect(result.usage).toEqual({ inputTokens: 20, outputTokens: 5, llmCalls: 1 })
   })
 })
 
@@ -988,7 +989,9 @@ describe('runWorker: per-reply tool limits', () => {
         return { text: `contents of ${path}` }
       },
     })
-    const many = Array.from({ length: 20 }, (_, i) => callBlock(i, `c${i}`, 'read_file', { path: `f${i}.ts` }))
+    const many = Array.from({ length: MAX_TOOL_CALLS_PER_TURN + 4 }, (_, i) =>
+      callBlock(i, `c${i}`, 'read_file', { path: `f${i}.ts` }),
+    )
     const llm = new FakeLlm([reply(many), callReply('s', 'submit_report', SUBMISSION)])
     const result = await runWorker(makeSpec(llm, { tools: [reader, submitReport] }).spec)
     expect(result.status).toBe('submitted')
@@ -1005,12 +1008,14 @@ describe('runWorker: per-reply tool limits', () => {
         `only the first ${MAX_TOOL_CALLS_PER_TURN} are run per reply`,
       )
     }
-    expect(result.toolCalls).toBe(21)
+    expect(result.toolCalls).toBe(many.length + 1)
   })
 
   it('still accepts a valid submission placed after too many other calls', async () => {
-    const many = Array.from({ length: 30 }, (_, i) => callBlock(i, `c${i}`, 'read_file', { path: 'a.ts' }))
-    const llm = new FakeLlm([reply([...many, callBlock(30, 's', 'submit_report', SUBMISSION)])])
+    const many = Array.from({ length: MAX_TOOL_CALLS_PER_TURN + 1 }, (_, i) =>
+      callBlock(i, `c${i}`, 'read_file', { path: 'a.ts' }),
+    )
+    const llm = new FakeLlm([reply([...many, callBlock(many.length, 's', 'submit_report', SUBMISSION)])])
     const result = await runWorker(makeSpec(llm).spec)
     expect(result.status).toBe('submitted')
   })

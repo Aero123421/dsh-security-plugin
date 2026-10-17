@@ -122,6 +122,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
             id: 'ast-grep',
             available: true,
             source: 'builtin',
+            reasonCode: options.astGrep.supportsPython ? 'python-available' : 'python-fallback',
             reason: options.astGrep.supportsPython
               ? 'Python AST available'
               : 'Python AST unavailable; Python uses the built-in parser',
@@ -130,6 +131,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
             id: 'ast-grep',
             available: false,
             source: 'builtin',
+            reasonCode: config.disableAstGrep ? 'disabled' : 'native-unavailable',
             reason: config.disableAstGrep ? 'disabled by configuration' : 'native module unavailable on this platform',
           },
     )
@@ -157,6 +159,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
         id: 'osv',
         available: false,
         source: 'disabled',
+        reasonCode: 'lookup-off',
         reason: 'dependency lookup is turned off in Privacy settings',
       })
     }
@@ -181,7 +184,13 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   async function runExternal(): Promise<void> {
     if (!settings.privacy.useExternalAnalyzers || !options.toolkit) {
       for (const id of ['gitleaks', 'osv-scanner', 'semgrep'] as const) {
-        analyzers.push({ id, available: false, source: 'disabled', reason: 'external analyzers are turned off' })
+        analyzers.push({
+          id,
+          available: false,
+          source: 'disabled',
+          reasonCode: 'external-off',
+          reason: 'external analyzers are turned off',
+        })
       }
       return
     }

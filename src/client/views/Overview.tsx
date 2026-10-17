@@ -3,13 +3,14 @@ import type {
   AnalyzerStatus,
   Coverage,
   FindingSummary,
+  RpcFailure,
   ScanDetail,
   ScanEvent,
   ScanNotice,
   ScanSummary,
 } from '../../shared/contracts.ts'
-import { SCAN_PHASES, SEVERITIES, type Severity } from '../../shared/domain.ts'
-import { severityTone } from '../components/Badge.tsx'
+import { SCAN_PHASES, SEVERITIES, type Severity, severityAtLeast } from '../../shared/domain.ts'
+import { reviewOutcome } from '../../shared/review.ts'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
@@ -30,7 +31,7 @@ import {
   text,
 } from '../format.ts'
 import { useNow, useWatchScan, useWorkspaceScans } from '../hooks.ts'
-import { errorText, noticeText, type Translator } from '../i18n.ts'
+import { activityText, analyzerReasonText, diagnosticText, errorText, noticeText, type Translator } from '../i18n.ts'
 import { IconPause, IconPlay, IconRefresh, IconStop } from '../icons.tsx'
 import { overviewFocus } from '../selectors.ts'
 import { AvailabilityGate, ExportButtons, FindingRow, FirstRun, LoadError, Loading, ViewingBanner } from './shared.tsx'
@@ -342,7 +343,7 @@ function WorkersTable(props: { readonly detail: ScanDetail }) {
         <h3 className="dshsec-h3">{tr.t('workers.title')}</h3>
         {all.length ? (
           <span className="dshsec-hint" title={hidden > 0 ? tr.t('workers.more', { count: hidden }) : undefined}>
-            {tr.t('workers.summary', { active: active.length, done: finished.length })}
+            {tr.t('workers.summary', { active: active.length, done: finished.filter(w => w.state === 'done').length })}
           </span>
         ) : null}
       </div>
@@ -441,7 +442,13 @@ function ActivityFeed(props: { readonly events: readonly ScanEvent[] }) {
               <time className="dshsec-feed-time" dateTime={event.at}>
                 {formatTime(event.at, tr.intlLocale)}
               </time>
-              <span className="dshsec-feed-msg">{text(event.message)}</span>
+              <div className="dshsec-feed-msg">
+                <span>{activityText(tr, event)}</span>
+                <details>
+                  <summary>{tr.t('diagnostic.details')}</summary>
+                  <span>{text(event.message)}</span>
+                </details>
+              </div>
             </li>
           ))}
         </ol>
@@ -561,18 +568,114 @@ function formatHourMinute(value: string, locale: string): string {
   }
 }
 
+/** Add budget to a partially reviewed scan and continue its skipped work in place. */
+function ExtendBudgetAction(props: { readonly scan: ScanSummary; readonly detail: ScanDetail }) {
+  const controller = useController()
+  const tr = useT()
+  const [busyPct, setBusyPct] = useState<number | undefined>()
+  const [error, setError] = useState<RpcFailure | undefined>()
+  const { budget, usage } = props.detail
+  const tokensUsed = (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)
+
+  const extend = async (pct: number) => {
+    // Grow only the dimensions that actually bound this scan (tokens in
+    // practice); fall back to tokens so the request always adds something.
+    const extra: { addTokens?: number; addLlmCalls?: number; addMinutes?: number } = {}
+    if (isFiniteNumber(budget?.maxTokens) && budget.maxTokens > 0 && tokensUsed >= budget.maxTokens * 0.9) {
+      extra.addTokens = Math.max(1, Math.ceil(budget.maxTokens * pct))
+    }
+    if (
+      isFiniteNumber(budget?.maxLlmCalls) &&
+      budget.maxLlmCalls > 0 &&
+      (usage?.llmCalls ?? 0) >= budget.maxLlmCalls * 0.9
+    ) {
+      extra.addLlmCalls = Math.max(1, Math.ceil(budget.maxLlmCalls * pct))
+    }
+    if (
+      isFiniteNumber(budget?.maxMinutes) &&
+      budget.maxMinutes > 0 &&
+      (usage?.elapsedMs ?? 0) >= budget.maxMinutes * 60_000 * 0.9
+    ) {
+      extra.addMinutes = Math.max(1, Math.ceil(budget.maxMinutes * pct))
+    }
+    if (!extra.addTokens && !extra.addLlmCalls && !extra.addMinutes && isFiniteNumber(budget?.maxTokens)) {
+      extra.addTokens = Math.max(1, Math.ceil(budget.maxTokens * pct))
+    }
+    setBusyPct(pct)
+    setError(undefined)
+    const result = await controller.extendScanBudget(props.scan.id, extra)
+    setBusyPct(undefined)
+    if (!result.ok) setError(result.error)
+    // On success the scan is queued again; the overview switches to progress.
+  }
+
+  return (
+    <div className="dshsec-stack-sm">
+      <h3 className="dshsec-h3">{tr.t('budget.extend.title')}</h3>
+      <p className="dshsec-hint">{tr.t('budget.extend.body')}</p>
+      {isFiniteNumber(budget?.maxTokens) ? (
+        <p className="dshsec-hint">
+          {tr.t('budget.extend.tokensUsed', {
+            used: formatCompact(tokensUsed, tr.intlLocale),
+            max: formatCompact(budget.maxTokens, tr.intlLocale),
+          })}
+        </p>
+      ) : null}
+      <div className="dshsec-actions">
+        {[0.5, 1, 3].map(pct => (
+          <Button
+            key={pct}
+            size="sm"
+            busy={busyPct === pct}
+            disabled={busyPct !== undefined}
+            onClick={() => void extend(pct)}
+          >
+            {tr.t('budget.extend.add', { percent: pct * 100 })}
+          </Button>
+        ))}
+      </div>
+      {error ? <Callout tone="error">{errorText(tr, error)}</Callout> : null}
+    </div>
+  )
+}
+
 function ResultsSummary(props: { readonly scan: ScanSummary; readonly heading: string }) {
   const controller = useController()
   const tr = useT()
   const now = useNow()
   const { scan } = props
   const findingsEntry = useSecurity(s => s.findings[scan.id] ?? IDLE_FINDINGS)
-  const detail = useSecurity(s => s.details[scan.id]?.value)
+  const detailEntry = useSecurity(s => s.details[scan.id] ?? IDLE_DETAIL)
+  const detail = detailEntry.value
+  const events = useSecurity(s => s.events[scan.id] ?? NO_EVENTS)
+  const eventsError = useSecurity(s => s.eventsErrors[scan.id])
+  const eventsLoading = useSecurity(s => s.eventsLoading[scan.id])
 
   useEffect(() => {
     void controller.loadFindings(scan.id)
     void controller.loadScanDetail(scan.id)
+    void controller.loadScanEvents(scan.id)
   }, [controller, scan.id])
+
+  // A cached detail without coverage (loaded while the scan was running)
+  // must not shadow the fresher host-computed outcome from the list.
+  const review = detail?.coverage
+    ? reviewOutcome(detail)
+    : (scan.review ?? (detail ? reviewOutcome(detail) : undefined))
+  // Mirror the Host's skeptic eligibility as closely as the wire allows:
+  // only potential findings at or above the mode's severity floor are ever
+  // scheduled for independent review, so only those can be missing one.
+  const reviewFloor: Severity = scan.mode === 'research' ? 'low' : 'medium'
+  const noSecondOpinion =
+    scan.mode !== 'quick' &&
+    findingsEntry.value?.some(
+      f =>
+        f.verification === 'potential' &&
+        f.closure !== 'ruled_out' &&
+        (f.source === 'ai' || f.source === 'sast' || f.source === 'external') &&
+        severityAtLeast(f.severity, reviewFloor) &&
+        f.independentlyReviewed !== true,
+    )
 
   const findings = findingsEntry.value
   const counts = useMemo(() => (findings ? certaintyCounts(findings) : undefined), [findings])
@@ -615,52 +718,83 @@ function ResultsSummary(props: { readonly scan: ScanSummary; readonly heading: s
         <ExportButtons scanId={scan.id} />
       </header>
 
-      <div className={`dshsec-notsafe ${openTotal === 0 ? 'dshsec-notsafe--prominent' : ''}`} role="note">
-        <strong>{tr.t(openTotal === 0 ? 'summary.notSafeTitle' : 'summary.notCompleteTitle')}</strong>
-        <span>{tr.t('summary.notSafeBody')}</span>
-      </div>
+      <section aria-label={tr.t('review.title')} className="dshsec-stack-sm">
+        <Callout
+          tone={
+            review?.state === 'failed'
+              ? 'error'
+              : review?.state === 'complete' || review?.state === 'builtin'
+                ? 'info'
+                : 'warn'
+          }
+        >
+          <strong>{tr.lookup(`review.${review?.state ?? 'unknown'}`)}</strong>
+          {review && review.state !== 'builtin' && review.state !== 'unknown' ? (
+            <p>{tr.t('review.count', { completed: review.completed, planned: review.planned })}</p>
+          ) : null}
+          {review?.state === 'not-run' ? <p>{tr.t('review.notRunBody')}</p> : null}
+          {review?.state === 'partial' || review?.state === 'failed' ? <p>{tr.t('review.partialBody')}</p> : null}
+          {review?.state === 'complete' ? <p>{tr.t('review.completeBody')}</p> : null}
+        </Callout>
+        {detailEntry.error ? (
+          <LoadError error={detailEntry.error} onRetry={() => void controller.loadScanDetail(scan.id, true)} />
+        ) : null}
+        {(review?.state === 'partial' || review?.state === 'failed') && detail ? (
+          <ExtendBudgetAction scan={scan} detail={detail} />
+        ) : null}
+        {noSecondOpinion ? <Callout tone="warn">{tr.t('review.secondOpinionMissing')}</Callout> : null}
+        {detail?.notices.length ? <Notices notices={detail.notices} /> : null}
+      </section>
+      <CoverageCard coverage={detail?.coverage} tr={tr} />
 
       <div className="dshsec-subsection">
-        <h3 className="dshsec-h3">{tr.t('summary.openBySeverity')}</h3>
-        <ul className="dshsec-ledger">
+        <div className="dshsec-subhead">
+          <h3 className="dshsec-h3">{tr.t('summary.openBySeverity')}</h3>
+          <span className="dshsec-hint">
+            <strong className="dshsec-num dshsec-sevrow-total">{formatNumber(openTotal, tr.intlLocale)}</strong>{' '}
+            {tr.t('summary.openTotal')}
+          </span>
+        </div>
+        <ul className="dshsec-sevrows">
           {SEVERITIES.map(severity => {
             const count = isFiniteNumber(scan.counts?.[severity]) ? scan.counts[severity] : undefined
             return (
               <li key={severity}>
                 <button
                   type="button"
-                  className={`dshsec-ledger-cell dshsec-ledger-cell--${severityTone(severity)} ${count ? 'has-value' : ''}`}
+                  className={`dshsec-sevrow ${count ? 'has-value' : ''}`}
                   onClick={() => showSeverity(severity)}
                   aria-label={`${tr.t(`severity.${severity}`)}: ${count ?? DASH}`}
                 >
-                  <span className="dshsec-ledger-num">{count ?? DASH}</span>
-                  <span className="dshsec-ledger-label">{tr.t(`severity.${severity}`)}</span>
+                  <span className={`dshsec-dist-dot dshsec-dist-dot--${severity}`} aria-hidden="true" />
+                  <span className="dshsec-sevrow-label">{tr.t(`severity.${severity}`)}</span>
+                  <span className="dshsec-sevrow-count dshsec-num">{count ?? DASH}</span>
                 </button>
               </li>
             )
           })}
         </ul>
-      </div>
-
-      <div className="dshsec-subsection">
-        <h3 className="dshsec-h3">{tr.t('summary.certainty')}</h3>
-        <dl className="dshsec-certainty-row">
-          {(['confirmed', 'open_proof_gap', 'ruled_out'] as const).map(closure => (
-            <div key={closure} className={`dshsec-cert dshsec-cert--${closure}`}>
-              <dt>{tr.t(`closure.${closure}`)}</dt>
-              <dd>
-                <span className="dshsec-cert-num">{counts ? counts[closure] : DASH}</span>
-                <span className="dshsec-hint">{tr.t(`closure.${closure}.desc`)}</span>
-              </dd>
-            </div>
-          ))}
-          <div className="dshsec-cert dshsec-cert--new">
-            <dt>{tr.t('summary.new')}</dt>
+        <dl className="dshsec-kv">
+          <div className="dshsec-kv-row">
+            <dt>{tr.t('summary.certainty')}</dt>
             <dd>
-              <span className="dshsec-cert-num">{counts ? counts.isNew : DASH}</span>
+              {(['confirmed', 'open_proof_gap', 'ruled_out'] as const).map((closure, index) => (
+                <span key={closure} title={tr.t(`closure.${closure}.desc`)}>
+                  {index > 0 ? <span aria-hidden="true"> · </span> : null}
+                  {tr.t(`closure.${closure}`)} <strong className="dshsec-num">{counts ? counts[closure] : DASH}</strong>
+                </span>
+              ))}
+              <span>
+                <span aria-hidden="true"> · </span>
+                {tr.t('summary.new')} <strong className="dshsec-num">{counts ? counts.isNew : DASH}</strong>
+              </span>
             </dd>
           </div>
         </dl>
+        <p className="dshsec-hint dshsec-notsafe" role="note">
+          <strong>{tr.t(openTotal === 0 ? 'summary.notSafeTitle' : 'summary.notCompleteTitle')}</strong>{' '}
+          {tr.t('summary.notSafeBody')}
+        </p>
       </div>
 
       <div className="dshsec-subsection">
@@ -691,7 +825,19 @@ function ResultsSummary(props: { readonly scan: ScanSummary; readonly heading: s
         )}
       </div>
 
-      <CoverageCard coverage={detail?.coverage} tr={tr} />
+      <details className="dshsec-subsection">
+        <summary>{tr.t('review.diagnostics')}</summary>
+        {detail ? (
+          <>
+            <UsageBlock detail={detail} aiOff={isBuiltinOnly(detail)} />
+            <WorkersTable detail={detail} />
+          </>
+        ) : null}
+        {eventsError ? (
+          <LoadError error={eventsError} onRetry={() => void controller.loadScanEvents(scan.id, true)} />
+        ) : null}
+        {eventsLoading && events.length === 0 ? <Loading /> : <ActivityFeed events={events} />}
+      </details>
     </section>
   )
 }
@@ -713,6 +859,14 @@ function CoverageCard(props: { readonly coverage: Coverage | undefined; readonly
   }
   const unavailable = asArray(coverage.analyzers).filter(a => a && !a.available)
   const gaps = asArray(coverage.gaps).filter(g => typeof g === 'string' && g.trim())
+  // Primary copy only carries diagnostics with a localized sentence; raw
+  // Host text is collected once under a single technical-details disclosure.
+  const knownGaps = (coverage.gapDetails ?? []).filter(gap => tr.lookup(`diagnostic.gap.${gap.code}`) !== undefined)
+  const unknownGapCount = (coverage.gapDetails?.length ?? 0) - knownGaps.length
+  const technical = [
+    ...unavailable.filter(a => a.reason).map(a => `${analyzerLabel(tr, a)}: ${a.reason}`),
+    ...(coverage.gapDetails ?? []).map(gap => gap.fallback),
+  ]
   const files = coverage.files
   const endpoints = coverage.endpoints
   const tasks = coverage.tasks
@@ -780,7 +934,7 @@ function CoverageCard(props: { readonly coverage: Coverage | undefined; readonly
             {unavailable.map(a => (
               <li key={a.id}>
                 <strong>{analyzerLabel(tr, a)}</strong>
-                {a.reason ? <span className="dshsec-muted"> — {a.reason}</span> : null}
+                <span className="dshsec-muted"> — {analyzerReasonText(tr, a)}</span>
               </li>
             ))}
           </ul>
@@ -789,12 +943,36 @@ function CoverageCard(props: { readonly coverage: Coverage | undefined; readonly
       {gaps.length ? (
         <div className="dshsec-stack-sm">
           <h4 className="dshsec-h4">{tr.t('coverage.gaps')}</h4>
+          {coverage.gapDetails?.length ? (
+            <ul className="dshsec-list">
+              {knownGaps.map((gap, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: immutable diagnostic order, codes may repeat for analyzers
+                <li key={`${gap.code}:${index}`}>{diagnosticText(tr, gap)}</li>
+              ))}
+              {unknownGapCount > 0 ? <li>{tr.t('diagnostic.otherGaps', { count: unknownGapCount })}</li> : null}
+            </ul>
+          ) : (
+            <details>
+              <summary>{tr.t('diagnostic.legacy')}</summary>
+              <ul className="dshsec-list">
+                {gaps.map(gap => (
+                  <li key={gap}>{gap}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      ) : null}
+      {technical.length ? (
+        <details>
+          <summary>{tr.t('diagnostic.details')}</summary>
           <ul className="dshsec-list">
-            {gaps.map(gap => (
-              <li key={gap}>{gap}</li>
+            {technical.map((line, index) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: immutable technical order
+              <li key={index}>{line}</li>
             ))}
           </ul>
-        </div>
+        </details>
       ) : null}
       {isFiniteNumber(coverage.discardedUnverifiable) && coverage.discardedUnverifiable > 0 ? (
         <p className="dshsec-muted">

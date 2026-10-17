@@ -50,13 +50,13 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
 1. **Install** the plugin. In the DSH Web UI, open **Plugins → Add plugin** and enter:
 
    ```text
-   github:Aero123421/dsh-security-plugin#v0.2.2
+   github:Aero123421/dsh-security-plugin#v0.3.0
    ```
 
    Or from a terminal (the `web` profile here):
 
    ```sh
-   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.2.2
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.3.0
    ```
 
    Use the tag of the [release](https://github.com/Aero123421/dsh-security-plugin/releases) you want; without
@@ -109,11 +109,11 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 | AI hunting | verifies medium-or-higher rule hits, file by file | endpoints, rule hits, planner hypotheses, up to 6 security-sensitive files | same as Deep |
 | Independent review (Skeptic) | no | findings at or above *Second opinion from* (default Medium) | findings at Low or above |
 | Attack chains | no | no | yes |
-| **Default budget**: AI requests | 40 | 300 | 1,200 |
-| Tokens | 400,000 | 3,000,000 | 12,000,000 |
-| Minutes | 10 | 60 | 240 |
-| Requests per reviewer | 12 | 24 | 40 |
-| Review tasks | 6 | 40 | 150 |
+| **Default budget**: AI requests | 120 | 900 | 3,600 |
+| Tokens | 1,200,000 | 9,000,000 | 36,000,000 |
+| Minutes | 30 | 180 | 720 |
+| Requests per reviewer | 36 | 72 | 120 |
+| Review tasks | 18 | 120 | 450 |
 
 Quick mode asks the AI only to confirm or dismiss rule hits. It does not look for logic flaws such as broken
 authorization. If the built-in rules find nothing, Quick runs no AI tasks.

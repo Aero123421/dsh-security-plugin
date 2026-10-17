@@ -29,13 +29,13 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 1. **インストール**: DSH の Web UI で「プラグイン → プラグインを追加」を開き、次を入力します。
 
    ```text
-   github:Aero123421/dsh-security-plugin#v0.2.2
+   github:Aero123421/dsh-security-plugin#v0.3.0
    ```
 
    ターミナルから入れる場合（ここでは `web` プロファイル）:
 
    ```sh
-   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.2.2
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.3.0
    ```
 
    `#` の後ろには、入れたい[リリース](https://github.com/Aero123421/dsh-security-plugin/releases)のタグを指定します。タグを省くと、未リリースの `main` ブランチが入ります。各リリースにはビルド済みの `dsh-security-plugin-X.Y.Z.tgz` と `SHA256SUMS` も添付しており、その URL を同じ場所に入れても導入できます。npm には公開していません。有効化し、再起動を求められたら DSH を再起動してください。更新するときは、新しいタグで同じように追加します。動いている版は「設定」タブで確認できます。読み込まれたかどうかは、`dsh --profile web --dump-config` の出力に `# == dsh-security-plugin` というレイヤーがあるかで確認できます。
@@ -70,11 +70,11 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 | AI による調査 | 中以上のルール検出箇所をファイルごとに確認 | エンドポイント、ルールの検出箇所、プランナーの仮説、機密性の高いファイル（最大 6 個） | ディープと同じ |
 | 独立レビュー（検証役） | なし | 「再確認する深刻度」（標準は中）以上 | 低以上 |
 | 組み合わせ分析 | なし | なし | あり |
-| **標準の予算**: AI リクエスト数 | 40 | 300 | 1,200 |
-| トークン数 | 400,000 | 3,000,000 | 12,000,000 |
-| 時間（分） | 10 | 60 | 240 |
-| レビュアー 1 人あたりのリクエスト数 | 12 | 24 | 40 |
-| レビュー作業数 | 6 | 40 | 150 |
+| **標準の予算**: AI リクエスト数 | 120 | 900 | 3,600 |
+| トークン数 | 1,200,000 | 9,000,000 | 36,000,000 |
+| 時間（分） | 30 | 180 | 720 |
+| レビュアー 1 人あたりのリクエスト数 | 36 | 72 | 120 |
+| レビュー作業数 | 18 | 120 | 450 |
 
 クイックでは、AI はルールの検出箇所が本物かどうかを確かめるだけで、認可漏れのようなロジックの欠陥は探しません。組み込みルールが何も見つけなければ、AI の作業は 1 つも行われません。
 

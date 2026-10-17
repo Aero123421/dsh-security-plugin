@@ -18,7 +18,7 @@
 
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import type { AnalyzerStatus, Coverage, WorkerView } from '../../shared/contracts.ts'
+import type { AnalyzerStatus, Coverage, Diagnostic, WorkerView } from '../../shared/contracts.ts'
 import { type RoleName, SCAN_PHASES, type ScanPhase } from '../../shared/domain.ts'
 import type { ModelRef, SecuritySettings } from '../../shared/settings.ts'
 import { chainSubmitTool, chainSystem, chainTask } from '../agents/roles/chain.ts'
@@ -97,7 +97,7 @@ const HUNT_KINDS = new Set<TaskRecord['kind']>([
 const MAX_HYPOTHESES = { quick: 0, deep: 8, research: 16 } as const
 /** Total worker runs per task, including interrupted runs and explicit resumes. */
 export const MAX_TASK_ATTEMPTS = 3
-const MAX_SHORT_ROLE_TURNS = 16
+const MAX_SHORT_ROLE_TURNS = 48
 const AI_PHASES = ['threat-model', 'hunt', 'review', 'chain'] as const satisfies readonly ScanPhase[]
 /** Longest delay `setTimeout` accepts; a later deadline is left to the budget checks. */
 const MAX_TIMER_MS = 2_147_483_647
@@ -1092,6 +1092,11 @@ export class ScanJob {
     const failed = failedTasks.length
     const endpoints = this.inScopeEndpoints()
     const gaps: string[] = []
+    const gapDetails: Diagnostic[] = []
+    const gap = (code: string, fallback: string, params?: Diagnostic['params']) => {
+      gaps.push(fallback)
+      gapDetails.push({ code, fallback, ...(params ? { params } : {}) })
+    }
     if (
       this.analysis.dependencies.length > 0 &&
       !this.scan.settings.privacy.allowDependencyLookup &&
@@ -1100,45 +1105,64 @@ export class ScanJob {
       const scanner = this.analysis.analyzers.find(a => a.id === 'osv-scanner')
       const scannerGap = scanner?.available
         ? 'OSV-Scanner returned no dependency results'
-        : scanner?.reason === 'osv-scanner is not installed'
+        : scanner?.reasonCode === 'not-installed'
           ? 'OSV-Scanner is not installed'
           : 'OSV-Scanner did not check dependencies'
-      gaps.push(
+      gap(
+        'dependencies-unchecked',
         `${this.analysis.dependencies.length} dependencies were found but not checked for known vulnerabilities: OSV lookup is off and ${scannerGap}. Enable dependency lookup in Privacy settings or configure offline OSV-Scanner.`,
+        { count: this.analysis.dependencies.length },
       )
     }
     if (!this.aiEnabled())
-      gaps.push('AI review was not used; logic flaws such as broken authorization are not covered.')
+      gap('ai-disabled', 'AI review was not used; logic flaws such as broken authorization are not covered.')
     const rejected = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'provider-route-rejected')
     const stale = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'stale-target').length
     if (stale > 0)
-      gaps.push(`${stale} obsolete review task(s) were skipped because their files/endpoints no longer exist.`)
+      gap(
+        'stale-tasks',
+        `${stale} obsolete review task(s) were skipped because their files/endpoints no longer exist.`,
+        { count: stale },
+      )
     if (skipped > rejected.length + stale)
-      gaps.push(`${skipped - rejected.length - stale} review task(s) did not run (budget or task limit).`)
+      gap('skipped-tasks', `${skipped - rejected.length - stale} review task(s) did not run (budget or task limit).`, {
+        count: skipped - rejected.length - stale,
+      })
     if (rejected.length > 0)
-      gaps.push(
+      gap(
+        'rejected-tasks',
         `${rejected.length} review task(s) did not run because their model route rejected requests; see the activity log.`,
+        { count: rejected.length },
       )
     if (failed > 0) {
       const first = failedTasks.toSorted((a, b) => (a.finishedAt ?? '').localeCompare(b.finishedAt ?? ''))[0]?.error
-      gaps.push(
+      gap(
+        'failed-tasks',
         `${failed} review task(s) failed${first ? ` (first: ${this.shortFailure(first)})` : ''}; see the activity log.`,
+        { count: failed },
       )
     }
-    if (this.consentRevoked) gaps.push('AI review stopped early because sending code to models was turned off.')
+    if (this.consentRevoked)
+      gap('consent-revoked', 'AI review stopped early because sending code to models was turned off.')
     if (this.analysis.snapshot.truncated)
-      gaps.push('Some files were not analyzed because the workspace exceeded the size limits.')
+      gap('snapshot-truncated', 'Some files were not analyzed because the workspace exceeded the size limits.')
     const unreviewed = endpoints.length - endpoints.filter(e => reviewedEndpoints.has(e.id)).length
     if (this.aiEnabled() && unreviewed > 0)
-      gaps.push(`${unreviewed} of ${endpoints.length} detected endpoints were not reviewed by AI.`)
+      gap('endpoints-unreviewed', `${unreviewed} of ${endpoints.length} detected endpoints were not reviewed by AI.`, {
+        count: unreviewed,
+        total: endpoints.length,
+      })
     if (endpoints.length === 0) {
-      gaps.push(
+      gap(
+        'no-endpoints',
         'No HTTP endpoints were detected; the attack surface may use a framework this version does not recognize.',
       )
     }
     for (const analyzer of this.maskedAnalyzers()) {
       if (!analyzer.available && analyzer.source !== 'disabled')
-        gaps.push(`${analyzer.id} unavailable: ${analyzer.reason ?? 'unknown'}`)
+        gap('analyzer-unavailable', `${analyzer.id} unavailable: ${analyzer.reason ?? 'unknown'}`, {
+          analyzer: analyzer.id,
+        })
     }
     return {
       files: {
@@ -1157,6 +1181,7 @@ export class ScanJob {
       analyzers: this.maskedAnalyzers(),
       discardedUnverifiable: this.discarded > discarded ? this.discarded : discarded,
       gaps,
+      gapDetails,
     }
   }
 

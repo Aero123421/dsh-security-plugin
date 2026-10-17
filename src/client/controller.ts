@@ -91,10 +91,13 @@ export interface SecurityState {
   readonly addingProject: boolean
   /** Scan lists by workspace id, newest first. */
   readonly scans: Readonly<Record<string, Loadable<readonly ScanSummary[]>>>
+  readonly scansHasMore: Readonly<Record<string, boolean>>
   /** A scan picked in History; undefined follows the latest scan. */
   readonly viewScanId: string | undefined
   readonly details: Readonly<Record<string, Loadable<ScanDetail>>>
   readonly events: Readonly<Record<string, readonly ScanEvent[]>>
+  readonly eventsErrors: Readonly<Record<string, RpcFailure>>
+  readonly eventsLoading: Readonly<Record<string, boolean>>
   readonly findings: Readonly<Record<string, Loadable<readonly FindingSummary[]>>>
   /** Keyed by `findingKey(scanId, findingId)`. */
   readonly findingDetails: Readonly<Record<string, Loadable<FindingDetail>>>
@@ -135,6 +138,7 @@ export interface ControllerOptions {
 /** Poll intervals for an active scan. */
 export const POLL_VISIBLE_MS = 1500
 export const POLL_HIDDEN_MS = 10_000
+export const SCAN_PAGE_SIZE = 50
 export const MAX_EVENTS = 200
 const FLASH_MS = 6000
 export const ESTIMATE_TTL_MS = 30_000
@@ -192,6 +196,7 @@ export interface SecurityController {
   reloadBootstrap(options?: { readonly force?: boolean }): Promise<RpcResult<Bootstrap>>
   refreshWorkspaces(force?: boolean): Promise<void>
   refreshScans(workspaceId?: string, force?: boolean): Promise<void>
+  loadMoreScans(workspaceId?: string): Promise<void>
   setDshLocale(locale: string): void
   contractMismatch(): boolean
 
@@ -213,12 +218,21 @@ export interface SecurityController {
     subpath?: string,
   ): Promise<RpcResult<ScanEstimate>>
   startScan(input: StartScanInput): Promise<RpcResult<{ scanId: string }>>
-  quickRescan(workspaceId: string, subpath?: string): Promise<RpcResult<{ scanId: string }> | undefined>
+  quickRescan(
+    workspaceId: string,
+    subpath?: string,
+    mode?: ScanMode,
+  ): Promise<RpcResult<{ scanId: string }> | undefined>
 
   loadScanDetail(scanId: string, force?: boolean): Promise<void>
+  loadScanEvents(scanId: string, force?: boolean): Promise<void>
   watchScan(scanId: string): () => void
   pauseScan(scanId: string): Promise<RpcResult<ScanSummary>>
   resumeScan(scanId: string): Promise<RpcResult<ScanSummary>>
+  extendScanBudget(
+    scanId: string,
+    add: { addTokens?: number; addLlmCalls?: number; addMinutes?: number },
+  ): Promise<RpcResult<ScanSummary>>
   cancelScan(scanId: string): Promise<RpcResult<ScanSummary>>
   deleteScan(scanId: string): Promise<RpcResult<{ deleted: boolean }>>
   exportReport(scanId: string, format: ReportFormat): Promise<RpcResult<unknown>>
@@ -268,9 +282,12 @@ export function createController(options: ControllerOptions): SecurityController
     workspaceId: readStorage(storage, WORKSPACE_KEY),
     addingProject: false,
     scans: {},
+    scansHasMore: {},
     viewScanId: undefined,
     details: {},
     events: {},
+    eventsErrors: {},
+    eventsLoading: {},
     findings: {},
     findingDetails: {},
     selectedFinding: undefined,
@@ -301,6 +318,21 @@ export function createController(options: ControllerOptions): SecurityController
   }
   const inflight = new Map<string, { readonly gen: number; readonly promise: Promise<unknown> }>()
   const generations = new Map<string, number>()
+  const deletedScans = new Set<string>()
+  const loadedEvents = new Set<string>()
+
+  function invalidateRead(key: string): void {
+    generations.set(key, (generations.get(key) ?? 0) + 1)
+    inflight.delete(key)
+  }
+
+  function activeScan(scanId: string): boolean {
+    return !disposed && !deletedScans.has(scanId)
+  }
+
+  function abortedResult(): RpcResult<never> {
+    return { ok: false, error: failure(ABORTED_ERROR, 'This view is no longer active.') }
+  }
   /**
    * Highest settings revision this page has applied. Bootstraps and save
    * results carrying an older revision never replace newer settings.
@@ -428,25 +460,73 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function refreshScans(workspaceId = get().workspaceId, force = false): Promise<void> {
-    if (!workspaceId) return
+    if (!workspaceId || disposed) return
+    const desired = Math.max(SCAN_PAGE_SIZE, get().scans[workspaceId]?.value?.length ?? 0)
     await once(
       `scans:${workspaceId}`,
       async isCurrent => {
         set(s => ({ ...s, scans: { ...s.scans, [workspaceId]: loading(s.scans[workspaceId]) } }))
-        const result = await api.call('listScans', { workspaceId })
-        if (!isCurrent()) return
+        const scans: ScanSummary[] = []
+        let hasMore = false
+        do {
+          const result = await api.call('listScans', {
+            workspaceId,
+            limit: SCAN_PAGE_SIZE,
+            ...(scans.length ? { offset: scans.length } : {}),
+          })
+          if (!isCurrent()) return
+          if (!result.ok) {
+            set(s => ({ ...s, scans: { ...s.scans, [workspaceId]: errored(s.scans[workspaceId], result.error) } }))
+            return
+          }
+          const page = asList<ScanSummary>(result.value)
+          scans.push(...page)
+          hasMore = page.length === SCAN_PAGE_SIZE
+        } while (hasMore && scans.length < desired)
+        const value = sortScans([
+          ...new Map(scans.filter(scan => !deletedScans.has(scan.id)).map(scan => [scan.id, scan])).values(),
+        ])
         set(s => {
-          const prev = s.scans[workspaceId]
-          const entry: Loadable<readonly ScanSummary[]> = result.ok
-            ? { status: 'ready', value: sortScans(asList<ScanSummary>(result.value)) }
-            : errored(prev, result.error)
           const viewScanId =
-            s.viewScanId && result.ok && !entry.value?.some(scan => scan.id === s.viewScanId) ? undefined : s.viewScanId
-          return { ...s, scans: { ...s.scans, [workspaceId]: entry }, viewScanId }
+            s.workspaceId === workspaceId && s.viewScanId && !value.some(scan => scan.id === s.viewScanId)
+              ? undefined
+              : s.viewScanId
+          return {
+            ...s,
+            scans: { ...s.scans, [workspaceId]: { status: 'ready', value } },
+            scansHasMore: { ...s.scansHasMore, [workspaceId]: hasMore },
+            viewScanId,
+          }
         })
       },
       force,
     )
+  }
+
+  async function loadMoreScans(workspaceId = get().workspaceId): Promise<void> {
+    if (!workspaceId || disposed || !get().scansHasMore[workspaceId] || get().scans[workspaceId]?.status === 'loading')
+      return
+    await once(`scans:${workspaceId}`, async isCurrent => {
+      const previous = get().scans[workspaceId]?.value ?? []
+      set(s => ({ ...s, scans: { ...s.scans, [workspaceId]: loading(s.scans[workspaceId]) } }))
+      const result = await api.call('listScans', { workspaceId, limit: SCAN_PAGE_SIZE, offset: previous.length })
+      if (!isCurrent()) return
+      if (!result.ok) {
+        set(s => ({ ...s, scans: { ...s.scans, [workspaceId]: errored(s.scans[workspaceId], result.error) } }))
+        return
+      }
+      const page = asList<ScanSummary>(result.value)
+      const value = sortScans([
+        ...new Map(
+          [...previous, ...page].filter(scan => !deletedScans.has(scan.id)).map(scan => [scan.id, scan]),
+        ).values(),
+      ])
+      set(s => ({
+        ...s,
+        scans: { ...s.scans, [workspaceId]: { status: 'ready', value } },
+        scansHasMore: { ...s.scansHasMore, [workspaceId]: page.length === SCAN_PAGE_SIZE },
+      }))
+    })
   }
 
   function ensureLoaded(): void {
@@ -470,6 +550,7 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function reload(): Promise<void> {
+    if (disposed) return
     loaded = true
     // A picker/create response from the previous connection must not navigate this one.
     generations.set('add-project', (generations.get('add-project') ?? 0) + 1)
@@ -478,6 +559,13 @@ export function createController(options: ControllerOptions): SecurityController
     const s = get()
     if (s.models.status !== 'idle') tasks.push(loadModels(true))
     if (s.toolkit.status !== 'idle') tasks.push(loadToolkit(true))
+    for (const scanId of Object.keys(s.details)) tasks.push(loadScanDetail(scanId, true))
+    for (const scanId of Object.keys(s.findings)) tasks.push(loadFindings(scanId, true))
+    for (const scanId of loadedEvents) tasks.push(loadScanEvents(scanId, true))
+    for (const key of Object.keys(s.findingDetails)) {
+      const [scanId, findingId] = key.split('\u0000')
+      if (scanId && findingId) tasks.push(loadFinding(scanId, findingId, true))
+    }
     await Promise.all(tasks)
     // Watchers keep running; nudge them so the UI catches up immediately.
     for (const [scanId, watcher] of watchers) {
@@ -598,8 +686,10 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function updateSettings(patch: SettingsPatch) {
+    if (disposed) return abortedResult()
     const revision = get().bootstrap.value?.settingsRevision ?? 0
     const result = await api.call('updateSettings', { patch, expectedRevision: revision })
+    if (disposed) return abortedResult()
     if (result.ok) applySettings(result.value.settings, result.value.revision)
     return result
   }
@@ -614,12 +704,14 @@ export function createController(options: ControllerOptions): SecurityController
     done: () => boolean,
     onPatched?: (revision: number) => void,
   ): Promise<RpcResult<unknown>> {
+    if (disposed) return abortedResult()
     if (done()) return { ok: true, value: undefined }
     let result = await updateSettings(patch)
     if (!result.ok && result.error.code === 'security/conflict') {
       noteServerRevision(result.error)
       const reloaded = await reloadBootstrap({ force: true })
       if (!reloaded.ok) return reloaded
+      if (disposed) return abortedResult()
       if (done()) return { ok: true, value: undefined }
       result = await updateSettings(patch)
     }
@@ -628,6 +720,7 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function startScan(input: StartScanInput) {
+    if (disposed) return abortedResult()
     const aiReview = input.aiReview !== false
     const settings = () => get().bootstrap.value?.settings
     if (aiReview && input.model) {
@@ -649,6 +742,7 @@ export function createController(options: ControllerOptions): SecurityController
       )
       if (!granted.ok) return granted
     }
+    if (disposed) return abortedResult()
     const result = await api.call('createScan', {
       workspaceId: input.workspaceId,
       mode: input.mode,
@@ -656,13 +750,44 @@ export function createController(options: ControllerOptions): SecurityController
       language: get().language,
       ...(aiReview ? {} : { aiReview: false }),
     })
-    if (!result.ok && consentRevision !== undefined) {
+    // Once sent, a create may have committed even if its response was lost.
+    // Never roll back consent or automatically resend an uncertain creation.
+    if (disposed) return result
+    const rejectedBeforeCreation =
+      !result.ok &&
+      [
+        'security/bad-request',
+        'security/no-model',
+        'security/consent-required',
+        'security/not-found',
+        'security/workspace-unavailable',
+        'security/busy',
+        'security/invalid-state',
+      ].includes(result.error.code)
+    if (!result.ok && !rejectedBeforeCreation) {
+      invalidateEstimates()
+      await refreshScans(input.workspaceId, true)
+      return {
+        ok: false,
+        error: failure(
+          'security/result-unknown',
+          'The scan may have been created. Check scan history before trying again.',
+          {
+            workspaceId: input.workspaceId,
+            causeCode: result.error.code,
+            reconciled: get().scans[input.workspaceId]?.status === 'ready',
+          },
+        ),
+      } as const
+    }
+    if (!result.ok && rejectedBeforeCreation && consentRevision !== undefined) {
       // Only undo our own grant. A concurrent settings write makes this CAS fail
       // rather than overwriting another viewer's newer privacy decision.
       const restored = await api.call('updateSettings', {
         patch: { privacy: { sendCodeToModel: false } },
         expectedRevision: consentRevision,
       })
+      if (disposed) return result
       if (restored.ok) applySettings(restored.value.settings, restored.value.revision)
     }
     if (result.ok || result.error.code === 'security/busy') {
@@ -679,15 +804,17 @@ export function createController(options: ControllerOptions): SecurityController
     return result
   }
 
-  async function quickRescan(workspaceId: string, subpath?: string) {
+  async function quickRescan(workspaceId: string, subpath?: string, mode: ScanMode = 'quick') {
+    if (disposed) return abortedResult()
     if (get().bootstrap.value?.settings?.privacy?.sendCodeToModel !== true) {
-      openNewScan({ workspaceId, mode: 'quick', ...(subpath ? { subpath } : {}) })
+      openNewScan({ workspaceId, mode, ...(subpath ? { subpath } : {}) })
       return undefined
     }
-    const result = await startScan({ workspaceId, mode: 'quick', ...(subpath ? { subpath } : {}) })
+    const result = await startScan({ workspaceId, mode, ...(subpath ? { subpath } : {}) })
+    if (disposed) return result
     if (result.ok) flash({ tone: 'success', key: 'detail.recheckStarted' })
     else if (result.error.code === 'security/consent-required' || result.error.code === 'security/no-model') {
-      openNewScan({ workspaceId, mode: 'quick', ...(subpath ? { subpath } : {}) })
+      openNewScan({ workspaceId, mode, ...(subpath ? { subpath } : {}) })
     } else flash({ tone: result.error.code === 'security/busy' ? 'info' : 'error', error: result.error })
     return result
   }
@@ -697,6 +824,7 @@ export function createController(options: ControllerOptions): SecurityController
   // -------------------------------------------------------------------------
 
   function storeDetail(scanId: string, detail: ScanDetail): void {
+    if (!activeScan(scanId)) return
     set(s => {
       const summary = detail.summary
       let scans = s.scans
@@ -712,7 +840,14 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function loadScanDetail(scanId: string, force = false): Promise<void> {
+    if (!activeScan(scanId)) return
     const prev = get().details[scanId]
+    // A cached detail from before a status change (completed in another
+    // window, resumed, extended) must not shadow the fresher list summary.
+    const listed = Object.values(get().scans)
+      .flatMap(entry => entry.value ?? [])
+      .find(scan => scan.id === scanId)
+    if (!force && listed && prev?.value && prev.value.summary?.status !== listed.status) force = true
     if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
     await once(
       `detail:${scanId}`,
@@ -729,6 +864,68 @@ export function createController(options: ControllerOptions): SecurityController
     )
   }
 
+  /** Fetch all event pages, retaining only the newest bounded activity window. */
+  async function loadScanEvents(scanId: string, force = false): Promise<void> {
+    if (!activeScan(scanId) || (!force && loadedEvents.has(scanId))) return
+    await once(
+      `events:${scanId}`,
+      async isCurrent => {
+        set(s => {
+          const { [scanId]: _error, ...eventsErrors } = s.eventsErrors
+          return { ...s, eventsErrors, eventsLoading: { ...s.eventsLoading, [scanId]: true } }
+        })
+        let afterSeq: number | undefined
+        let latest: readonly ScanEvent[] = []
+        for (;;) {
+          const result = await api.call('listEvents', {
+            scanId,
+            limit: MAX_EVENTS,
+            ...(afterSeq === undefined ? {} : { afterSeq }),
+          })
+          if (!isCurrent() || !activeScan(scanId)) return
+          if (!result.ok) {
+            set(s => ({
+              ...s,
+              eventsErrors: { ...s.eventsErrors, [scanId]: result.error },
+              eventsLoading: { ...s.eventsLoading, [scanId]: false },
+            }))
+            return
+          }
+          const page = asList<ScanEvent>(result.value)
+          const ordered = page
+            .filter(event => Number.isSafeInteger(event.seq) && (afterSeq === undefined || event.seq > afterSeq))
+            .sort((a, b) => a.seq - b.seq)
+          if (page.length && !ordered.length) {
+            set(s => ({
+              ...s,
+              eventsErrors: {
+                ...s.eventsErrors,
+                [scanId]: failure('security/internal', 'Activity pagination did not advance.'),
+              },
+              eventsLoading: { ...s.eventsLoading, [scanId]: false },
+            }))
+            return
+          }
+          latest = [...latest, ...ordered].slice(-MAX_EVENTS)
+          afterSeq = ordered.at(-1)?.seq ?? afterSeq
+          if (page.length < MAX_EVENTS) break
+        }
+        loadedEvents.add(scanId)
+        set(s => ({
+          ...s,
+          events: {
+            ...s.events,
+            [scanId]: [...new Map([...latest, ...(s.events[scanId] ?? [])].map(event => [event.seq, event])).values()]
+              .sort((a, b) => a.seq - b.seq)
+              .slice(-MAX_EVENTS),
+          },
+          eventsLoading: { ...s.eventsLoading, [scanId]: false },
+        }))
+      },
+      force,
+    )
+  }
+
   async function pollEvents(scanId: string, signal: AbortSignal): Promise<void> {
     const existing = get().events[scanId] ?? []
     const afterSeq = existing.length ? existing[existing.length - 1]!.seq : undefined
@@ -737,7 +934,7 @@ export function createController(options: ControllerOptions): SecurityController
       { scanId, ...(afterSeq !== undefined ? { afterSeq } : {}), limit: MAX_EVENTS },
       signal,
     )
-    if (!result.ok || signal.aborted) return
+    if (!result.ok || signal.aborted || !activeScan(scanId)) return
     const incoming = asList<ScanEvent>(result.value).filter(e => e && typeof e.seq === 'number')
     if (!incoming.length) return
     set(s => {
@@ -813,6 +1010,7 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   function watchScan(scanId: string): () => void {
+    if (!activeScan(scanId)) return () => undefined
     let watcher = watchers.get(scanId)
     if (!watcher) {
       watcher = { refs: 0, timer: undefined, abort: undefined, stopped: false }
@@ -839,11 +1037,13 @@ export function createController(options: ControllerOptions): SecurityController
   doc?.addEventListener('visibilitychange', onVisibility)
 
   async function scanAction(
-    method: 'pauseScan' | 'resumeScan' | 'cancelScan',
+    method: 'pauseScan' | 'resumeScan' | 'cancelScan' | 'extendScanBudget',
     scanId: string,
+    extra: { addTokens?: number; addLlmCalls?: number; addMinutes?: number } = {},
   ): Promise<RpcResult<ScanSummary>> {
-    const result = await api.call(method, { scanId })
-    if (result.ok && result.value) {
+    if (!activeScan(scanId)) return abortedResult()
+    const result = await api.call(method, { scanId, ...extra })
+    if (result.ok && result.value && activeScan(scanId)) {
       const summary = result.value
       set(s => {
         const entry = s.scans[summary.workspaceId]
@@ -861,13 +1061,33 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function deleteScan(scanId: string) {
+    if (!activeScan(scanId)) return abortedResult()
     const result = await api.call('deleteScan', { scanId })
-    if (result.ok) {
+    if (result.ok && result.value.deleted && !disposed) {
+      deletedScans.add(scanId)
+      loadedEvents.delete(scanId)
       stopWatcher(scanId)
+      // A late list/detail response must not resurrect a deleted scan.
+      for (const key of [...generations.keys()]) {
+        if (
+          key === `detail:${scanId}` ||
+          key === `findings:${scanId}` ||
+          key === `events:${scanId}` ||
+          key.startsWith(`finding:${scanId}\u0000`) ||
+          key.startsWith('scans:') ||
+          key === 'workspaces'
+        )
+          invalidateRead(key)
+      }
       set(s => {
         const { [scanId]: _detail, ...details } = s.details
         const { [scanId]: _findings, ...findings } = s.findings
         const { [scanId]: _events, ...events } = s.events
+        const { [scanId]: _eventsError, ...eventsErrors } = s.eventsErrors
+        const { [scanId]: _eventsLoading, ...eventsLoading } = s.eventsLoading
+        const findingDetails = Object.fromEntries(
+          Object.entries(s.findingDetails).filter(([key]) => !key.startsWith(`${scanId}\u0000`)),
+        )
         const scans: Record<string, Loadable<readonly ScanSummary[]>> = {}
         for (const [id, entry] of Object.entries(s.scans)) {
           scans[id] = entry.value ? { ...entry, value: entry.value.filter(scan => scan.id !== scanId) } : entry
@@ -876,12 +1096,16 @@ export function createController(options: ControllerOptions): SecurityController
           ...s,
           details,
           findings,
+          findingDetails,
           events,
+          eventsErrors,
+          eventsLoading,
           scans,
           viewScanId: s.viewScanId === scanId ? undefined : s.viewScanId,
+          selectedFinding: s.selectedFinding?.scanId === scanId ? undefined : s.selectedFinding,
         }
       })
-      void refreshWorkspaces()
+      void refreshWorkspaces(true)
     }
     return result
   }
@@ -908,6 +1132,7 @@ export function createController(options: ControllerOptions): SecurityController
   // -------------------------------------------------------------------------
 
   async function loadFindings(scanId: string, force = false): Promise<void> {
+    if (!activeScan(scanId)) return
     const prev = get().findings[scanId]
     if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
     await once(
@@ -932,6 +1157,7 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function loadFinding(scanId: string, findingId: string, force = false): Promise<void> {
+    if (!activeScan(scanId)) return
     const key = findingKey(scanId, findingId)
     const prev = get().findingDetails[key]
     if (!force && prev && prev.status !== 'error' && prev.status !== 'idle') return
@@ -951,15 +1177,18 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function setTriage(input: { scanId: string; findingId: string; triage: TriageState; note?: string }) {
+    if (!activeScan(input.scanId)) return abortedResult()
     const result = await api.call('setTriage', {
       scanId: input.scanId,
       findingId: input.findingId,
       triage: input.triage,
       ...(input.note?.trim() ? { note: input.note.trim() } : {}),
     })
-    if (result.ok && result.value) {
+    if (result.ok && result.value && activeScan(input.scanId)) {
       const updated = result.value
       const key = findingKey(input.scanId, input.findingId)
+      invalidateRead(`findings:${input.scanId}`)
+      invalidateRead(`finding:${key}`)
       set(s => {
         const list = s.findings[input.scanId]
         const detail = s.findingDetails[key]
@@ -968,14 +1197,14 @@ export function createController(options: ControllerOptions): SecurityController
           findings: list?.value
             ? {
                 ...s.findings,
-                [input.scanId]: { ...list, value: list.value.map(f => (f.id === updated.id ? updated : f)) },
+                [input.scanId]: { status: 'ready', value: list.value.map(f => (f.id === updated.id ? updated : f)) },
               }
             : s.findings,
           findingDetails: detail?.value
             ? {
                 ...s.findingDetails,
                 [key]: {
-                  ...detail,
+                  status: 'ready',
                   value: {
                     ...detail.value,
                     ...updated,
@@ -986,6 +1215,8 @@ export function createController(options: ControllerOptions): SecurityController
             : s.findingDetails,
         }
       })
+      if (get().findings[input.scanId]?.status === 'loading') void loadFindings(input.scanId, true)
+      if (get().findingDetails[key]?.status === 'loading') void loadFinding(input.scanId, input.findingId, true)
       void refreshScans()
     }
     return result
@@ -1002,7 +1233,10 @@ export function createController(options: ControllerOptions): SecurityController
     const result = await api.call('getFixPrompt', { scanId: input.scanId, findingId: input.findingId })
     if (!result.ok) return result
     try {
-      await ui.startSession(input.workspaceId, { prompt: result.value.prompt, clearPreviousDraft: true })
+      if (disposed) return abortedResult()
+      // DSH may reuse a blank session. Preserve its existing unsent input.
+      // startSession can return void; success here means requested, not opened.
+      await ui.startSession(input.workspaceId, { prompt: result.value.prompt, clearPreviousDraft: false })
     } catch (error) {
       return {
         ok: false,
@@ -1101,6 +1335,7 @@ export function createController(options: ControllerOptions): SecurityController
   }
 
   async function saveSettings(): Promise<RpcResult<unknown> | undefined> {
+    if (disposed) return abortedResult()
     const s = get()
     const form = s.form
     const bootstrap = s.bootstrap.value
@@ -1118,6 +1353,7 @@ export function createController(options: ControllerOptions): SecurityController
     }
     set(st => (st.form ? { ...st, form: { ...st.form, saving: true } } : st))
     const result = await api.call('updateSettings', { patch, expectedRevision: form.revision })
+    if (disposed) return abortedResult()
     if (result.ok) {
       const fresh = result.value.revision >= knownRevision
       if (fresh) knownRevision = result.value.revision
@@ -1154,6 +1390,7 @@ export function createController(options: ControllerOptions): SecurityController
       setFormResult(undefined, true)
       noteServerRevision(result.error)
       await reloadBootstrap({ force: true })
+      if (disposed) return abortedResult()
       setFormResult({ tone: 'warn', key: 'settings.conflict' })
       return result
     }
@@ -1213,6 +1450,7 @@ export function createController(options: ControllerOptions): SecurityController
     reloadBootstrap,
     refreshWorkspaces,
     refreshScans,
+    loadMoreScans,
     setDshLocale,
     contractMismatch,
     canAddProject,
@@ -1229,9 +1467,11 @@ export function createController(options: ControllerOptions): SecurityController
     startScan,
     quickRescan,
     loadScanDetail,
+    loadScanEvents,
     watchScan,
     pauseScan: scanId => scanAction('pauseScan', scanId),
     resumeScan: scanId => scanAction('resumeScan', scanId),
+    extendScanBudget: (scanId, add) => scanAction('extendScanBudget', scanId, add),
     cancelScan: scanId => scanAction('cancelScan', scanId),
     deleteScan,
     exportReport,

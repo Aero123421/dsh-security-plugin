@@ -8,7 +8,7 @@
 import type { ScanUsage } from '../../shared/contracts.ts'
 import type { ScanBudget } from '../../shared/settings.ts'
 import type { LlmTokenUsage } from '../dsh/ports.ts'
-import type { BudgetGate } from '../agents/runtime/budget.ts'
+import { type BudgetGate, chargedCacheReadTokens } from '../agents/runtime/budget.ts'
 
 export type BudgetStop = 'calls' | 'tokens' | 'time' | 'cancelled'
 
@@ -52,7 +52,10 @@ export class ScanBudgetGate implements BudgetGate {
   }
 
   record(usage: LlmTokenUsage): void {
-    this.inputTokens += safe(usage.inputTokens) + safe(usage.cacheReadTokens) + safe(usage.cacheWriteTokens)
+    // Input is stored as the budget charge: uncached and cache-write tokens
+    // at full rate, cache reads at CACHE_READ_CHARGE_RATE (see runtime/budget).
+    this.inputTokens +=
+      safe(usage.inputTokens) + chargedCacheReadTokens(safe(usage.cacheReadTokens)) + safe(usage.cacheWriteTokens)
     this.outputTokens += safe(usage.outputTokens)
   }
 

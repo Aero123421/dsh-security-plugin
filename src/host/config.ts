@@ -31,9 +31,9 @@ export const Config = z.object({
     .default(200 * 1024 * 1024)
     .describe('Total bytes read into one snapshot'),
   /** Ceiling for any scan's token budget. */
-  maxTokensPerScan: positiveInt(1_000_000_000).default(20_000_000),
+  maxTokensPerScan: positiveInt(1_000_000_000).default(60_000_000),
   /** Ceiling for any scan's model-request budget. */
-  maxLlmCallsPerScan: positiveInt(1_000_000).default(2_000),
+  maxLlmCallsPerScan: positiveInt(1_000_000).default(6_000),
   /**
    * Allow pages that are not on the Host machine (remote Web) to turn on
    * settings that widen what leaves the machine (sending code to models,

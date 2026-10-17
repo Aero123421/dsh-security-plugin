@@ -41,7 +41,13 @@ describe('dependency vulnerability coverage', () => {
           id: 'osv-scanner',
           available,
           source: scanner === 'failed' || available ? 'path' : 'disabled',
-          ...(!available ? { reason } : {}),
+          ...(!available
+            ? {
+                reason,
+                reasonCode:
+                  scanner === 'missing' ? 'not-installed' : scanner === 'no-database' ? 'offline-db-missing' : 'failed',
+              }
+            : {}),
         },
         signals:
           scanner === 'vulnerable'
@@ -76,7 +82,11 @@ describe('dependency vulnerability coverage', () => {
             ?.coverage?.gaps.filter(gap => gap.includes('dependencies were found but not checked')) ?? []
         const expected = dependencies > 0 && !lookup && !checked
         expect(gaps).toHaveLength(expected ? 1 : 0)
+        const details = h.store.getScan(scan.id)?.coverage?.gapDetails ?? []
+        expect(details.map(detail => detail.fallback)).toEqual(h.store.getScan(scan.id)?.coverage?.gaps)
+        expect(details.filter(detail => detail.code === 'dependencies-unchecked')).toHaveLength(expected ? 1 : 0)
         if (expected) {
+          expect(details.find(detail => detail.code === 'dependencies-unchecked')?.params).toEqual({ count: 2 })
           expect(gaps[0]).toContain(
             '2 dependencies were found but not checked for known vulnerabilities: OSV lookup is off',
           )

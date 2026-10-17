@@ -99,9 +99,9 @@ export const HIGH_RISK_SETTING_PATHS = [
 ] as const
 
 export const DEFAULT_BUDGETS: SecuritySettings['budgets'] = {
-  quick: { maxLlmCalls: 40, maxTokens: 400_000, maxMinutes: 10, maxTurnsPerWorker: 12, maxTasks: 6 },
-  deep: { maxLlmCalls: 300, maxTokens: 3_000_000, maxMinutes: 60, maxTurnsPerWorker: 24, maxTasks: 40 },
-  research: { maxLlmCalls: 1200, maxTokens: 12_000_000, maxMinutes: 240, maxTurnsPerWorker: 40, maxTasks: 150 },
+  quick: { maxLlmCalls: 120, maxTokens: 1_200_000, maxMinutes: 30, maxTurnsPerWorker: 36, maxTasks: 18 },
+  deep: { maxLlmCalls: 900, maxTokens: 9_000_000, maxMinutes: 180, maxTurnsPerWorker: 72, maxTasks: 120 },
+  research: { maxLlmCalls: 3600, maxTokens: 36_000_000, maxMinutes: 720, maxTurnsPerWorker: 120, maxTasks: 450 },
 }
 
 export const DEFAULT_SETTINGS: SecuritySettings = {

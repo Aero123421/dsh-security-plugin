@@ -28,7 +28,7 @@ import type { ModelRef, SecuritySettings, SettingsPatch } from './settings.ts'
 /** Endpoint prefix under the shared `/api` channel. */
 export const RPC_NAMESPACE = 'dsh-security'
 /** Bumped on any incompatible change to this file. */
-export const CONTRACT_VERSION = 2
+export const CONTRACT_VERSION = 3
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -45,6 +45,7 @@ export const ERROR_CODES = [
   'security/consent-required',
   'security/busy',
   'security/invalid-state',
+  'security/result-unknown',
   'security/toolkit-unavailable',
   'security/internal',
 ] as const
@@ -73,6 +74,12 @@ export type AnalyzerId =
   | 'osv-scanner'
   | 'semgrep'
 
+export interface Diagnostic {
+  readonly code: string
+  readonly params?: Readonly<Record<string, string | number>>
+  readonly fallback: string
+}
+
 export interface AnalyzerStatus {
   readonly id: AnalyzerId
   readonly available: boolean
@@ -82,6 +89,8 @@ export interface AnalyzerStatus {
   readonly source: 'builtin' | 'managed' | 'path' | 'disabled'
   /** Why it is unavailable, in English (the UI maps known reasons). */
   readonly reason?: string
+  readonly reasonCode?: string
+  readonly reasonParams?: Readonly<Record<string, string | number>>
 }
 
 export interface Bootstrap {
@@ -145,6 +154,11 @@ export interface ProviderOption {
 
 export interface ScanUsage {
   readonly llmCalls: number
+  /**
+   * Budget-charged input tokens: uncached input and cache writes at full
+   * rate, cache reads at a tenth. Comparable to the token budget; raw
+   * per-request provider counts are kept in transcripts.
+   */
   readonly inputTokens: number
   readonly outputTokens: number
   readonly toolCalls: number
@@ -171,6 +185,14 @@ export interface Coverage {
   readonly discardedUnverifiable: number
   /** Human-readable gaps, e.g. "budget exhausted before 12 tasks". */
   readonly gaps: readonly string[]
+  /** Structured diagnostics when provided by a newer Host. */
+  readonly gapDetails?: readonly Diagnostic[]
+}
+
+export interface ReviewOutcome {
+  readonly state: 'builtin' | 'not-run' | 'failed' | 'partial' | 'complete' | 'unknown'
+  readonly completed: number
+  readonly planned: number
 }
 
 export interface SeverityCounts {
@@ -200,6 +222,8 @@ export interface ScanSummary {
   /** Git commit at snapshot time, when the workspace is a git checkout. */
   readonly commit?: string
   readonly dirty?: boolean
+  /** AI review attainment, independent of the scan lifecycle status. */
+  readonly review?: ReviewOutcome
 }
 
 export type WorkerState = 'running' | 'done' | 'failed' | 'cancelled'
@@ -279,6 +303,8 @@ export interface FindingSummary {
   readonly verification: Verification
   readonly closure: Closure
   readonly source: FindingSource
+  /** Actual independent review recorded for this finding; absent on older Hosts. */
+  readonly independentlyReviewed?: boolean
   readonly cwe?: string
   readonly ruleId?: string
   readonly location?: CodeRef
@@ -411,12 +437,22 @@ export interface RpcMethods {
     response: { readonly scanId: string }
   }
   listScans: {
-    request: { readonly workspaceId?: string; readonly limit?: number }
+    request: { readonly workspaceId?: string; readonly limit?: number; readonly offset?: number }
     response: readonly ScanSummary[]
   }
   getScan: { request: { readonly scanId: string }; response: ScanDetail }
   pauseScan: { request: { readonly scanId: string }; response: ScanSummary }
   resumeScan: { request: { readonly scanId: string }; response: ScanSummary }
+  extendScanBudget: {
+    request: {
+      readonly scanId: string
+      /** Added to the scan's frozen budget; at least one addition is required. */
+      readonly addTokens?: number
+      readonly addLlmCalls?: number
+      readonly addMinutes?: number
+    }
+    response: ScanSummary
+  }
   cancelScan: { request: { readonly scanId: string }; response: ScanSummary }
   deleteScan: { request: { readonly scanId: string }; response: { readonly deleted: boolean } }
   listFindings: {
@@ -464,6 +500,7 @@ export const RPC_METHOD_NAMES = [
   'getScan',
   'pauseScan',
   'resumeScan',
+  'extendScanBudget',
   'cancelScan',
   'deleteScan',
   'listFindings',

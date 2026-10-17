@@ -37,17 +37,33 @@ describe('ScanBudgetGate', () => {
     expect(budget.usage().llmCalls).toBe(3)
   })
 
-  it('stops at the token limit, counting cache reads and writes as input', () => {
+  it('stops at the token limit, counting cache writes in full and cache reads at a tenth', () => {
     const { budget } = gate({ maxLlmCalls: 100 })
     budget.admit()
+    // 300 uncached + 200 cache reads charged as 20 + 50 cache writes = 370.
     budget.record({ inputTokens: 300, outputTokens: 100, cacheReadTokens: 200, cacheWriteTokens: 50 })
-    expect(budget.usage()).toMatchObject({ inputTokens: 550, outputTokens: 100 })
+    expect(budget.usage()).toMatchObject({ inputTokens: 370, outputTokens: 100 })
     expect(budget.exhausted()).toBeUndefined()
     budget.admit()
-    budget.record({ inputTokens: 250, outputTokens: 100 })
+    budget.record({ inputTokens: 430, outputTokens: 100 })
     expect(budget.usage()).toMatchObject({ inputTokens: 800, outputTokens: 200 })
     expect(budget.exhausted()).toBe('tokens')
     expect(budget.admit()).toEqual({ ok: false, reason: 'tokens' })
+  })
+
+  it('a cache-mostly conversation lasts about ten times longer than at full-rate charging', () => {
+    const { budget } = gate({ maxLlmCalls: 10_000, maxTokens: 1000 })
+    // Each turn resends a mostly cached history: 900 cached + 10 fresh tokens.
+    for (let turn = 0; turn < 9; turn++) {
+      expect(budget.admit()).toEqual({ ok: true })
+      budget.record({ inputTokens: 10, outputTokens: 0, cacheReadTokens: 900 })
+    }
+    // 9 turns charged 9 * (10 + 90) = 900; full-rate charging would have stopped after one.
+    expect(budget.usage().inputTokens).toBe(900)
+    expect(budget.exhausted()).toBeUndefined()
+    budget.admit()
+    budget.record({ inputTokens: 10, outputTokens: 0, cacheReadTokens: 900 })
+    expect(budget.exhausted()).toBe('tokens')
   })
 
   it('rounds fractional usage and ignores negative, NaN, and missing counts', () => {

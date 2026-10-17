@@ -236,7 +236,7 @@ function FixSection(props: { readonly detail: FindingDetail; readonly scan: Scan
     setBusy(undefined)
     setNote(
       result.ok
-        ? { tone: 'success', text: tr.t('detail.chatOpened') }
+        ? { tone: 'success', text: tr.t('detail.chatRequested') }
         : { tone: 'error', text: errorText(tr, result.error) },
     )
   }
@@ -289,7 +289,7 @@ function RecheckSection(props: { readonly scan: ScanSummary }) {
   const [busy, setBusy] = useState(false)
   const run = async () => {
     setBusy(true)
-    await controller.quickRescan(props.scan.workspaceId, props.scan.subpath)
+    await controller.quickRescan(props.scan.workspaceId, props.scan.subpath, props.scan.mode)
     setBusy(false)
   }
   return (
@@ -297,7 +297,7 @@ function RecheckSection(props: { readonly scan: ScanSummary }) {
       <p>{tr.t('detail.recheckBody')}</p>
       <div className="dshsec-actions">
         <Button icon={<IconRefresh size={16} />} busy={busy} onClick={() => void run()}>
-          {tr.t('detail.runQuick')}
+          {tr.t('detail.runRecheck', { mode: tr.t(`mode.${props.scan.mode}`) })}
         </Button>
       </div>
     </DetailSection>
@@ -314,11 +314,19 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
   const [result, setResult] = useState<ActionNote>()
   const noteId = useId()
   const helpId = useId()
+  const draftRef = useRef({ triage, note: noteText })
+  const savedRef = useRef({ triage: detail.triage, note: detail.triageNote ?? '' })
 
   useEffect(() => {
-    setTriage(detail.triage)
-    setNoteText(detail.triageNote ?? '')
-    setResult(undefined)
+    const next = { triage: detail.triage, note: detail.triageNote ?? '' }
+    // Server refreshes may update a clean draft, never newer unsaved input.
+    if (sameDecision(draftRef.current, savedRef.current)) {
+      draftRef.current = next
+      setTriage(next.triage)
+      setNoteText(next.note)
+      setResult(undefined)
+    }
+    savedRef.current = next
   }, [detail.triage, detail.triageNote])
 
   const dirty = triage !== detail.triage || noteText.trim() !== (detail.triageNote ?? '').trim()
@@ -326,11 +334,17 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
   const save = async () => {
     setBusy(true)
     setResult(undefined)
-    const outcome = await controller.setTriage({ scanId: props.scanId, findingId: detail.id, triage, note: noteText })
+    const submitted = { ...draftRef.current }
+    const outcome = await controller.setTriage({ scanId: props.scanId, findingId: detail.id, ...submitted })
     setBusy(false)
     setResult(
       outcome.ok
-        ? { tone: 'success', text: tr.t('detail.decisionSaved') }
+        ? {
+            tone: 'success',
+            text: tr.t(
+              sameDecision(draftRef.current, submitted) ? 'detail.decisionSaved' : 'detail.decisionSavedDraft',
+            ),
+          }
         : { tone: 'error', text: errorText(tr, outcome.error) },
     )
   }
@@ -352,7 +366,11 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
                 name={`dshsec-triage-${detail.id}`}
                 value={state}
                 checked={triage === state}
-                onChange={() => setTriage(state)}
+                onChange={() => {
+                  draftRef.current = { ...draftRef.current, triage: state }
+                  setTriage(state)
+                  setResult(undefined)
+                }}
               />
               <span>{tr.t(`triage.${state}`)}</span>
             </label>
@@ -369,7 +387,11 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
           rows={2}
           value={noteText}
           maxLength={2000}
-          onChange={event => setNoteText(event.target.value)}
+          onChange={event => {
+            draftRef.current = { ...draftRef.current, note: event.target.value }
+            setNoteText(event.target.value)
+            setResult(undefined)
+          }}
         />
       </div>
       <div className="dshsec-actions">
@@ -377,9 +399,14 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
           {tr.t('detail.saveDecision')}
         </Button>
       </div>
+      {dirty && !busy ? <p className="dshsec-hint">{tr.t('settings.unsaved')}</p> : null}
       {result ? <Callout tone={result.tone}>{result.text}</Callout> : null}
     </section>
   )
+}
+
+function sameDecision(a: { triage: TriageState; note: string }, b: { triage: TriageState; note: string }): boolean {
+  return a.triage === b.triage && a.note.trim() === b.note.trim()
 }
 
 /**

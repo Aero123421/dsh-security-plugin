@@ -43,9 +43,15 @@ const MAX_SNIPPET_LINES = 6
 const MAX_SNIPPET_CHARS = 1200
 
 /** Analyzer run for a tool that could not be used at all. */
-export function unavailableRun(id: AnalyzerId, reason: string, started: number, warnings: string[] = []): AnalyzerRun {
+export function unavailableRun(
+  id: AnalyzerId,
+  reason: string,
+  started: number,
+  warnings: string[] = [],
+  reasonCode = 'unavailable',
+): AnalyzerRun {
   return {
-    status: { id, available: false, source: 'disabled', reason },
+    status: { id, available: false, source: 'disabled', reason, reasonCode },
     signals: [],
     durationMs: Date.now() - started,
     warnings,
@@ -85,7 +91,7 @@ function statusOf(id: AnalyzerId, tool: ToolHandle, available: boolean, reason?:
     available,
     source: tool.source,
     ...(tool.version ? { version: tool.version } : {}),
-    ...(reason ? { reason } : {}),
+    ...(reason ? { reason, reasonCode: 'failed' } : {}),
   }
 }
 

@@ -42,6 +42,7 @@ export type ScanPatch = Partial<
     | 'finishedAt'
     | 'error'
     | 'commit'
+    | 'budget'
     | 'usage'
     | 'phases'
     | 'progress'
@@ -103,8 +104,10 @@ export interface ScanQuery {
   readonly workspaceRoot?: string
   readonly workspaceId?: string
   readonly statuses?: readonly ScanStatus[]
-  /** Default 50, max 500. Newest first by `createdAt`. */
+  /** Default 50, max 500. Newest first by `createdAt`, then id. */
   readonly limit?: number
+  /** Number of matching scans to skip; default 0. */
+  readonly offset?: number
 }
 
 export interface SecurityStore {

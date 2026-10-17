@@ -33,6 +33,28 @@ function rpcCode(fn: () => unknown): string | undefined {
   return undefined
 }
 
+describe('default scan budgets', () => {
+  it('uses tripled budgets without clamping them at the default operator ceilings', () => {
+    expect(DEFAULT_SETTINGS.budgets).toEqual({
+      quick: { maxLlmCalls: 120, maxTokens: 1_200_000, maxMinutes: 30, maxTurnsPerWorker: 36, maxTasks: 18 },
+      deep: { maxLlmCalls: 900, maxTokens: 9_000_000, maxMinutes: 180, maxTurnsPerWorker: 72, maxTasks: 120 },
+      research: { maxLlmCalls: 3600, maxTokens: 36_000_000, maxMinutes: 720, maxTurnsPerWorker: 120, maxTasks: 450 },
+    })
+    expect(LIMITS.maxTokensPerScan).toBe(60_000_000)
+    expect(LIMITS.maxLlmCallsPerScan).toBe(6_000)
+    expect(clampSettings(DEFAULT_SETTINGS, LIMITS).budgets).toEqual(DEFAULT_SETTINGS.budgets)
+  })
+
+  it('preserves saved budgets from before the default increase', () => {
+    const budgets = {
+      quick: { maxLlmCalls: 40, maxTokens: 400_000, maxMinutes: 10, maxTurnsPerWorker: 12, maxTasks: 6 },
+      deep: { maxLlmCalls: 300, maxTokens: 3_000_000, maxMinutes: 60, maxTurnsPerWorker: 24, maxTasks: 40 },
+      research: { maxLlmCalls: 1200, maxTokens: 12_000_000, maxMinutes: 240, maxTurnsPerWorker: 40, maxTasks: 150 },
+    }
+    expect(readStoredSettings({ ...DEFAULT_SETTINGS, budgets }).budgets).toEqual(budgets)
+  })
+})
+
 describe('readStoredSettings', () => {
   it('returns the defaults for nothing stored', () => {
     expect(readStoredSettings(undefined)).toEqual(DEFAULT_SETTINGS)

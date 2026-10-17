@@ -1,6 +1,6 @@
 {
   "name": "dsh-security-plugin",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Evidence-driven AI security review for DeepSeek Harness: a Security sidebar, deterministic analyzers, read-only multi-agent review with host-verified evidence, and Markdown/JSON/SARIF reports.",
   "keywords": [
     "dsh",

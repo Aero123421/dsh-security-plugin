@@ -8,6 +8,64 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-18
+
+### Added
+
+- Continue a budget-starved scan in place: when scheduled AI work was skipped because a budget ran
+  out, the results page offers **Continue with more budget** (+50% / +100% / +300% of whichever
+  dimensions ran out, still clamped to the operator ceilings). The scan keeps its findings, usage
+  and completed tasks; only budget-skipped work runs again. This adds the `extendScanBudget` RPC
+  method and bumps the wire contract to version 3, so an outdated page now shows the reload banner
+  instead of failing individual requests.
+
+### Changed
+
+- Redesign the completed-scan summary as a plain report: severity counts are hairline rows
+  (label left, count right, click to filter) in the same style as the coverage list, certainty is a
+  single key/value line, and the not-complete caveat is a quiet footnote — no dashboard cards,
+  charts, or big numbers. Finding titles clamp to two lines with the full text on hover. Coverage
+  now shows only localized limitation sentences in primary copy, with every raw Host reason
+  collected under a single technical-details disclosure instead of one toggle per analyzer or gap.
+- Charge cache-read tokens at a tenth of the token budget (uncached input, cache writes and output
+  still count in full), approximating typical provider cache pricing. Multi-turn workers resend
+  mostly cached history, so full-rate charging drained token budgets roughly ten times faster than
+  the underlying spend and ended scans with most tasks skipped while request and time budgets were
+  barely touched. Reported input-token usage is the same charge; raw per-request counts remain in
+  transcripts. Usage recorded by earlier versions stays counted at the old rate.
+
+- Triple the default per-mode scan budgets (model requests, tokens, minutes, worker turns and tasks),
+  the default operator token/request ceilings, the short-role turn cap (16 → 48), and the per-reply
+  tool-call cap (16 → 48). Existing saved budgets and explicit operator overrides are preserved;
+  scans already created keep their original budgets. Concurrency, privacy and retry limits are unchanged.
+
+### Fixed
+
+- Separate scan execution completion from AI review coverage: built-in-only, not-run, failed,
+  partial and completed scheduled work are distinguished. Completed results retain notices,
+  usage, workers and the latest activity, with retry on log-loading errors. Independent review
+  is checked per finding, not inferred from another worker's completion.
+- Localize structured coverage gaps and analyzer diagnostics in English, Japanese and Chinese;
+  retain original and legacy messages in expandable technical details. Structured diagnostics
+  use the same host-path masking as existing results.
+- Preserve triage edits made during a save and prevent stale reads from undoing saved decisions.
+  Reconnect revalidates completed findings, while cross-project responses and deleted-scan reads
+  cannot replace the current selection or revive deleted results.
+- Disable closing the New Scan dialog while its start request is pending. Lost creation responses
+  are reported as result-unknown and trigger a history refresh, without automatic resubmission
+  or rolling back consent for a potentially accepted scan. Disposed clients start no new work.
+- Re-scan findings at the original depth. Chat handoff preserves existing unsent input and reports
+  only that opening was requested; if DSH did not insert the prompt, use the existing copy action.
+- Add history pagination beyond the first 50 scans, keep export menus outside clipping containers,
+  and preserve keyboard navigation when menus are portaled. Show model-refresh errors and retry
+  even when a previously loaded model list remains available.
+- Activity entries name the actual phase instead of "Unknown", and scan lifecycle events (created,
+  resumed, interrupted, notices, discarded evidence, budget extended) have localized primary text
+  instead of a generic diagnostic label. The independent-review warning only fires for findings the
+  Host would actually schedule for review. A detail cached before a scan's status changed no longer
+  shadows the fresher outcome. Bootstrap analyzer statuses carry the same localized reason codes as
+  scan coverage, and the New Scan dialog always releases its busy state after a start attempt.
+
 ## [0.2.2] - 2026-10-16
 
 ### Fixed
@@ -230,7 +288,8 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.1.1...v0.2.0

@@ -54,7 +54,7 @@ type GitleaksFinding = z.infer<typeof findingSchema>
 export async function runGitleaks(options: ExternalRunOptions): Promise<AnalyzerRun> {
   const started = Date.now()
   const { tool } = options
-  if (!tool) return unavailableRun('gitleaks', 'gitleaks is not installed', started)
+  if (!tool) return unavailableRun('gitleaks', 'gitleaks is not installed', started, [], 'not-installed')
   options.signal?.throwIfAborted()
 
   const work = await mkdtemp(join(tmpdir(), 'dsh-gitleaks-'))

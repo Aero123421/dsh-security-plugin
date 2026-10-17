@@ -37,8 +37,8 @@ from starting, and the reason is written to the DSH log.
 | `maxEntries` | integer | `100000` | 1–10,000,000 | Entries visited, including directories and excluded files. Bounds excluded-only trees and directory enumeration; exhausted walks record `limit-entries`. |
 | `maxFileBytes` | integer (bytes) | `1048576` (1 MiB) | 1–64 MiB | Largest single file read. Larger files are excluded as `too-large`, except dependency manifests and lock files, which may be up to 32 MiB (an oversized one is named in a scan warning). |
 | `maxTotalBytes` | integer (bytes) | `209715200` (200 MiB) | 1 B–4 GiB | Total bytes read into one snapshot. |
-| `maxTokensPerScan` | integer | `20000000` | 1–1,000,000,000 | Ceiling for every mode's *Tokens* budget. |
-| `maxLlmCallsPerScan` | integer | `2000` | 1–1,000,000 | Ceiling for every mode's *AI requests* budget. |
+| `maxTokensPerScan` | integer | `60000000` | 1–1,000,000,000 | Ceiling for every mode's *Tokens* budget. |
+| `maxLlmCallsPerScan` | integer | `6000` | 1–1,000,000 | Ceiling for every mode's *AI requests* budget. |
 | `allowRemoteHighRiskSettings` | boolean | `true` | | Whether pages not on the Host machine may **turn on** the high-risk switches (below) and install managed tools. Turning them off is always allowed. |
 | `allowManagedToolkit` | boolean | `true` | | Whether the Analyzers section may download pinned, hash-verified Gitleaks and OSV-Scanner builds into `dataDir/toolkit`. Tools already on `PATH` are used either way. |
 | `osvEndpoint` | URL | `https://api.osv.dev` | valid URL | OSV API base, for example an internal mirror. Requests go to `<osvEndpoint>/v1/querybatch` and `/v1/vulns/<id>`. |
@@ -155,11 +155,22 @@ canonical workspace, including when resuming a different scan.
 
 | Setting | Quick | Deep | Research | Clamp |
 | --- | --- | --- | --- | --- |
-| `maxLlmCalls` (AI requests) | 40 | 300 | 1,200 | ≤ `maxLlmCallsPerScan` |
-| `maxTokens` | 400,000 | 3,000,000 | 12,000,000 | ≤ `maxTokensPerScan` |
-| `maxMinutes` | 10 | 60 | 240 | UI: 1–1,440 |
-| `maxTurnsPerWorker` (requests per reviewer) | 12 | 24 | 40 | 1–500. Planner, Skeptic and Chain analyst also stop at 16. |
-| `maxTasks` (review tasks) | 6 | 40 | 150 | UI: 1–1,000. The review phase may schedule up to `max(maxTasks, 10)`. |
+| `maxLlmCalls` (AI requests) | 120 | 900 | 3,600 | ≤ `maxLlmCallsPerScan` |
+| `maxTokens` | 1,200,000 | 9,000,000 | 36,000,000 | ≤ `maxTokensPerScan` |
+| `maxMinutes` | 30 | 180 | 720 | UI: 1–1,440 |
+| `maxTurnsPerWorker` (requests per reviewer) | 36 | 72 | 120 | 1–500. Planner, Skeptic and Chain analyst also stop at 48. |
+| `maxTasks` (review tasks) | 18 | 120 | 450 | UI: 1–1,000. The review phase may schedule up to `max(maxTasks, 10)`. |
+
+These defaults apply when no budget has been saved. Updating the plugin does not replace saved budgets;
+change them in Settings to use the new values. Each model reply may execute up to 48 tool calls;
+further calls receive an error result. Concurrency and retry limits are independent of these budgets.
+
+Token usage is charged at the reported uncached input, cache writes and output at full rate, and cache reads at a
+tenth, approximating typical provider cache pricing; the usage figures shown for a scan use the same charge. When a
+scan ends with work skipped because a budget ran out, its results page offers **Continue with more budget**: the
+scan's own budget grows by the chosen percentage of whichever dimensions ran out (still clamped to
+`maxTokensPerScan` / `maxLlmCallsPerScan`), and the skipped work continues in the same scan. Settings budgets for
+future scans are not changed by extending one scan.
 
 Clamping happens when settings are read and written. A stored value above a lowered operator ceiling is reduced the
 next time settings load. Each scan copies its settings and budget when it is created, except the privacy settings

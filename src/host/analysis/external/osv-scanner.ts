@@ -75,11 +75,17 @@ export interface OsvScannerRun extends AnalyzerRun {
 export async function runOsvScanner(options: OsvScannerRunOptions): Promise<OsvScannerRun> {
   const started = Date.now()
   const { tool } = options
-  if (!tool) return unavailableRun('osv-scanner', 'osv-scanner is not installed', started)
+  if (!tool) return unavailableRun('osv-scanner', 'osv-scanner is not installed', started, [], 'not-installed')
   options.signal?.throwIfAborted()
 
   if (options.offline && !(await hasLocalDatabase(options.localDbDir))) {
-    return unavailableRun('osv-scanner', 'offline mode is on and no local osv-scanner database was found', started)
+    return unavailableRun(
+      'osv-scanner',
+      'offline mode is on and no local osv-scanner database was found',
+      started,
+      [],
+      'offline-db-missing',
+    )
   }
 
   if (!options.snapshot) return unavailableRun('osv-scanner', 'a frozen snapshot is required', started)

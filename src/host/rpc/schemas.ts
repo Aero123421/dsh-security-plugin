@@ -197,10 +197,27 @@ export const requestSchemas = {
     language: z.enum(['en', 'ja', 'zh']).optional(),
     aiReview: z.boolean().optional(),
   }),
-  listScans: z.strictObject({ workspaceId: idSchema.optional(), limit: listLimitSchema.optional() }),
+  listScans: z.strictObject({
+    workspaceId: idSchema.optional(),
+    limit: listLimitSchema.optional(),
+    offset: nonNegativeIntSchema.optional(),
+  }),
   getScan: scanRefSchema,
   pauseScan: scanRefSchema,
   resumeScan: scanRefSchema,
+  extendScanBudget: z
+    .strictObject({
+      scanId: idSchema,
+      addTokens: budgetValueSchema.optional(),
+      addLlmCalls: budgetValueSchema.optional(),
+      addMinutes: budgetValueSchema.optional(),
+    })
+    .refine(
+      input => input.addTokens !== undefined || input.addLlmCalls !== undefined || input.addMinutes !== undefined,
+      {
+        error: 'Add tokens, AI requests, or minutes',
+      },
+    ),
   cancelScan: scanRefSchema,
   deleteScan: scanRefSchema,
   listFindings: z.strictObject({ scanId: idSchema, filter: findingFilterSchema.optional() }),

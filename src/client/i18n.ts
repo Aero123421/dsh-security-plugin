@@ -5,9 +5,93 @@
  * assuming security jargon, and CWE ids only appear in detail views.
  */
 
+import type { AnalyzerStatus, Diagnostic, ScanEvent } from '../shared/contracts.ts'
 import type { UiLanguage } from '../shared/settings.ts'
 
 const en = {
+  'review.builtin': 'Built-in checks only',
+  'review.not-run': 'AI review was not performed',
+  'review.failed': 'AI review failed',
+  'review.partial': 'AI review is incomplete',
+  'review.complete': 'Scheduled AI tasks completed',
+  'review.unknown': 'AI review coverage is unknown',
+  'review.title': 'Review coverage',
+  'review.count': '{completed} of {planned} scheduled AI tasks completed.',
+  'review.notRunBody':
+    'No AI tasks were scheduled. Built-in results are kept; this does not establish that the project is safe.',
+  'review.partialBody':
+    'Some work failed or did not finish. Check the notices, coverage and activity before relying on these results.',
+  'review.completeBody':
+    'Only the scheduled tasks completed. Unscheduled code and runtime behavior may still contain vulnerabilities.',
+  'review.secondOpinionMissing':
+    'Some findings that were due an independent review have no recorded verification. Do not treat them as confirmed.',
+  'review.diagnostics': 'Usage and execution diagnostics',
+  'budget.extend.title': 'Continue with more budget',
+  'budget.extend.body':
+    'Add budget and continue this scan where it stopped. Finished work and findings are kept; only work skipped for budget reasons (and failed tasks that can retry) runs again.',
+  'budget.extend.tokensUsed': 'Tokens: {used} of {max} charged (cache reads are charged at a tenth).',
+  'budget.extend.add': 'Add +{percent}%',
+  'diagnostic.details': 'Technical details (may be untranslated)',
+  'diagnostic.legacy':
+    'This older scan contains additional technical explanations below. Check them before relying on the results.',
+  'diagnostic.otherGaps': '{count} other technical limitation(s); see the technical details.',
+  'detail.decisionSavedDraft': 'Previous decision saved. Your newer changes are not saved yet.',
+  'detail.runRecheck': 'Run a {mode} re-scan',
+  'detail.chatRequested':
+    'Requested a chat without replacing existing input. Check for the fix prompt; if absent, copy and paste it.',
+  'newScan.startingHint': 'The scan request is in progress. Wait for the result; closing is temporarily disabled.',
+  'settings.modelsStale': 'Could not refresh models. Previously loaded models are shown.',
+  'error.security/result-unknown':
+    'The scan request may have been accepted, but its response was lost. Check History before starting another scan. Code-sharing consent has not been rolled back; turn it off in Settings if you want to stop AI work.',
+  'history.loadMore': 'Show more scans',
+  'history.loadingMore': 'Loading more scans…',
+  'diagnostic.gap.dependencies-unchecked':
+    '{count} dependencies were not checked for vulnerabilities. Enable dependency lookup in Privacy settings or configure an offline scanner.',
+  'diagnostic.gap.ai-disabled': 'AI review was not used; authorization and other logic flaws remain unchecked.',
+  'diagnostic.gap.stale-tasks': '{count} obsolete tasks were skipped because their targets no longer exist.',
+  'diagnostic.gap.skipped-tasks': '{count} tasks did not finish because of budget or task limits.',
+  'diagnostic.gap.rejected-tasks':
+    '{count} tasks were not run because the model route rejected requests. Check the activity details.',
+  'diagnostic.gap.failed-tasks':
+    '{count} tasks failed. Check the activity details for the provider or execution error.',
+  'diagnostic.gap.consent-revoked': 'AI work stopped because code sharing was turned off.',
+  'diagnostic.gap.snapshot-truncated': 'Some files were not analyzed because the project exceeded size limits.',
+  'diagnostic.gap.endpoints-unreviewed': '{count} of {total} detected endpoints were not reviewed by AI.',
+  'diagnostic.gap.no-endpoints':
+    'No HTTP endpoints were detected. Unsupported frameworks may leave entry points undiscovered.',
+  'diagnostic.gap.analyzer-unavailable': '{analyzer} was unavailable. Check the analyzer details.',
+  'diagnostic.analyzer.python-available': 'Python AST is available.',
+  'diagnostic.analyzer.python-fallback': 'Python AST is unavailable; the built-in parser is used.',
+  'diagnostic.analyzer.disabled': 'Disabled by operator configuration.',
+  'diagnostic.analyzer.native-unavailable': 'Native module unavailable on this platform.',
+  'diagnostic.analyzer.lookup-off': 'Dependency lookup is off in Privacy settings.',
+  'diagnostic.analyzer.external-off': 'External analyzers are turned off.',
+  'diagnostic.analyzer.unavailable': 'This analyzer could not be used. Check its technical details and configuration.',
+  'diagnostic.analyzer.failed': 'This analyzer failed. Its coverage is incomplete; check the technical details.',
+  'diagnostic.analyzer.not-installed': 'Not installed. Configure or install the analyzer.',
+  'diagnostic.analyzer.rules-missing': 'Local rules are missing or not configured.',
+  'diagnostic.analyzer.offline-db-missing': 'Offline mode requires a local vulnerability database.',
+  'activity.event.run-start': 'Scan execution started.',
+  'activity.event.run-complete': 'Scan execution ended. Check review coverage for incomplete work.',
+  'activity.event.run-cancelled': 'Scan cancelled.',
+  'activity.event.run-pause': 'Scan paused.',
+  'activity.event.run-shutdown': 'Scan interrupted by host shutdown.',
+  'activity.event.run-failed': 'Scan execution failed. Check technical details.',
+  'activity.event.worker-start': 'An AI worker started.',
+  'activity.event.worker-end': 'An AI worker ended. Check technical details for its result.',
+  'activity.event.worker-retry': 'Retrying an AI request.',
+  'activity.event.phase': 'Scan phase: {phase}',
+  'activity.event.deterministic-done': 'Built-in analysis finished.',
+  'activity.event.analysis-warning': 'Analysis reported a limitation. Check technical details.',
+  'activity.event.analyzer-unavailable': 'An analyzer was unavailable.',
+  'activity.event.created': 'Scan created.',
+  'activity.event.resumed': 'Scan queued to continue.',
+  'activity.event.notice': 'Scan notice. Check technical details.',
+  'activity.event.run-interrupted': 'Scan interrupted because DSH stopped. It can be resumed.',
+  'activity.event.plugin-version-changed': 'The plugin version changed; pending work was refreshed.',
+  'activity.event.evidence-discarded': 'Some findings were dropped because their evidence did not match the source.',
+  'activity.event.budget-extended': 'Budget extended. Skipped work will continue.',
+  'activity.event.generic': 'Execution diagnostic: {type}',
   'nav.security': 'Security',
 
   'common.retry': 'Retry',
@@ -245,8 +329,9 @@ const en = {
   'summary.notSafeTitle': 'No findings doesn’t mean the project is safe',
   'summary.notCompleteTitle': 'This may not be every problem in the project',
   'summary.notSafeBody':
-    'A scan only reports problems it could find and back with evidence within its budget. Check the coverage below to see what was and wasn’t reviewed.',
+    'A scan only reports problems it could find and back with evidence within its budget. Check the coverage to see what was and wasn’t reviewed.',
   'summary.openBySeverity': 'Open findings by severity',
+  'summary.openTotal': 'open findings',
   'summary.certainty': 'How sure we are',
   'summary.new': 'New since last scan',
   'summary.top': 'Top open findings',
@@ -373,9 +458,10 @@ const en = {
   'detail.copyFailed': 'Couldn’t copy to the clipboard.',
   'detail.chatOpened': 'Opened a new chat with the fix prompt. Read it before sending.',
   'detail.recheck': 'Re-check after fixing',
-  'detail.recheckBody': 'After you change the code, run a Quick scan to see whether this finding goes away.',
+  'detail.recheckBody':
+    'Re-scan at the original depth after changing code. A missing finding alone does not prove a fix; check coverage and evidence.',
   'detail.runQuick': 'Run a Quick re-scan',
-  'detail.recheckStarted': 'Quick scan started. Progress is on the Overview tab.',
+  'detail.recheckStarted': 'Re-scan started. Progress is on the Overview tab.',
   'detail.decision': 'Your decision',
   'detail.decisionHelp': 'Your decision is remembered for this finding in future scans.',
   'detail.note': 'Note (optional)',
@@ -539,6 +625,86 @@ const en = {
 export type MessageKey = keyof typeof en
 
 const ja = {
+  'review.builtin': '組み込みチェックのみ',
+  'review.not-run': 'AIレビュー未実施',
+  'review.failed': 'AIレビュー失敗',
+  'review.partial': 'AIレビューは一部未完了',
+  'review.complete': '予定されたAI作業は完了',
+  'review.unknown': 'AIレビューの達成度は不明',
+  'review.title': 'レビューの達成度',
+  'review.count': '予定されたAI作業{planned}件中、{completed}件が完了しました。',
+  'review.notRunBody':
+    'AIの調査対象が計画されなかったため、組み込みチェックのみ実施しました。安全を確認したという意味ではありません。',
+  'review.partialBody': '失敗または未完了の作業があります。通知・調査範囲・活動記録を確認してください。',
+  'review.completeBody': '完了したのは予定された作業です。未対象のコードや実行時の動作に問題が残る可能性があります。',
+  'review.secondOpinionMissing':
+    '独立レビューの対象だった検出に、検証の記録がないものがあります。確認済みとして扱わないでください。',
+  'review.diagnostics': '使用量と実行診断',
+  'budget.extend.title': '予算を追加して続行',
+  'budget.extend.body':
+    'このスキャンに予算を追加して、止まったところから続行します。完了した作業と検出結果はそのまま残り、予算不足でスキップされた作業（と再試行できる失敗作業）だけを再実行します。',
+  'budget.extend.tokensUsed': 'トークン：上限{max}のうち{used}を消費（キャッシュ読込は1/10で換算）。',
+  'budget.extend.add': '+{percent}% を追加',
+  'diagnostic.details': '技術情報（未翻訳の場合があります）',
+  'diagnostic.legacy': 'この旧スキャンには追加の技術的な説明があります。下の技術情報も確認してください。',
+  'diagnostic.otherGaps': 'その他の技術的な制限が{count}件あります（技術情報を参照）。',
+  'detail.decisionSavedDraft': '前の内容を保存しました。追加の変更はまだ保存されていません。',
+  'detail.runRecheck': '{mode}で再スキャン',
+  'detail.chatRequested':
+    '既存の入力を上書きせず、チャットを開く操作を要求しました。修正指示が入っているか確認し、なければコピーして貼り付けてください。',
+  'newScan.startingHint': 'スキャンの開始を要求しています。結果が分かるまで、この画面は閉じられません。',
+  'settings.modelsStale': 'モデル一覧を更新できませんでした。前回取得した一覧を表示しています。',
+  'error.security/result-unknown':
+    '開始要求が受け付けられた可能性がありますが、応答を確認できません。再実行する前に履歴を確認してください。コード送信の同意は戻していません。AI作業を止めたい場合は設定でオフにしてください。',
+  'history.loadMore': 'さらに履歴を表示',
+  'history.loadingMore': '履歴を読み込み中…',
+  'diagnostic.gap.dependencies-unchecked':
+    '依存関係{count}件の既知脆弱性を確認できていません。プライバシー設定で照会を有効にするか、オフラインスキャナーを設定してください。',
+  'diagnostic.gap.ai-disabled': 'AIレビューを実施していないため、認可漏れなどのロジック上の欠陥は未検証です。',
+  'diagnostic.gap.stale-tasks': '対象がなくなった古い作業{count}件をスキップしました。',
+  'diagnostic.gap.skipped-tasks': '予算または作業数の上限により、{count}件の作業が未完了です。',
+  'diagnostic.gap.rejected-tasks':
+    'モデルへの要求が拒否されたため、{count}件の作業を実施できませんでした。活動記録の技術情報を確認してください。',
+  'diagnostic.gap.failed-tasks':
+    '{count}件の作業が失敗しました。活動記録の技術情報でプロバイダーや実行のエラーを確認してください。',
+  'diagnostic.gap.consent-revoked': 'コード送信がオフになったため、AI作業を中止しました。',
+  'diagnostic.gap.snapshot-truncated': 'プロジェクトがサイズ上限を超えたため、一部のファイルは未解析です。',
+  'diagnostic.gap.endpoints-unreviewed': '検出した入口{total}件中、{count}件はAIが調査していません。',
+  'diagnostic.gap.no-endpoints':
+    'HTTPの入口を検出できませんでした。未対応のフレームワークでは入口を見落とす場合があります。',
+  'diagnostic.gap.analyzer-unavailable': '{analyzer}を利用できませんでした。解析ツールの技術情報を確認してください。',
+  'diagnostic.analyzer.python-available': 'PythonのAST解析を利用できます。',
+  'diagnostic.analyzer.python-fallback': 'PythonのAST解析を利用できないため、組み込みパーサーを使います。',
+  'diagnostic.analyzer.disabled': '管理者の設定で無効になっています。',
+  'diagnostic.analyzer.native-unavailable': 'この環境ではネイティブモジュールを利用できません。',
+  'diagnostic.analyzer.lookup-off': 'プライバシー設定で依存関係の照会がオフになっています。',
+  'diagnostic.analyzer.external-off': '外部解析ツールの使用がオフになっています。',
+  'diagnostic.analyzer.unavailable': 'この解析ツールを利用できません。設定と技術情報を確認してください。',
+  'diagnostic.analyzer.failed': '解析ツールが失敗したため、調査範囲は不完全です。技術情報を確認してください。',
+  'diagnostic.analyzer.not-installed': '未インストールです。解析ツールを導入・設定してください。',
+  'diagnostic.analyzer.rules-missing': 'ローカルのルールが未設定、または見つかりません。',
+  'diagnostic.analyzer.offline-db-missing': 'オフラインモードにはローカルの脆弱性データベースが必要です。',
+  'activity.event.run-start': 'スキャンの実行を開始しました。',
+  'activity.event.run-complete': 'スキャンの実行が終了しました。未完了の作業は達成度を確認してください。',
+  'activity.event.run-cancelled': 'スキャンを中止しました。',
+  'activity.event.run-pause': 'スキャンを一時停止しました。',
+  'activity.event.run-shutdown': 'ホストの停止でスキャンが中断しました。',
+  'activity.event.run-failed': 'スキャンの実行に失敗しました。技術情報を確認してください。',
+  'activity.event.worker-start': 'AIの作業を開始しました。',
+  'activity.event.worker-end': 'AIの作業が終了しました。結果は技術情報を確認してください。',
+  'activity.event.worker-retry': 'AIへの要求を再試行します。',
+  'activity.event.phase': 'スキャン段階：{phase}',
+  'activity.event.deterministic-done': '組み込み解析が終了しました。',
+  'activity.event.analysis-warning': '解析に制限がありました。技術情報を確認してください。',
+  'activity.event.analyzer-unavailable': '利用できない解析ツールがありました。',
+  'activity.event.created': 'スキャンを作成しました。',
+  'activity.event.resumed': 'スキャンの続行をキューに入れました。',
+  'activity.event.notice': 'スキャンからの通知があります。技術情報を確認してください。',
+  'activity.event.run-interrupted': 'DSHの停止でスキャンが中断しました。再開できます。',
+  'activity.event.plugin-version-changed': 'プラグインのバージョンが変わり、未完了の作業を更新しました。',
+  'activity.event.evidence-discarded': '根拠がソースと一致しない検出候補を破棄しました。',
+  'activity.event.budget-extended': '予算を増やしました。スキップされた作業を続行します。',
+  'activity.event.generic': '実行診断：{type}',
   'nav.security': 'セキュリティ',
 
   'common.retry': '再試行',
@@ -784,8 +950,9 @@ const ja = {
   'summary.notSafeTitle': '検出結果が 0 件でも、安全とは限りません',
   'summary.notCompleteTitle': 'ここに挙がっている問題がすべてとは限りません',
   'summary.notSafeBody':
-    'スキャンが報告するのは、予算の範囲内で見つけられ、根拠を示せた問題だけです。下の「調べた範囲」で、何を調べて何を調べていないかを確認してください。',
+    'スキャンが報告するのは、予算の範囲内で見つけられ、根拠を示せた問題だけです。「調べた範囲」で、何を調べて何を調べていないかを確認してください。',
   'summary.openBySeverity': '未対応の検出結果（深刻度別）',
+  'summary.openTotal': '件の未対応',
   'summary.certainty': '確実性',
   'summary.new': '前回からの新規',
   'summary.top': '優先して確認したい検出結果',
@@ -912,9 +1079,10 @@ const ja = {
   'detail.copyFailed': 'クリップボードにコピーできませんでした。',
   'detail.chatOpened': '修正の指示文を入れた新しいチャットを開きました。送信する前に内容を確認してください。',
   'detail.recheck': '修正後の確認',
-  'detail.recheckBody': 'コードを直したら、クイックスキャンを実行して、この検出結果が消えるか確認しましょう。',
+  'detail.recheckBody':
+    '修正後は元と同じ深度で再調査します。検出されなくなっただけでは修正済みの証明になりません。調査範囲と根拠を確認してください。',
   'detail.runQuick': 'クイックスキャンで再確認',
-  'detail.recheckStarted': 'クイックスキャンを開始しました。進み具合は「概要」タブで確認できます。',
+  'detail.recheckStarted': '再スキャンを開始しました。進み具合は「概要」タブで確認できます。',
   'detail.decision': '対応状況',
   'detail.decisionHelp': '選んだ対応状況は、今後のスキャンでも同じ検出結果に引き継がれます。',
   'detail.note': 'メモ（任意）',
@@ -1079,6 +1247,80 @@ const ja = {
 } as const satisfies Record<MessageKey, string>
 
 const zh = {
+  'review.builtin': '仅内置检查',
+  'review.not-run': '未执行 AI 审查',
+  'review.failed': 'AI 审查失败',
+  'review.partial': 'AI 审查未全部完成',
+  'review.complete': '计划的 AI 任务已完成',
+  'review.unknown': 'AI 审查完成情况未知',
+  'review.title': '审查完成情况',
+  'review.count': '计划的 {planned} 个 AI 任务中已完成 {completed} 个。',
+  'review.notRunBody': '未计划 AI 调查任务，仅执行内置检查。这不代表项目安全。',
+  'review.partialBody': '部分任务失败或未完成。请查看提示、覆盖范围和活动记录。',
+  'review.completeBody': '仅计划的任务已完成，未调查的代码和运行时行为仍可能存在漏洞。',
+  'review.secondOpinionMissing': '部分应接受独立审查的发现没有验证记录。请勿视为已确认。',
+  'review.diagnostics': '用量和执行诊断',
+  'budget.extend.title': '增加预算并继续',
+  'budget.extend.body':
+    '为本次扫描增加预算，从中断处继续。已完成的工作和发现会保留，只会重新运行因预算不足跳过的作业（以及可重试的失败作业）。',
+  'budget.extend.tokensUsed': 'Token：上限 {max}，已计入预算 {used}（缓存读取按十分之一计算）。',
+  'budget.extend.add': '增加 +{percent}%',
+  'diagnostic.details': '技术详情（可能未翻译）',
+  'diagnostic.legacy': '此旧扫描包含其他技术说明，使用结果前请查看下方详情。',
+  'diagnostic.otherGaps': '另有 {count} 项技术限制（见技术详情）。',
+  'detail.decisionSavedDraft': '之前的内容已保存，后续更改尚未保存。',
+  'detail.runRecheck': '运行{mode}重新扫描',
+  'detail.chatRequested': '已请求打开聊天，不覆盖现有输入。请检查修复提示词，若未填入请复制粘贴。',
+  'newScan.startingHint': '正在请求启动扫描，请等待结果，暂时无法关闭此窗口。',
+  'settings.modelsStale': '无法刷新模型，当前显示之前加载的列表。',
+  'error.security/result-unknown':
+    '扫描可能已被接受，但响应丢失。请先查看历史记录再重试。代码共享许可未撤销，如需停止 AI 工作请在设置中关闭。',
+  'history.loadMore': '显示更多扫描',
+  'history.loadingMore': '正在加载更多扫描…',
+  'diagnostic.gap.dependencies-unchecked':
+    '尚未检查 {count} 个依赖的已知漏洞。请启用隐私设置中的查询或配置离线扫描器。',
+  'diagnostic.gap.ai-disabled': '未使用 AI 审查，授权等逻辑缺陷尚未检查。',
+  'diagnostic.gap.stale-tasks': '目标已不存在，已跳过 {count} 个过期任务。',
+  'diagnostic.gap.skipped-tasks': '受预算或任务上限影响，{count} 个任务未完成。',
+  'diagnostic.gap.rejected-tasks': '模型请求被拒绝，未执行 {count} 个任务。请查看活动详情。',
+  'diagnostic.gap.failed-tasks': '{count} 个任务失败，请在活动详情中查看服务商或执行错误。',
+  'diagnostic.gap.consent-revoked': '代码共享已关闭，AI 工作已停止。',
+  'diagnostic.gap.snapshot-truncated': '项目超出大小限制，部分文件未分析。',
+  'diagnostic.gap.endpoints-unreviewed': '检测到的 {total} 个入口中有 {count} 个未经 AI 审查。',
+  'diagnostic.gap.no-endpoints': '未检测到 HTTP 入口，未支持的框架可能导致入口遗漏。',
+  'diagnostic.gap.analyzer-unavailable': '无法使用 {analyzer}，请查看分析工具详情。',
+  'diagnostic.analyzer.python-available': '可使用 Python AST。',
+  'diagnostic.analyzer.python-fallback': 'Python AST 不可用，使用内置解析器。',
+  'diagnostic.analyzer.disabled': '已被管理员配置禁用。',
+  'diagnostic.analyzer.native-unavailable': '当前平台无法使用原生模块。',
+  'diagnostic.analyzer.lookup-off': '隐私设置中已关闭依赖查询。',
+  'diagnostic.analyzer.external-off': '已关闭外部分析工具。',
+  'diagnostic.analyzer.unavailable': '无法使用此分析工具，请检查配置和技术详情。',
+  'diagnostic.analyzer.failed': '分析工具失败，覆盖范围不完整，请查看技术详情。',
+  'diagnostic.analyzer.not-installed': '尚未安装，请安装并配置分析工具。',
+  'diagnostic.analyzer.rules-missing': '未配置或找不到本地规则。',
+  'diagnostic.analyzer.offline-db-missing': '离线模式需要本地漏洞数据库。',
+  'activity.event.run-start': '已开始执行扫描。',
+  'activity.event.run-complete': '扫描执行结束，请查看审查完成情况。',
+  'activity.event.run-cancelled': '扫描已取消。',
+  'activity.event.run-pause': '扫描已暂停。',
+  'activity.event.run-shutdown': '主机停止，扫描已中断。',
+  'activity.event.run-failed': '扫描执行失败，请查看技术详情。',
+  'activity.event.worker-start': 'AI 工作已开始。',
+  'activity.event.worker-end': 'AI 工作结束，请查看技术详情中的结果。',
+  'activity.event.worker-retry': '正在重试 AI 请求。',
+  'activity.event.phase': '扫描阶段：{phase}',
+  'activity.event.deterministic-done': '内置分析已完成。',
+  'activity.event.analysis-warning': '分析存在限制，请查看技术详情。',
+  'activity.event.analyzer-unavailable': '某个分析工具不可用。',
+  'activity.event.created': '扫描已创建。',
+  'activity.event.resumed': '扫描已排队继续。',
+  'activity.event.notice': '扫描通知。请查看技术详情。',
+  'activity.event.run-interrupted': 'DSH 停止导致扫描中断，可以恢复。',
+  'activity.event.plugin-version-changed': '插件版本已变更，待处理作业已刷新。',
+  'activity.event.evidence-discarded': '部分候选发现因证据与源码不符已被丢弃。',
+  'activity.event.budget-extended': '预算已增加，将继续被跳过的作业。',
+  'activity.event.generic': '执行诊断：{type}',
   'nav.security': '安全',
 
   'common.retry': '重试',
@@ -1304,8 +1546,9 @@ const zh = {
   'summary.notSafeTitle': '没有发现问题并不代表项目是安全的',
   'summary.notCompleteTitle': '这里列出的未必是项目中的全部问题',
   'summary.notSafeBody':
-    '扫描只会报告在预算范围内能够找到并给出证据的问题。请查看下方的覆盖范围，了解哪些内容审查过、哪些没有。',
+    '扫描只会报告在预算范围内能够找到并给出证据的问题。请查看覆盖范围，了解哪些内容审查过、哪些没有。',
   'summary.openBySeverity': '按严重程度统计的待处理问题',
+  'summary.openTotal': '项待处理',
   'summary.certainty': '可信程度',
   'summary.new': '自上次扫描以来的新问题',
   'summary.top': '优先查看的问题',
@@ -1430,9 +1673,9 @@ const zh = {
   'detail.copyFailed': '无法复制到剪贴板。',
   'detail.chatOpened': '已打开包含修复提示词的新对话。发送前请先阅读。',
   'detail.recheck': '修复后再次检查',
-  'detail.recheckBody': '修改代码后，运行一次快速扫描，确认此问题是否消失。',
+  'detail.recheckBody': '修改代码后，以原深度重新扫描。未再次发现不代表已修复，请检查覆盖范围和证据。',
   'detail.runQuick': '运行快速复查',
-  'detail.recheckStarted': '快速扫描已开始，可在“概览”中查看进度。',
+  'detail.recheckStarted': '已开始重新扫描，可在“概览”中查看进度。',
   'detail.decision': '你的判断',
   'detail.decisionHelp': '你的判断会在之后的扫描中沿用到同一个问题上。',
   'detail.note': '备注（可选）',
@@ -1666,6 +1909,29 @@ export function getTranslator(lang: Language): Translator {
 /** Localized text for a Host error, falling back to the server's English message. */
 export function errorText(tr: Translator, error: { readonly code: string; readonly message?: string }): string {
   return tr.lookup(`error.${error.code}`) ?? (error.message?.trim() || tr.t('error.generic'))
+}
+
+/** Codes are supplied by the producer; English text is preserved only as technical detail. */
+export function diagnosticText(tr: Translator, diagnostic: Diagnostic): string {
+  return tr.lookup(`diagnostic.gap.${diagnostic.code}`, diagnostic.params) ?? tr.t('diagnostic.legacy')
+}
+
+export function analyzerReasonText(tr: Translator, status: AnalyzerStatus): string {
+  return (
+    (status.reasonCode ? tr.lookup(`diagnostic.analyzer.${status.reasonCode}`, status.reasonParams) : undefined) ??
+    tr.t('diagnostic.analyzer.unavailable')
+  )
+}
+
+export function activityText(tr: Translator, event: ScanEvent): string {
+  // The wire event has no structured phase field; phase events carry it in
+  // the Host message ("Phase: hunt"), whose suffix maps to a phase label.
+  let phase = tr.t('common.unknown')
+  if (event.type === 'phase') {
+    const suffix = event.message.startsWith('Phase: ') ? event.message.slice('Phase: '.length).trim() : ''
+    if (suffix) phase = tr.lookup(`phase.${suffix}`) ?? suffix
+  }
+  return tr.lookup(`activity.event.${event.type}`, { phase }) ?? tr.t('activity.event.generic', { type: event.type })
 }
 
 /** Localized text for a scan notice, falling back to the server's English text. */

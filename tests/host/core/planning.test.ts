@@ -80,10 +80,12 @@ describe('planHuntTasks — quick mode', () => {
       endpointOf('GET', '/public', 'src/public.ts', 1),
       endpointOf('POST', '/orders', 'src/orders.ts', 1),
       endpointOf('POST', '/guarded', 'src/guarded.ts', 1, { authHints: ['requireAuth'] }),
-      ...Array.from({ length: 8 }, (_, i) => endpointOf('GET', `/extra/${i}`, `src/extra${i}.ts`, 1)),
+      ...Array.from({ length: DEFAULT_BUDGETS.quick.maxTasks }, (_, i) =>
+        endpointOf('GET', `/extra/${i}`, `src/extra${i}.ts`, 1),
+      ),
     ]
     const { tasks } = plan({ mode: 'quick', endpoints, maxTasks: DEFAULT_BUDGETS.quick.maxTasks })
-    expect(tasks).toHaveLength(6)
+    expect(tasks).toHaveLength(DEFAULT_BUDGETS.quick.maxTasks)
     expect(tasks[0]?.input.targetPaths).toEqual(['src/orders.ts'])
     expect(tasks.every(t => t.kind === 'hunt-endpoints')).toBe(true)
     const triaged = plan({ mode: 'quick', endpoints, signals: [signalOf()], maxTasks: 1 })

@@ -169,7 +169,9 @@ export const FindingRow = memo(function FindingRow(props: {
         <SeverityBadge severity={f.severity} />
       </span>
       <span className="dshsec-frow-main">
-        <span className="dshsec-frow-title">{typeof f.title === 'string' && f.title ? f.title : DASH}</span>
+        <span className="dshsec-frow-title" title={typeof f.title === 'string' ? f.title : undefined}>
+          {typeof f.title === 'string' && f.title ? f.title : DASH}
+        </span>
         <span className="dshsec-frow-meta">
           <VerificationBadge verification={f.verification} withTitle={false} />
           {f.isNew ? <Badge tone="brand">{tr.t('findings.new')}</Badge> : null}

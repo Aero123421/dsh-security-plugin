@@ -106,7 +106,7 @@ export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTa
     const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
     candidates.push(...planSensitiveFiles(input.snapshot, targeted, inScope))
   }
-  // Quick stays within its existing 6-task / 40-call defaults: triage first,
+  // Quick stays within its configured task/request budgets: triage first,
   // then only the riskiest endpoint groups that fit. No hypotheses or sweep.
   const ranked = candidates.sort((a, b) => b.priority - a.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
   const tasks = ranked.slice(0, input.maxTasks)

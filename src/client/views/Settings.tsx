@@ -16,7 +16,7 @@ import { ControllerProvider, useController, useSecurity, useT } from '../context
 import type { SecurityController } from '../controller.ts'
 import { copyText } from '../download.ts'
 import { formatNumber, text } from '../format.ts'
-import { errorText, LANGUAGE_NAMES, type Translator } from '../i18n.ts'
+import { analyzerReasonText, errorText, LANGUAGE_NAMES, type Translator } from '../i18n.ts'
 import { IconExternal } from '../icons.tsx'
 import { modelName } from '../models.ts'
 import {
@@ -387,9 +387,9 @@ function ModelsSection(props: {
 
   return (
     <SettingsGroup title={tr.t('settings.models')} description={tr.t('settings.modelsDesc')}>
-      {!models.value && models.status === 'error' && models.error ? (
+      {models.status === 'error' && models.error ? (
         <LoadError
-          title={tr.t('settings.modelsLoadFailed')}
+          title={tr.t(models.value ? 'settings.modelsStale' : 'settings.modelsLoadFailed')}
           error={models.error}
           onRetry={() => void controller.loadModels(true)}
         />
@@ -600,12 +600,6 @@ function BudgetsSection(props: {
 // Toolkit
 // ---------------------------------------------------------------------------
 
-/** Known Host reasons get a localized sentence; anything else is shown as sent. */
-function analyzerReason(tr: Translator, status: AnalyzerStatus): string {
-  if (status.id === 'osv' && /turned off|disabled/i.test(status.reason ?? '')) return tr.t('analyzer.osvOff')
-  return status.reason ?? ''
-}
-
 function sourceLabel(tr: Translator, status: AnalyzerStatus | undefined): string {
   return status ? (tr.lookup(`source.${status.source}`) ?? text(status.source)) : '—'
 }
@@ -630,11 +624,17 @@ function ToolkitSection() {
               <li key={a.id}>
                 <span className={`dshsec-dot ${a.available ? 'is-on' : 'is-off'}`} aria-hidden="true" />
                 <span className="dshsec-analyzer-name">{tr.lookup(`analyzer.${a.id}`) ?? text(a.id)}</span>
-                <span className="dshsec-muted">
+                <div className="dshsec-muted">
                   {a.available ? tr.t('analyzer.available') : tr.t('analyzer.unavailable')}
                   {a.version ? ` · ${a.version}` : ''}
-                  {!a.available && a.reason ? ` — ${analyzerReason(tr, a)}` : ''}
-                </span>
+                  {!a.available ? ` — ${analyzerReasonText(tr, a)}` : ''}
+                  {!a.available && a.reason ? (
+                    <details>
+                      <summary>{tr.t('diagnostic.details')}</summary>
+                      <p>{a.reason}</p>
+                    </details>
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>
@@ -781,7 +781,17 @@ function ToolRow(props: { readonly tool: ToolkitEntry }) {
         {status && status.source !== 'disabled' ? <span>{sourceLabel(tr, status)}</span> : null}
         {version ? <span>{tr.t('toolkit.version', { version })}</span> : null}
       </div>
-      {!available && status?.reason ? <p className="dshsec-hint">{status.reason}</p> : null}
+      {!available && status ? (
+        <div className="dshsec-hint">
+          <p>{analyzerReasonText(tr, status)}</p>
+          {status.reason ? (
+            <details>
+              <summary>{tr.t('diagnostic.details')}</summary>
+              <p>{status.reason}</p>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
       {installable && tool.managed ? (
         <div className="dshsec-tool-install">
           <p className="dshsec-hint">

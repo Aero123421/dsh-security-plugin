@@ -594,7 +594,7 @@ describe('finding detail', () => {
     expect(page.api.callsOf('getFixPrompt')).toEqual([{ scanId: 'scan-1', findingId: 'f-1' }])
     expect(startSession).toHaveBeenCalledWith('ws-1', {
       prompt: 'Please fix the SQL injection.',
-      clearPreviousDraft: true,
+      clearPreviousDraft: false,
     })
   })
 

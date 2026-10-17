@@ -25,6 +25,7 @@ import type {
   WorkspaceSummary,
 } from '../shared/contracts.ts'
 import { CONTRACT_VERSION } from '../shared/contracts.ts'
+import { reviewOutcome } from '../shared/review.ts'
 import { closureOf, formatCodeRef, isActiveScanStatus, type TriageState } from '../shared/domain.ts'
 import type { AstGrepHandle } from './analysis/astgrep.ts'
 import { isDependencyFileName } from './analysis/dependencies.ts'
@@ -128,6 +129,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
       ...(scan.finishedAt ? { finishedAt: scan.finishedAt } : {}),
       counts,
       confirmed,
+      review: reviewOutcome(scan),
       ...(scan.error ? { error: { ...scan.error, message: scanMask(scan)(scan.error.message) } } : {}),
       ...(scan.commit ? { commit: scan.commit } : {}),
     }
@@ -176,6 +178,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
               ...scan.coverage,
               analyzers: scan.coverage.analyzers.map(a => maskAnalyzer(a, mask)),
               gaps: scan.coverage.gaps.map(mask),
+              ...(scan.coverage.gapDetails ? { gapDetails: maskDeep(scan.coverage.gapDetails, mask) } : {}),
             },
           }
         : {}),
@@ -252,12 +255,19 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
         { id: 'dependencies', available: true, source: 'builtin' },
         current.settings.privacy.allowDependencyLookup
           ? { id: 'osv', available: true, source: 'builtin' }
-          : { id: 'osv', available: false, source: 'disabled', reason: 'dependency lookup is turned off' },
+          : {
+              id: 'osv',
+              available: false,
+              source: 'disabled',
+              reasonCode: 'lookup-off',
+              reason: 'dependency lookup is turned off',
+            },
         astGrep
           ? {
               id: 'ast-grep',
               available: true,
               source: 'builtin',
+              reasonCode: astGrep.supportsPython ? 'python-available' : 'python-fallback',
               reason: astGrep.supportsPython
                 ? 'Python AST available'
                 : 'Python AST unavailable; Python uses the built-in parser',
@@ -266,6 +276,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
               id: 'ast-grep',
               available: false,
               source: 'builtin',
+              reasonCode: 'native-unavailable',
               reason: 'native module unavailable; using the built-in parser',
             },
       ]
@@ -420,6 +431,7 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
               }
             : {}),
           limit: Math.min(payload.limit ?? 50, 500),
+          ...(payload.offset !== undefined ? { offset: payload.offset } : {}),
         })
         .map(summary)
     },
@@ -434,6 +446,10 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
 
     async resumeScan(payload) {
       return summary(controller.resume(requireScan(payload.scanId).id))
+    },
+
+    async extendScanBudget(payload) {
+      return summary(controller.extendBudget(payload))
     },
 
     async cancelScan(payload) {
@@ -494,18 +510,29 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
 
     async listEvents(payload) {
       const mask = scanMask(requireScan(payload.scanId))
-      return store
-        .listEvents(payload.scanId, payload.afterSeq ?? 0, Math.min(payload.limit ?? 200, 1000))
-        .filter(event => event.level !== 'debug')
-        .map(
-          (event): ScanEvent => ({
+      const limit = Math.min(payload.limit ?? 200, 1000)
+      const visible: ScanEvent[] = []
+      let afterSeq = payload.afterSeq ?? 0
+      // The wire limit counts visible records. Filtering only after limiting
+      // would produce short pages in the middle of the log and hide its tail.
+      while (visible.length < limit) {
+        const batch = store.listEvents(payload.scanId, afterSeq, 1000)
+        if (!batch.length) break
+        for (const event of batch) {
+          afterSeq = event.seq
+          if (event.level === 'debug') continue
+          visible.push({
             seq: event.seq,
             at: event.at,
             level: event.level,
             type: event.type,
             message: mask(event.message),
-          }),
-        )
+          })
+          if (visible.length === limit) break
+        }
+        if (batch.length < 1000) break
+      }
+      return visible
     },
 
     async listToolkit() {
@@ -571,6 +598,7 @@ function toSummary(finding: FindingRecord, triage: TriageState): FindingSummary 
     verification: finding.verification,
     closure: closureOf(finding.verification),
     source: finding.source,
+    independentlyReviewed: finding.review !== undefined,
     ...(finding.cwe ? { cwe: finding.cwe } : {}),
     ...(finding.ruleId ? { ruleId: finding.ruleId } : {}),
     ...(finding.location ? { location: finding.location } : {}),
@@ -659,7 +687,11 @@ export function hostPathMasker(
 }
 
 function maskAnalyzer(status: AnalyzerStatus, mask: PathMasker): AnalyzerStatus {
-  return status.reason === undefined ? status : { ...status, reason: mask(status.reason) }
+  return {
+    ...status,
+    ...(status.reason === undefined ? {} : { reason: mask(status.reason) }),
+    ...(status.reasonParams ? { reasonParams: maskDeep(status.reasonParams, mask) } : {}),
+  }
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

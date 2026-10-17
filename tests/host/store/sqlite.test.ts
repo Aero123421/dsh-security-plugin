@@ -262,6 +262,30 @@ describe('openSecurityStore (in memory)', () => {
       expect(store.listScans({ workspaceId: 'ws_none' })).toEqual([])
     })
 
+    it('pages beyond 50 scans with stable ordering, including equal timestamps and filters', () => {
+      for (let i = 0; i < 61; i++) {
+        store.insertScan(
+          scanOf({
+            id: `page_${String(i).padStart(3, '0')}`,
+            workspaceId: 'paged',
+            status: 'completed',
+            createdAt: NOW.toISOString(),
+          }),
+        )
+      }
+      store.insertScan(scanOf({ id: 'other', workspaceId: 'other', createdAt: NOW.toISOString() }))
+      const first = store.listScans({ workspaceId: 'paged' })
+      const second = store.listScans({ workspaceId: 'paged', offset: 50 })
+      expect(first).toHaveLength(50)
+      expect(second).toHaveLength(11)
+      expect(first[0]?.id).toBe('page_060')
+      expect(second[0]?.id).toBe('page_010')
+      expect(new Set([...first, ...second].map(scan => scan.id)).size).toBe(61)
+      expect(store.listScans({ workspaceId: 'paged', offset: 61 })).toEqual([])
+      expect(store.listScans({ statuses: ['completed'], limit: 1, offset: 60 })[0]?.id).toBe('page_000')
+      expect(store.listScans({ workspaceId: 'paged', offset: -1 })[0]?.id).toBe('page_060')
+    })
+
     it('caps the list limit at 500', () => {
       store.transaction(() => {
         for (let i = 0; i < 510; i++) {

@@ -165,12 +165,12 @@ describe('bootstrap, workspaces, and models', () => {
     const local = await invoke('getBootstrap', {})
     expect(local).toMatchObject({
       pluginVersion: '0.0.0-test',
-      contractVersion: 2,
+      contractVersion: 3,
       settingsRevision: 1,
       loopback: true,
       canEditHighRiskSettings: true,
       capabilities: { llm: true, workspaces: true },
-      limits: { maxParallelWorkers: 4, maxConcurrentScans: 1, maxLlmCallsPerScan: 2000 },
+      limits: { maxParallelWorkers: 4, maxConcurrentScans: 1, maxLlmCallsPerScan: 6000 },
     })
     expect(local.settings.privacy.sendCodeToModel).toBe(true)
     expect(local.settings.ui.language).toBe('ja')
@@ -303,6 +303,167 @@ describe('bootstrap, workspaces, and models', () => {
 })
 
 describe('scans and findings', () => {
+  it('keeps the default page size and returns older history with an offset', async () => {
+    const local = createHarness({ workspaces })
+    const routes = makeHandlers(local, undefined, workspaces)
+    try {
+      const template = h.store.getScan(completedScan)!
+      for (let i = 0; i < 51; i++) {
+        local.store.insertScan({ ...template, id: `history_${String(i).padStart(3, '0')}` })
+      }
+      const first = await routes.listScans({ workspaceId: WS_ID }, call())
+      const second = await routes.listScans({ workspaceId: WS_ID, offset: 50 }, call())
+      expect(first).toHaveLength(50)
+      expect(second.map(scan => scan.id)).toEqual(['history_000'])
+      expect(new Set([...first, ...second].map(scan => scan.id)).size).toBe(51)
+      expect(second[0]?.review).toMatchObject({ state: 'complete' })
+      local.store.updateScan('history_000', {
+        coverage: {
+          ...template.coverage!,
+          gapDetails: [{ code: 'test-gap', fallback: `Unavailable under ${shop.root}`, params: { path: shop.root } }],
+          analyzers: [
+            {
+              id: 'sast',
+              available: false,
+              source: 'builtin',
+              reasonCode: 'test-reason',
+              reasonParams: { path: shop.root },
+            },
+          ],
+        },
+      })
+      const detail = await routes.getScan({ scanId: 'history_000' }, call())
+      expect(JSON.stringify(detail.coverage)).not.toContain(shop.root)
+      expect(detail.coverage?.gapDetails?.[0]?.code).toBe('test-gap')
+    } finally {
+      await local.controller.dispose()
+      local.store.close()
+    }
+  })
+
+  it('extends a stopped scan budget and requeues only budget-skipped work', async () => {
+    const local = createHarness({ workspaces })
+    const routes = makeHandlers(local, undefined, workspaces)
+    const template = h.store.getScan(completedScan)!
+    const budget = { maxLlmCalls: 10, maxTokens: 1000, maxMinutes: 5, maxTurnsPerWorker: 5, maxTasks: 5 }
+    const usage = { llmCalls: 9, inputTokens: 900, outputTokens: 100, toolCalls: 3, elapsedMs: 1000 }
+    const task = (id: string, status: 'done' | 'skipped', code?: string) =>
+      local.store.ensureTask({
+        id,
+        scanId: 'extendable',
+        key: id,
+        kind: 'hunt-file',
+        role: 'hunter',
+        title: id,
+        status,
+        priority: 1,
+        input: { targetPaths: [], focus: [] },
+        attempts: 0,
+        ...(code ? { error: { code, message: code } } : {}),
+        createdAt: template.createdAt,
+        finishedAt: template.createdAt,
+      })
+    try {
+      local.store.insertScan({ ...template, id: 'extendable', status: 'completed', budget, usage })
+      task('extend_budget', 'skipped', 'budget')
+      task('extend_exhausted', 'skipped', 'budget_exhausted')
+      task('extend_stale', 'skipped', 'stale-target')
+      task('extend_done', 'done')
+
+      // Rejections first, while nothing is running: at the operator ceiling,
+      // without resumable work, and for a cancelled scan.
+      local.store.insertScan({
+        ...template,
+        id: 'extend_ceiling',
+        status: 'completed',
+        budget: { ...budget, maxTokens: local.config.maxTokensPerScan },
+        usage,
+      })
+      expect((await failure(routes.extendScanBudget({ scanId: 'extend_ceiling', addTokens: 1 }, call()))).code).toBe(
+        'security/invalid-state',
+      )
+      local.store.insertScan({ ...template, id: 'extend_none', status: 'completed', budget, usage })
+      expect((await failure(routes.extendScanBudget({ scanId: 'extend_none', addTokens: 1 }, call()))).code).toBe(
+        'security/invalid-state',
+      )
+      local.store.insertScan({ ...template, id: 'extend_cancelled', status: 'cancelled', budget, usage })
+      expect((await failure(routes.extendScanBudget({ scanId: 'extend_cancelled', addTokens: 1 }, call()))).code).toBe(
+        'security/invalid-state',
+      )
+
+      const extended = await routes.extendScanBudget({ scanId: 'extendable', addTokens: 500 }, call())
+      expect(extended.status).toBe('queued')
+      expect(local.store.getScan('extendable')?.budget.maxTokens).toBe(1500)
+      expect(local.store.getScan('extendable')?.usage).toEqual(usage)
+      // The local harness has no model, so the rerun completes without AI work;
+      // budget-skipped tasks must have been returned to the queue, others untouched.
+      expect(await local.settle('extendable')).toBe('completed')
+      const byId = new Map(local.store.listTasks('extendable').map(t => [t.id, t.status]))
+      expect(byId.get('extend_budget')).toBe('pending')
+      expect(byId.get('extend_exhausted')).toBe('pending')
+      expect(byId.get('extend_stale')).toBe('skipped')
+      expect(byId.get('extend_done')).toBe('done')
+      expect(local.events('extendable').some(event => event.type === 'budget-extended')).toBe(true)
+    } finally {
+      await local.controller.dispose()
+      local.store.close()
+    }
+  })
+
+  it('fills visible event pages across debug-only batches and reaches the latest error after continuation', async () => {
+    const local = createHarness({ workspaces })
+    const routes = makeHandlers(local, undefined, workspaces)
+    try {
+      const scanId = 'debug-paged-events'
+      local.store.insertScan({ ...h.store.getScan(completedScan)!, id: scanId })
+      const visibleSeqs: number[] = []
+      local.store.transaction(() => {
+        for (let group = 0; group < 3; group++) {
+          for (let i = 0; i < 1000; i++) {
+            local.store.appendEvent(scanId, 'debug', 'worker-progress', `Debug ${group}:${i}`)
+          }
+          visibleSeqs.push(
+            local.store.appendEvent(
+              scanId,
+              group === 2 ? 'error' : group === 1 ? 'warn' : 'info',
+              group === 2 ? 'latest-error' : 'visible-progress',
+              group === 2 ? `Latest error under ${shop.root}` : `Visible ${group}`,
+            ),
+          )
+        }
+      })
+      const first = await routes.listEvents({ scanId, limit: 2 }, call())
+      expect(first.map(event => event.seq)).toEqual(visibleSeqs.slice(0, 2))
+      expect(first.map(event => event.level)).toEqual(['info', 'warn'])
+      const continuation = await routes.listEvents({ scanId, limit: 2, afterSeq: first.at(-1)!.seq }, call())
+      expect(continuation.map(event => event.seq)).toEqual(visibleSeqs.slice(2))
+      expect(continuation[0]).toMatchObject({ level: 'error', type: 'latest-error' })
+      expect(continuation[0]?.message).not.toContain(shop.root)
+      const whole = await routes.listEvents({ scanId, limit: 3 }, call())
+      expect(whole.map(event => event.seq)).toEqual(visibleSeqs)
+      expect(await routes.listEvents({ scanId, afterSeq: continuation[0]!.seq, limit: 2 }, call())).toEqual([])
+    } finally {
+      await local.controller.dispose()
+      local.store.close()
+    }
+  })
+
+  it('terminates an event read when every raw page contains only debug events', async () => {
+    const local = createHarness({ workspaces })
+    const routes = makeHandlers(local, undefined, workspaces)
+    try {
+      const scanId = 'all-debug-events'
+      local.store.insertScan({ ...h.store.getScan(completedScan)!, id: scanId })
+      local.store.transaction(() => {
+        for (let i = 0; i < 2000; i++) local.store.appendEvent(scanId, 'debug', 'worker-progress', `Debug ${i}`)
+      })
+      expect(await routes.listEvents({ scanId, limit: 2 }, call())).toEqual([])
+    } finally {
+      await local.controller.dispose()
+      local.store.close()
+    }
+  })
+
   it('summarizes and details the completed scan', async () => {
     const list = await invoke('listScans', { workspaceId: WS_ID })
     expect(list.map(s => s.id)).toContain(completedScan)
@@ -315,7 +476,7 @@ describe('scans and findings', () => {
     expect(detail.workers.length).toBeGreaterThan(0)
     expect(detail.workers.every(w => w.state === 'done')).toBe(true)
     expect(detail.coverage?.files.readByAi).toBeGreaterThan(0)
-    expect(detail.budget).toEqual({ maxLlmCalls: 300, maxTokens: 3_000_000, maxMinutes: 60 })
+    expect(detail.budget).toEqual({ maxLlmCalls: 900, maxTokens: 9_000_000, maxMinutes: 180 })
     expect(detail.progress).toBeUndefined()
     expect(detail).not.toHaveProperty('summary.workspaceRoot')
     const events = await invoke('listEvents', { scanId: completedScan, limit: 1000 })
@@ -333,6 +494,10 @@ describe('scans and findings', () => {
     expect(confirmed.every(f => f.closure === 'confirmed')).toBe(true)
     const ai = await findings({ sources: ['ai'] })
     expect(ai.map(f => f.location?.path).sort()).toEqual(['src/routes/admin.ts', 'src/routes/orders.ts'])
+    expect(ai.every(f => f.independentlyReviewed === true)).toBe(true)
+    for (const finding of all) {
+      expect(finding.independentlyReviewed).toBe(h.store.getFinding(completedScan, finding.id)?.review !== undefined)
+    }
     expect(await findings({ severities: ['medium'] })).toEqual(all.filter(f => f.severity === 'medium'))
     expect((await findings({ text: 'CWE-639' })).map(f => f.location?.path)).toEqual(['src/routes/orders.ts'])
     expect((await findings({ text: 'orders.ts:26' })).length).toBe(1)
@@ -348,6 +513,7 @@ describe('scans and findings', () => {
       verification: 'strong_static_evidence',
       closure: 'confirmed',
       review: { verdict: 'confirmed', model: 'scripted/oracle' },
+      independentlyReviewed: true,
       createdBy: { role: 'hunter', model: 'scripted/oracle' },
     })
     expect(detail.attackPath[0]).toMatchObject({ quoteCheck: 'match', location: { path: 'src/routes/orders.ts' } })
@@ -471,10 +637,10 @@ describe('scans and findings', () => {
     expect(deep.frameworks).toContain('express')
     expect(deep.languages[0]).toMatchObject({ language: 'typescript' })
     expect(deep.plannedTasks).toBeGreaterThan(0)
-    expect(deep.plannedTasks).toBeLessThanOrEqual(40)
+    expect(deep.plannedTasks).toBeLessThanOrEqual(120)
     expect(deep.tokens.min).toBeLessThan(deep.tokens.max)
     const quick = await invoke('estimateScan', { workspaceId: WS_ID, mode: 'quick' })
-    expect(quick.plannedTasks).toBeLessThanOrEqual(6)
+    expect(quick.plannedTasks).toBeLessThanOrEqual(18)
     expect(quick.tokens.max).toBeLessThanOrEqual(deep.tokens.max)
     expect(llm.calls.length).toBe(calls)
     expect((await failure(invoke('estimateScan', { workspaceId: 'nope', mode: 'deep' }))).code).toBe(

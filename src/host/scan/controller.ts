@@ -22,6 +22,18 @@ export interface ControllerDeps extends Omit<PipelineDeps, 'live'> {
   readonly pluginVersion: string
 }
 
+export interface ExtendBudgetInput {
+  readonly scanId: string
+  readonly addTokens?: number
+  readonly addLlmCalls?: number
+  readonly addMinutes?: number
+}
+
+/** Task error codes that mean "not run because a budget ran out". */
+const BUDGET_SKIP_CODES = new Set(['budget', 'budget_exhausted'])
+/** Hard cap for an extended time budget (one week of running time). */
+const MAX_EXTENDED_MINUTES = 7 * 24 * 60
+
 export interface CreateScanInput {
   readonly workspaceId: string
   readonly subpath?: string
@@ -203,42 +215,117 @@ export class ScanController {
     this.assertOpen()
     const scan = this.require(id)
     if (!['paused', 'interrupted', 'failed'].includes(scan.status)) throw invalidState(scan, 'resume')
-    const { store } = this.deps
-    const busy = store
-      .listScans({ workspaceId: scan.workspaceId, workspaceRoot: scan.workspaceRoot, statuses: ACTIVE, limit: 500 })
-      .find(other => other.id !== id)
-    if (busy)
-      throw new RpcError('security/busy', 'A scan of this project is already queued or running.', { scanId: busy.id })
+    this.assertNoActiveSibling(scan)
+    const updated = this.deps.store.transaction(() => this.requeue(scan, false))
+    this.kick()
+    return updated
+  }
+
+  /**
+   * Add budget to a stopped scan and continue its skipped work in place.
+   *
+   * The scan keeps its findings, usage, and completed tasks; only work that
+   * was skipped because a budget ran out (plus the usual resume retries)
+   * runs again. Additions are clamped to the operator ceilings, so a scan at
+   * the ceiling cannot be extended further.
+   */
+  extendBudget(input: ExtendBudgetInput): ScanRecord {
+    this.assertOpen()
+    const scan = this.require(input.scanId)
+    if (!['completed', 'paused', 'interrupted', 'failed'].includes(scan.status)) {
+      throw invalidState(scan, 'extend the budget of')
+    }
+    this.assertNoActiveSibling(scan)
+    const { store, config } = this.deps
+    const resumable = store
+      .listTasks(scan.id)
+      .some(
+        task =>
+          task.status === 'pending' ||
+          task.status === 'running' ||
+          (task.status === 'failed' && task.attempts < MAX_TASK_ATTEMPTS) ||
+          (task.status === 'skipped' && BUDGET_SKIP_CODES.has(task.error?.code ?? '')),
+      )
+    if (!resumable) {
+      throw new RpcError('security/invalid-state', 'This scan has no skipped work left to continue.', {
+        scanId: scan.id,
+        status: scan.status,
+      })
+    }
+    const budget = {
+      ...scan.budget,
+      maxTokens: Math.min(scan.budget.maxTokens + (input.addTokens ?? 0), config.maxTokensPerScan),
+      maxLlmCalls: Math.min(scan.budget.maxLlmCalls + (input.addLlmCalls ?? 0), config.maxLlmCallsPerScan),
+      maxMinutes: Math.min(scan.budget.maxMinutes + (input.addMinutes ?? 0), MAX_EXTENDED_MINUTES),
+    }
+    if (
+      budget.maxTokens === scan.budget.maxTokens &&
+      budget.maxLlmCalls === scan.budget.maxLlmCalls &&
+      budget.maxMinutes === scan.budget.maxMinutes
+    ) {
+      throw new RpcError(
+        'security/invalid-state',
+        'This scan is already at the operator budget limit. Raise maxTokensPerScan or maxLlmCallsPerScan in the plugin configuration to extend it further.',
+        { scanId: scan.id },
+      )
+    }
     const updated = store.transaction(() => {
-      for (const task of store.listTasks(id, ['running'])) store.updateTask(task.id, { status: 'pending' })
-      // Explicit resume alone retries failed work. Crash recovery deliberately leaves failures untouched.
-      // Attempts count worker runs, including interrupted runs, and never reset across resumes.
-      for (const task of store.listTasks(id, ['failed'])) {
-        if (task.attempts < MAX_TASK_ATTEMPTS) store.updateTask(task.id, { status: 'pending' })
-      }
-      for (const run of store.listAgentRuns(id)) {
-        if (run.status === 'running') {
-          store.updateAgentRun(run.id, {
-            status: 'cancelled',
-            stopReason: 'interrupted',
-            finishedAt: this.deps.now().toISOString(),
-          })
-        }
-      }
-      if (scan.pluginVersion !== this.deps.pluginVersion) {
-        store.appendEvent(
-          id,
-          'info',
-          'plugin-version-changed',
-          'The plugin version changed since scan creation. Pending tasks will be refreshed from the new analysis; completed tasks are retained.',
-        )
-      }
-      const queued = store.updateScan(id, { status: 'queued', clearError: true, clearFinishedAt: true })
-      store.appendEvent(id, 'info', 'resumed', 'Scan queued to resume')
-      return queued
+      store.updateScan(scan.id, { budget })
+      store.appendEvent(
+        scan.id,
+        'info',
+        'budget-extended',
+        `Budget extended: tokens ${scan.budget.maxTokens} → ${budget.maxTokens}, AI requests ${scan.budget.maxLlmCalls} → ${budget.maxLlmCalls}, minutes ${scan.budget.maxMinutes} → ${budget.maxMinutes}. Skipped work will continue.`,
+      )
+      return this.requeue({ ...scan, budget }, true)
     })
     this.kick()
     return updated
+  }
+
+  private assertNoActiveSibling(scan: ScanRecord): void {
+    const busy = this.deps.store
+      .listScans({ workspaceId: scan.workspaceId, workspaceRoot: scan.workspaceRoot, statuses: ACTIVE, limit: 500 })
+      .find(other => other.id !== scan.id)
+    if (busy)
+      throw new RpcError('security/busy', 'A scan of this project is already queued or running.', { scanId: busy.id })
+  }
+
+  /** Reset retryable work and queue the scan. Call inside a store transaction. */
+  private requeue(scan: ScanRecord, includeBudgetSkipped: boolean): ScanRecord {
+    const { store } = this.deps
+    const id = scan.id
+    for (const task of store.listTasks(id, ['running'])) store.updateTask(task.id, { status: 'pending' })
+    // Explicit resume alone retries failed work. Crash recovery deliberately leaves failures untouched.
+    // Attempts count worker runs, including interrupted runs, and never reset across resumes.
+    for (const task of store.listTasks(id, ['failed'])) {
+      if (task.attempts < MAX_TASK_ATTEMPTS) store.updateTask(task.id, { status: 'pending' })
+    }
+    if (includeBudgetSkipped) {
+      for (const task of store.listTasks(id, ['skipped'])) {
+        if (BUDGET_SKIP_CODES.has(task.error?.code ?? '')) store.updateTask(task.id, { status: 'pending' })
+      }
+    }
+    for (const run of store.listAgentRuns(id)) {
+      if (run.status === 'running') {
+        store.updateAgentRun(run.id, {
+          status: 'cancelled',
+          stopReason: 'interrupted',
+          finishedAt: this.deps.now().toISOString(),
+        })
+      }
+    }
+    if (scan.pluginVersion !== this.deps.pluginVersion) {
+      store.appendEvent(
+        id,
+        'info',
+        'plugin-version-changed',
+        'The plugin version changed since scan creation. Pending tasks will be refreshed from the new analysis; completed tasks are retained.',
+      )
+    }
+    const queued = store.updateScan(id, { status: 'queued', clearError: true, clearFinishedAt: true })
+    store.appendEvent(id, 'info', 'resumed', 'Scan queued to resume')
+    return queued
   }
 
   cancel(id: string): ScanRecord {

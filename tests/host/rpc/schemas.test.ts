@@ -63,10 +63,25 @@ describe('requestSchemas', () => {
 
   it('bounds list paging', () => {
     expect(requestSchemas.listScans.safeParse({ limit: 50 }).success).toBe(true)
+    expect(requestSchemas.listScans.safeParse({ limit: 50, offset: 0 }).success).toBe(true)
+    expect(requestSchemas.listScans.safeParse({ offset: 50 }).success).toBe(true)
+    expect(requestSchemas.listScans.safeParse({ offset: -1 }).success).toBe(false)
+    expect(requestSchemas.listScans.safeParse({ offset: 0.5 }).success).toBe(false)
+    expect(requestSchemas.listScans.safeParse({ offset: Number.MAX_SAFE_INTEGER + 1 }).success).toBe(false)
     expect(requestSchemas.listScans.safeParse({ limit: 0 }).success).toBe(false)
     expect(requestSchemas.listScans.safeParse({ limit: 1.5 }).success).toBe(false)
     expect(requestSchemas.listEvents.safeParse({ scanId: 's', afterSeq: -1 }).success).toBe(false)
     expect(requestSchemas.listEvents.safeParse({ scanId: 's', afterSeq: 0, limit: 1000 }).success).toBe(true)
+  })
+
+  it('requires a positive budget addition to extend a scan', () => {
+    expect(requestSchemas.extendScanBudget.safeParse({ scanId: 's', addTokens: 100 }).success).toBe(true)
+    expect(requestSchemas.extendScanBudget.safeParse({ scanId: 's', addMinutes: 30 }).success).toBe(true)
+    expect(requestSchemas.extendScanBudget.safeParse({ scanId: 's' }).success).toBe(false)
+    expect(requestSchemas.extendScanBudget.safeParse({ scanId: 's', addTokens: 0 }).success).toBe(false)
+    expect(requestSchemas.extendScanBudget.safeParse({ scanId: 's', addTokens: -5 }).success).toBe(false)
+    expect(requestSchemas.extendScanBudget.safeParse({ scanId: 's', addTokens: 1.5 }).success).toBe(false)
+    expect(requestSchemas.extendScanBudget.safeParse({ scanId: 's', addTokens: 100, extra: 1 }).success).toBe(false)
   })
 
   it('requires an explicit license acceptance to install a tool', () => {

@@ -111,6 +111,7 @@ const SCAN_PATCH_KEYS: PatchKeys<ScanPatch> = {
   finishedAt: true,
   error: true,
   commit: true,
+  budget: true,
   usage: true,
   phases: true,
   progress: true,
@@ -175,11 +176,11 @@ const SQL = {
   getScan: 'SELECT * FROM scans WHERE id = ?',
   listScans: `SELECT * FROM scans
     WHERE (:statuses IS NULL OR status IN (SELECT value FROM json_each(:statuses)))
-    ORDER BY created_at DESC, id DESC LIMIT :limit`,
+    ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset`,
   listScansByWorkspace: `SELECT * FROM scans
     WHERE (workspace_id = :workspace OR (json_valid(data) AND json_extract(data, '$.workspaceRoot') = :root))
       AND (:statuses IS NULL OR status IN (SELECT value FROM json_each(:statuses)))
-    ORDER BY created_at DESC, id DESC LIMIT :limit`,
+    ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset`,
   previousCompletedScan: `SELECT * FROM scans
     WHERE root_key = ? AND status = 'completed' AND created_at < ?
     ORDER BY created_at DESC, id DESC LIMIT 1`,
@@ -398,6 +399,7 @@ class SqliteSecurityStore implements SecurityStore {
       const params: Record<string, SQLInputValue> = {
         statuses: query.statuses === undefined ? null : JSON.stringify(query.statuses),
         limit: clampLimit(query.limit, SCAN_LIST_DEFAULT, SCAN_LIST_MAX),
+        offset: Number.isSafeInteger(query.offset) && (query.offset ?? 0) >= 0 ? (query.offset ?? 0) : 0,
       }
       if (query.workspaceId === undefined) return this.stmt(SQL.listScans).all(params).map(decodeScan)
       params.workspace = query.workspaceId

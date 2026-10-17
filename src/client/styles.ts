@@ -303,6 +303,9 @@ const controls = /* css */ `
   background: var(--dshsec-surface); border: 1px solid var(--dshsec-line); border-radius: 12px;
   box-shadow: var(--dshsec-shadow); display: grid;
 }
+.dshsec-menu-layer { position: fixed; inset: 0; z-index: 30; pointer-events: none; }
+.dshsec-menu-panel { pointer-events: auto; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.dshsec-menu-panel > .dshsec-menu-item { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .dshsec-menu--end { right: 0; }
 .dshsec-menu--start { left: 0; }
 .dshsec-menu-item {
@@ -542,47 +545,29 @@ const overview = /* css */ `
 .dshsec-results-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 16px; flex-wrap: wrap; }
 .dshsec-export { display: grid; gap: 8px; justify-items: end; }
 @container dshsec-page (max-width: 640px) { .dshsec-export { justify-items: start; } }
-.dshsec-notsafe {
-  display: grid; gap: 2px; padding: 12px 16px; border-left: 3px solid var(--dshsec-warn);
-  background: var(--dshsec-fill); border-radius: 0 10px 10px 0;
-}
-.dshsec-notsafe span { color: var(--dshsec-text2); }
-.dshsec-notsafe--prominent { background: var(--dshsec-warn-tint); }
-
-/* Severity ledger: one strip, not five cards. Color only where there is something to see. */
-.dshsec-ledger {
-  list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
-  border: 1px solid var(--dshsec-line-strong); border-radius: 12px; overflow: hidden;
-}
-.dshsec-ledger > li + li { border-left: 1px solid var(--dshsec-line); }
-.dshsec-ledger-cell {
+/* Findings summary: plain report rows, like the coverage list above it.
+   No cards, charts, or big numbers — label left, count right, hairlines. */
+.dshsec-sevrows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--dshsec-line); }
+.dshsec-sevrows > li { border-bottom: 1px solid var(--dshsec-line); }
+.dshsec-sevrow {
   appearance: none; border: 0; background: none; font: inherit; color: inherit; cursor: pointer;
-  width: 100%; height: 100%; padding: 14px 16px 12px; display: grid; gap: 2px; text-align: left;
+  display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 4px 8px; margin: 0 -8px;
+  width: calc(100% + 16px); border-radius: 6px; text-align: left;
 }
-.dshsec-ledger-cell:hover { background: var(--dshsec-fill); }
-.dshsec-ledger-cell:focus-visible { outline-offset: -2px; }
-.dshsec-ledger-num { font-size: 28px; line-height: 34px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--dshsec-text3); }
-.dshsec-ledger-label { font-size: 12.5px; color: var(--dshsec-text3); }
-.dshsec-ledger-cell.has-value .dshsec-ledger-num { color: var(--dshsec-text); }
-.dshsec-ledger-cell--error-strong.has-value .dshsec-ledger-num,
-.dshsec-ledger-cell--error.has-value .dshsec-ledger-num { color: var(--dshsec-err-ink); }
-.dshsec-ledger-cell--warn.has-value .dshsec-ledger-num { color: var(--dshsec-warn-ink); }
-.dshsec-ledger-cell--error-strong.has-value { box-shadow: inset 0 3px 0 var(--dshsec-err); }
-@container dshsec-page (max-width: 560px) {
-  .dshsec-ledger-cell { padding: 10px 6px 9px 8px; }
-  .dshsec-ledger-num { font-size: 20px; line-height: 26px; }
-  .dshsec-ledger-label { font-size: 11px; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-}
-.dshsec-certainty-row { margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
-@container dshsec-page (max-width: 720px) { .dshsec-certainty-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.dshsec-cert { display: grid; gap: 2px; align-content: start; padding-top: 10px; border-top: 2px solid var(--dshsec-line); min-width: 0; }
-.dshsec-cert dt { font-size: 13px; font-weight: 500; }
-.dshsec-cert dd { margin: 0; display: grid; gap: 2px; }
-.dshsec-cert-num { font-size: 22px; line-height: 28px; font-variant-numeric: tabular-nums; }
-.dshsec-cert--confirmed { border-top-color: var(--dshsec-text); }
-.dshsec-cert--open_proof_gap { border-top-color: var(--dshsec-text3); }
-.dshsec-cert--ruled_out .dshsec-cert-num { color: var(--dshsec-text3); }
-.dshsec-cert--new { border-top-color: var(--dshsec-accent); }
+.dshsec-sevrow:hover { background: var(--dshsec-fill); }
+.dshsec-sevrow:focus-visible { outline-offset: -2px; }
+.dshsec-sevrow-label { flex: 1 1 auto; min-width: 0; color: var(--dshsec-text3); }
+.dshsec-sevrow.has-value .dshsec-sevrow-label { color: var(--dshsec-text); }
+.dshsec-sevrow-count { font-size: 14px; font-weight: 600; color: var(--dshsec-text3); }
+.dshsec-sevrow.has-value .dshsec-sevrow-count { color: var(--dshsec-text); }
+.dshsec-sevrow-total { color: var(--dshsec-text); font-size: 13px; }
+.dshsec-dist-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--dshsec-track); }
+.dshsec-dist-dot--critical { background: var(--dshsec-err); }
+.dshsec-dist-dot--high { background: color-mix(in srgb, var(--dshsec-err) 55%, var(--dshsec-warn)); }
+.dshsec-dist-dot--medium { background: var(--dshsec-warn); }
+.dshsec-dist-dot--low { background: var(--dshsec-text3); }
+.dshsec-dist-dot--info { background: var(--dshsec-caption); }
+.dshsec-notsafe strong { color: var(--dshsec-text2); font-weight: 500; }
 .dshsec-coverage .dshsec-kv { gap: 12px; }
 `
 
@@ -652,7 +637,10 @@ const findings = /* css */ `
 .dshsec-frow.is-ruled-out .dshsec-frow-title { color: var(--dshsec-text3); }
 .dshsec-frow-sev { padding-top: 1px; display: flex; }
 .dshsec-frow-main { display: grid; gap: 3px; min-width: 0; }
-.dshsec-frow-title { font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+.dshsec-frow-title {
+  font-weight: 500; line-height: 1.5; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .dshsec-frow-meta { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; font-size: 12.5px; min-width: 0; }
 .dshsec-frow-loc {
   font-family: var(--dshsec-mono); font-size: 12px; color: var(--dshsec-text3); min-width: 0; flex: 0 1 auto;

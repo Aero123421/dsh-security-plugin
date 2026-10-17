@@ -26,6 +26,8 @@ export function Modal(props: {
   /** Element to focus first; defaults to the first focusable inside the body. */
   readonly initialFocusRef?: { readonly current: HTMLElement | null }
   readonly describedBy?: string
+  /** Disable every dismissal path while an operation's outcome is pending. */
+  readonly dismissible?: boolean
 }) {
   const tr = useT()
   const titleId = useId()
@@ -82,7 +84,7 @@ export function Modal(props: {
     if (event.key === 'Escape') {
       event.stopPropagation()
       event.preventDefault()
-      onCloseRef.current()
+      if (props.dismissible !== false) onCloseRef.current()
       return
     }
     if (event.key !== 'Tab' || !dialogRef.current) return
@@ -112,7 +114,7 @@ export function Modal(props: {
       className="dshsec-root dshsec-modal-backdrop"
       lang={tr.lang}
       onMouseDown={event => {
-        if (event.target === event.currentTarget) onCloseRef.current()
+        if (event.target === event.currentTarget && props.dismissible !== false) onCloseRef.current()
       }}
     >
       {/* biome-ignore lint/a11y/noStaticElementInteractions: the dialog element traps Tab and handles Esc */}
@@ -134,7 +136,10 @@ export function Modal(props: {
           <button
             type="button"
             className="dshsec-iconbtn dshsec-modal-x"
-            onClick={() => onCloseRef.current()}
+            onClick={() => {
+              if (props.dismissible !== false) onCloseRef.current()
+            }}
+            disabled={props.dismissible === false}
             aria-label={tr.t('common.closeDialog')}
           >
             <IconClose size={18} />

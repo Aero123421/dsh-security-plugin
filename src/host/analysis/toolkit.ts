@@ -376,7 +376,7 @@ export class Toolkit {
       let reason = `${info.name} was not found on PATH.`
       if (managedOffer && this.#opts.allowManagedInstall) reason += ' A verified download is available.'
       else if (lockTool && asset && !asset.sha256) reason += ' The managed download is not pinned yet.'
-      status = { id, available: false, source: 'disabled', reason }
+      status = { id, available: false, source: 'disabled', reason, reasonCode: 'not-installed' }
     }
     return {
       id,

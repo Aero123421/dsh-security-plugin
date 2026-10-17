@@ -22,6 +22,8 @@ function HistoryBody() {
   const tr = useT()
   const { entry, scans } = useWorkspaceScans()
   const viewScanId = useSecurity(s => s.viewScanId)
+  const workspaceId = useSecurity(s => s.workspaceId)
+  const hasMore = useSecurity(s => (workspaceId ? s.scansHasMore[workspaceId] === true : false))
   const now = useNow()
   const [deleting, setDeleting] = useState<ScanSummary | undefined>()
 
@@ -48,70 +50,87 @@ function HistoryBody() {
   }
 
   return (
-    <div className="dshsec-table-wrap dshsec-history">
-      <table className="dshsec-table">
-        <thead>
-          <tr>
-            <th scope="col">{tr.t('history.started')}</th>
-            <th scope="col">{tr.t('history.mode')}</th>
-            <th scope="col">{tr.t('history.status')}</th>
-            <th scope="col">{tr.t('history.open')}</th>
-            <th scope="col">{tr.t('history.commit')}</th>
-            <th scope="col">
-              <span className="dshsec-visually-hidden">{tr.t('history.actions')}</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {scans.map(scan => {
-            const viewing = viewScanId === scan.id
-            const started = scan.startedAt ?? scan.createdAt
-            return (
-              <tr key={scan.id} className={viewing ? 'is-viewing' : undefined}>
-                <td data-label={tr.t('history.started')}>
-                  <time dateTime={started} title={formatDateTime(started, tr.intlLocale)}>
-                    {formatRelative(started, tr.intlLocale, now)}
-                  </time>
-                </td>
-                <td data-label={tr.t('history.mode')}>
-                  {tr.lookup(`mode.${scan.mode}`) ?? '—'}
-                  <div className="dshsec-hint">{scan.subpath ?? tr.t('scan.wholeProject')}</div>
-                </td>
-                <td data-label={tr.t('history.status')}>
-                  <StatusBadge status={scan.status} />
-                </td>
-                <td data-label={tr.t('history.open')}>
-                  <OpenCounts scan={scan} />
-                </td>
-                <td data-label={tr.t('history.commit')}>
-                  <span className="dshsec-cell-mono">{shortSha(scan.commit)}</span>
-                  {scan.dirty ? (
-                    <span className="dshsec-dirty" title={tr.t('history.dirty')}>
-                      *<span className="dshsec-visually-hidden"> {tr.t('history.dirty')}</span>
-                    </span>
-                  ) : null}
-                </td>
-                <td className="dshsec-row-actions">
-                  <Button
-                    size="sm"
-                    variant={viewing ? 'ghost' : 'secondary'}
-                    disabled={viewing}
-                    onClick={() => view(scan)}
-                  >
-                    {viewing ? tr.t('history.viewing') : tr.t('history.view')}
-                  </Button>
-                  {scan.status === 'completed' || scan.status === 'failed' || scan.status === 'cancelled' ? (
-                    <ExportMenu scanId={scan.id} />
-                  ) : null}
-                  <Button size="sm" variant="ghost" onClick={() => setDeleting(scan)}>
-                    {tr.t('history.delete')}
-                  </Button>
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+    <div className="dshsec-history">
+      <div className="dshsec-table-wrap">
+        <table className="dshsec-table">
+          <thead>
+            <tr>
+              <th scope="col">{tr.t('history.started')}</th>
+              <th scope="col">{tr.t('history.mode')}</th>
+              <th scope="col">{tr.t('history.status')}</th>
+              <th scope="col">{tr.t('history.open')}</th>
+              <th scope="col">{tr.t('history.commit')}</th>
+              <th scope="col">
+                <span className="dshsec-visually-hidden">{tr.t('history.actions')}</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {scans.map(scan => {
+              const viewing = viewScanId === scan.id
+              const started = scan.startedAt ?? scan.createdAt
+              return (
+                <tr key={scan.id} className={viewing ? 'is-viewing' : undefined}>
+                  <td data-label={tr.t('history.started')}>
+                    <time dateTime={started} title={formatDateTime(started, tr.intlLocale)}>
+                      {formatRelative(started, tr.intlLocale, now)}
+                    </time>
+                  </td>
+                  <td data-label={tr.t('history.mode')}>
+                    {tr.lookup(`mode.${scan.mode}`) ?? '—'}
+                    <div className="dshsec-hint">{scan.subpath ?? tr.t('scan.wholeProject')}</div>
+                  </td>
+                  <td data-label={tr.t('history.status')}>
+                    <StatusBadge status={scan.status} />
+                    {scan.status === 'completed' && scan.review ? (
+                      <div className="dshsec-hint">{tr.t(`review.${scan.review.state}`)}</div>
+                    ) : null}
+                  </td>
+                  <td data-label={tr.t('history.open')}>
+                    <OpenCounts scan={scan} />
+                  </td>
+                  <td data-label={tr.t('history.commit')}>
+                    <span className="dshsec-cell-mono">{shortSha(scan.commit)}</span>
+                    {scan.dirty ? (
+                      <span className="dshsec-dirty" title={tr.t('history.dirty')}>
+                        *<span className="dshsec-visually-hidden"> {tr.t('history.dirty')}</span>
+                      </span>
+                    ) : null}
+                  </td>
+                  <td className="dshsec-row-actions">
+                    <Button
+                      size="sm"
+                      variant={viewing ? 'ghost' : 'secondary'}
+                      disabled={viewing}
+                      onClick={() => view(scan)}
+                    >
+                      {viewing ? tr.t('history.viewing') : tr.t('history.view')}
+                    </Button>
+                    {scan.status === 'completed' || scan.status === 'failed' || scan.status === 'cancelled' ? (
+                      <ExportMenu scanId={scan.id} />
+                    ) : null}
+                    <Button size="sm" variant="ghost" onClick={() => setDeleting(scan)}>
+                      {tr.t('history.delete')}
+                    </Button>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {entry.status === 'error' && entry.error ? (
+        <LoadError
+          error={entry.error}
+          onRetry={() => void (hasMore ? controller.loadMoreScans(workspaceId) : controller.refreshScans(workspaceId))}
+        />
+      ) : hasMore ? (
+        <div className="dshsec-actions">
+          <Button busy={entry.status === 'loading'} onClick={() => void controller.loadMoreScans(workspaceId)}>
+            {tr.t(entry.status === 'loading' ? 'history.loadingMore' : 'history.loadMore')}
+          </Button>
+        </div>
+      ) : null}
       {deleting ? (
         <ConfirmDialog
           title={tr.t('confirmDelete.title')}

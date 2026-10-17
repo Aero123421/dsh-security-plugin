@@ -121,15 +121,25 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
     }
     setSubmitting(true)
     setError(undefined)
-    const result = await controller.startScan({
-      workspaceId,
-      ...(subpath ? { subpath } : {}),
-      mode: scanMode,
-      aiReview: ai,
-      ...(ai && needsConsent ? { consent: true } : {}),
-      ...(ai && pickedRef ? { model: pickedRef } : {}),
-    })
-    setSubmitting(false)
+    // The dialog cannot be dismissed while submitting, so the busy state
+    // must clear even if startScan throws instead of returning a result.
+    const result = await controller
+      .startScan({
+        workspaceId,
+        ...(subpath ? { subpath } : {}),
+        mode: scanMode,
+        aiReview: ai,
+        ...(ai && needsConsent ? { consent: true } : {}),
+        ...(ai && pickedRef ? { model: pickedRef } : {}),
+      })
+      .catch(
+        () =>
+          ({
+            ok: false,
+            error: { code: 'security/result-unknown', message: '', details: {} },
+          }) as const,
+      )
+      .finally(() => setSubmitting(false))
     if (result.ok) {
       controller.closeNewScan()
       controller.setTab('overview')
@@ -152,10 +162,13 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
     <Modal
       title={tr.t('newScan.title')}
       onClose={controller.closeNewScan}
+      dismissible={!submitting}
       size="lg"
       footer={
         <>
-          <Button onClick={controller.closeNewScan}>{tr.t('common.cancel')}</Button>
+          <Button disabled={submitting} onClick={controller.closeNewScan}>
+            {tr.t('common.cancel')}
+          </Button>
           <Button
             variant="primary"
             busy={submitting}
@@ -167,223 +180,226 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
         </>
       }
     >
+      {submitting ? <Callout>{tr.t('newScan.startingHint')}</Callout> : null}
       <form
-        className="dshsec-stack"
+        aria-busy={submitting}
         onSubmit={event => {
           event.preventDefault()
           void submit()
         }}
       >
-        <Field label={tr.t('newScan.project')} hint={tr.t('project.managedHint')}>
-          {({ id, describedBy, invalid }) => (
-            <>
-              <ProjectSelect
+        <fieldset className="dshsec-fieldset dshsec-stack" disabled={submitting}>
+          <Field label={tr.t('newScan.project')} hint={tr.t('project.managedHint')}>
+            {({ id, describedBy, invalid }) => (
+              <>
+                <ProjectSelect
+                  id={id}
+                  variant="field"
+                  ariaLabel={tr.t('newScan.project')}
+                  value={workspaceId}
+                  workspaces={workspaces}
+                  disabled={addingProject || submitting}
+                  describedBy={describedBy}
+                  invalid={invalid}
+                  onChange={value => {
+                    setWorkspaceId(value)
+                    setSubpath('')
+                  }}
+                />
+                <AddProjectFolder
+                  disabled={submitting}
+                  onAdded={value => {
+                    setWorkspaceId(value)
+                    setSubpath('')
+                  }}
+                />
+              </>
+            )}
+          </Field>
+
+          <Field label={tr.t('newScan.subpath')} hint={tr.t('newScan.subpathHint')}>
+            {({ id, describedBy }) => (
+              <input
                 id={id}
-                variant="field"
-                ariaLabel={tr.t('newScan.project')}
-                value={workspaceId}
-                workspaces={workspaces}
-                disabled={addingProject || submitting}
-                describedBy={describedBy}
-                invalid={invalid}
-                onChange={value => {
-                  setWorkspaceId(value)
-                  setSubpath('')
-                }}
+                className="dshsec-input"
+                type="text"
+                value={subpath}
+                placeholder="packages/app"
+                maxLength={1024}
+                aria-describedby={describedBy}
+                onChange={event => setSubpath(event.target.value)}
               />
-              <AddProjectFolder
-                disabled={submitting}
-                onAdded={value => {
-                  setWorkspaceId(value)
-                  setSubpath('')
-                }}
-              />
-            </>
-          )}
-        </Field>
+            )}
+          </Field>
 
-        <Field label={tr.t('newScan.subpath')} hint={tr.t('newScan.subpathHint')}>
-          {({ id, describedBy }) => (
-            <input
-              id={id}
-              className="dshsec-input"
-              type="text"
-              value={subpath}
-              placeholder="packages/app"
-              maxLength={1024}
-              aria-describedby={describedBy}
-              onChange={event => setSubpath(event.target.value)}
-            />
-          )}
-        </Field>
-
-        <fieldset className="dshsec-fieldset">
-          <legend className="dshsec-label">{tr.t('newScan.how')}</legend>
-          <ChoiceCards<Approach>
-            name="dshsec-newscan-approach"
-            value={approach}
-            onChange={value => {
-              setApproach(value)
-              setError(undefined)
-            }}
-            options={[
-              { value: 'ai', label: tr.t('newScan.ai'), description: tr.t('newScan.ai.desc') },
-              { value: 'builtin', label: tr.t('newScan.builtin'), description: tr.t('newScan.builtin.desc') },
-            ]}
-          />
-        </fieldset>
-
-        {ai ? (
           <fieldset className="dshsec-fieldset">
-            <legend className="dshsec-label">{tr.t('newScan.mode')}</legend>
-            <ModeCards value={mode} onChange={setMode} name="dshsec-newscan-mode" />
+            <legend className="dshsec-label">{tr.t('newScan.how')}</legend>
+            <ChoiceCards<Approach>
+              name="dshsec-newscan-approach"
+              value={approach}
+              onChange={value => {
+                setApproach(value)
+                setError(undefined)
+              }}
+              options={[
+                { value: 'ai', label: tr.t('newScan.ai'), description: tr.t('newScan.ai.desc') },
+                { value: 'builtin', label: tr.t('newScan.builtin'), description: tr.t('newScan.builtin.desc') },
+              ]}
+            />
           </fieldset>
-        ) : null}
 
-        <EstimatePanel estimate={estimate} budget={budget} ai={ai} />
+          {ai ? (
+            <fieldset className="dshsec-fieldset">
+              <legend className="dshsec-label">{tr.t('newScan.mode')}</legend>
+              <ModeCards value={mode} onChange={setMode} name="dshsec-newscan-mode" />
+            </fieldset>
+          ) : null}
 
-        {settings.privacy?.allowDependencyLookup !== true &&
-        (estimate.status !== 'ready' || estimate.value.dependencyManifests !== 0) ? (
-          <Callout
-            title={tr.t('newScan.dependencyLookupOff')}
-            live={false}
-            action={
-              <Button size="sm" variant="link" onClick={goToSettings}>
-                {tr.t('newScan.dependencySettings')}
-              </Button>
-            }
-          >
-            {tr.t('newScan.dependencyLookupHint')}
-          </Callout>
-        ) : null}
+          <EstimatePanel estimate={estimate} budget={budget} ai={ai} />
 
-        {ai ? (
-          <section className="dshsec-subsection" aria-labelledby={`${consentId}-models`}>
-            <div className="dshsec-subhead">
-              <h3 className="dshsec-h3" id={`${consentId}-models`}>
-                {configured ? tr.t('newScan.modelsTitle') : tr.t('newScan.chooseModel')}
-              </h3>
-              {configured ? (
+          {settings.privacy?.allowDependencyLookup !== true &&
+          (estimate.status !== 'ready' || estimate.value.dependencyManifests !== 0) ? (
+            <Callout
+              title={tr.t('newScan.dependencyLookupOff')}
+              live={false}
+              action={
                 <Button size="sm" variant="link" onClick={goToSettings}>
-                  {tr.t('newScan.changeModels')}
+                  {tr.t('newScan.dependencySettings')}
                 </Button>
+              }
+            >
+              {tr.t('newScan.dependencyLookupHint')}
+            </Callout>
+          ) : null}
+
+          {ai ? (
+            <section className="dshsec-subsection" aria-labelledby={`${consentId}-models`}>
+              <div className="dshsec-subhead">
+                <h3 className="dshsec-h3" id={`${consentId}-models`}>
+                  {configured ? tr.t('newScan.modelsTitle') : tr.t('newScan.chooseModel')}
+                </h3>
+                {configured ? (
+                  <Button size="sm" variant="link" onClick={goToSettings}>
+                    {tr.t('newScan.changeModels')}
+                  </Button>
+                ) : null}
+              </div>
+              {models.status === 'error' && models.error ? (
+                <Callout
+                  tone="error"
+                  action={
+                    <Button size="sm" onClick={() => void controller.loadModels(true)}>
+                      {tr.t('common.retry')}
+                    </Button>
+                  }
+                >
+                  {tr.t(models.value ? 'settings.modelsStale' : 'settings.modelsLoadFailed')}
+                </Callout>
               ) : null}
-            </div>
-            {configured ? (
-              <RouteList roles={roles} providers={providers} />
-            ) : noProviders ? (
-              <Callout
-                tone="warn"
-                action={
+              {configured ? (
+                <RouteList roles={roles} providers={providers} />
+              ) : noProviders ? (
+                <Callout
+                  tone="warn"
+                  action={
+                    <Button size="sm" onClick={chooseBuiltin}>
+                      {tr.t('newScan.useBuiltin')}
+                    </Button>
+                  }
+                >
+                  {tr.t('newScan.noProviders')}
+                </Callout>
+              ) : (
+                <div ref={pickerRef} className="dshsec-stack-sm">
+                  <ModelPicker
+                    providers={providers}
+                    loading={!models.value && models.status !== 'error'}
+                    value={picked}
+                    invalid={showModelHint && !pickedRef}
+                    onChange={next => {
+                      setPicked(next)
+                      setShowModelHint(false)
+                    }}
+                  />
+                  {showModelHint && !pickedRef ? (
+                    <div className="dshsec-field-error" role="alert">
+                      {tr.t('newScan.modelRequired')}
+                    </div>
+                  ) : (
+                    <p className="dshsec-hint">{tr.t('newScan.chooseModelHint')}</p>
+                  )}
+                </div>
+              )}
+            </section>
+          ) : null}
+
+          {needsConsent ? (
+            <section
+              className={`dshsec-consent${showConsentHint && !agreed ? ' is-invalid' : ''}`}
+              aria-labelledby={`${consentId}-title`}
+            >
+              <h3 className="dshsec-h3" id={`${consentId}-title`}>
+                {tr.t('consent.title')}
+              </h3>
+              <p>{tr.t('consent.body')}</p>
+              <ul className="dshsec-list">
+                {sendTo.length ? (
+                  sendTo.map(r => (
+                    <li key={r.provider}>
+                      <strong>{r.provider}</strong> — {r.models.join(', ')}
+                    </li>
+                  ))
+                ) : (
+                  <li>{tr.t('consent.noProviders')}</li>
+                )}
+              </ul>
+              <p className="dshsec-hint">{tr.t('consent.withheld')}</p>
+              {withheld.length ? (
+                <p className="dshsec-hint">{tr.t('consent.withheldExtra', { globs: withheld.join(', ') })}</p>
+              ) : null}
+              {!canEditHighRisk ? <p className="dshsec-hint">{tr.t('consent.remote')}</p> : null}
+              <label className="dshsec-check">
+                <input
+                  id={consentId}
+                  type="checkbox"
+                  checked={agreed}
+                  aria-invalid={showConsentHint && !agreed ? true : undefined}
+                  aria-describedby={showConsentHint && !agreed ? `${consentId}-error` : undefined}
+                  onChange={event => {
+                    setAgreed(event.target.checked)
+                    setShowConsentHint(false)
+                  }}
+                />
+                <span>{tr.t('consent.checkbox')}</span>
+              </label>
+              {showConsentHint && !agreed ? (
+                <div className="dshsec-field-error" id={`${consentId}-error`} role="alert">
+                  {tr.t('consent.required')}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
+          {error ? (
+            <Callout
+              tone={error.code === 'security/busy' ? 'info' : 'error'}
+              action={
+                error.code === 'security/no-model' ? (
+                  <Button size="sm" variant="link" onClick={goToSettings}>
+                    {tr.t('newScan.configureModels')}
+                  </Button>
+                ) : ai && (error.code === 'security/forbidden-remote' || error.code === 'security/consent-required') ? (
                   <Button size="sm" onClick={chooseBuiltin}>
                     {tr.t('newScan.useBuiltin')}
                   </Button>
-                }
-              >
-                {tr.t('newScan.noProviders')}
-              </Callout>
-            ) : (
-              <div ref={pickerRef} className="dshsec-stack-sm">
-                <ModelPicker
-                  providers={providers}
-                  loading={!models.value && models.status !== 'error'}
-                  value={picked}
-                  invalid={showModelHint && !pickedRef}
-                  onChange={next => {
-                    setPicked(next)
-                    setShowModelHint(false)
-                  }}
-                />
-                {!models.value && models.status === 'error' && models.error ? (
-                  <Callout
-                    tone="error"
-                    action={
-                      <Button size="sm" onClick={() => void controller.loadModels(true)}>
-                        {tr.t('common.retry')}
-                      </Button>
-                    }
-                  >
-                    {tr.t('settings.modelsLoadFailed')}
-                  </Callout>
-                ) : null}
-                {showModelHint && !pickedRef ? (
-                  <div className="dshsec-field-error" role="alert">
-                    {tr.t('newScan.modelRequired')}
-                  </div>
-                ) : (
-                  <p className="dshsec-hint">{tr.t('newScan.chooseModelHint')}</p>
-                )}
-              </div>
-            )}
-          </section>
-        ) : null}
-
-        {needsConsent ? (
-          <section
-            className={`dshsec-consent${showConsentHint && !agreed ? ' is-invalid' : ''}`}
-            aria-labelledby={`${consentId}-title`}
-          >
-            <h3 className="dshsec-h3" id={`${consentId}-title`}>
-              {tr.t('consent.title')}
-            </h3>
-            <p>{tr.t('consent.body')}</p>
-            <ul className="dshsec-list">
-              {sendTo.length ? (
-                sendTo.map(r => (
-                  <li key={r.provider}>
-                    <strong>{r.provider}</strong> — {r.models.join(', ')}
-                  </li>
-                ))
-              ) : (
-                <li>{tr.t('consent.noProviders')}</li>
-              )}
-            </ul>
-            <p className="dshsec-hint">{tr.t('consent.withheld')}</p>
-            {withheld.length ? (
-              <p className="dshsec-hint">{tr.t('consent.withheldExtra', { globs: withheld.join(', ') })}</p>
-            ) : null}
-            {!canEditHighRisk ? <p className="dshsec-hint">{tr.t('consent.remote')}</p> : null}
-            <label className="dshsec-check">
-              <input
-                id={consentId}
-                type="checkbox"
-                checked={agreed}
-                aria-invalid={showConsentHint && !agreed ? true : undefined}
-                aria-describedby={showConsentHint && !agreed ? `${consentId}-error` : undefined}
-                onChange={event => {
-                  setAgreed(event.target.checked)
-                  setShowConsentHint(false)
-                }}
-              />
-              <span>{tr.t('consent.checkbox')}</span>
-            </label>
-            {showConsentHint && !agreed ? (
-              <div className="dshsec-field-error" id={`${consentId}-error`} role="alert">
-                {tr.t('consent.required')}
-              </div>
-            ) : null}
-          </section>
-        ) : null}
-
-        {error ? (
-          <Callout
-            tone={error.code === 'security/busy' ? 'info' : 'error'}
-            action={
-              error.code === 'security/no-model' ? (
-                <Button size="sm" variant="link" onClick={goToSettings}>
-                  {tr.t('newScan.configureModels')}
-                </Button>
-              ) : ai && (error.code === 'security/forbidden-remote' || error.code === 'security/consent-required') ? (
-                <Button size="sm" onClick={chooseBuiltin}>
-                  {tr.t('newScan.useBuiltin')}
-                </Button>
-              ) : undefined
-            }
-          >
-            {errorText(tr, error)}
-          </Callout>
-        ) : null}
-        <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
+                ) : undefined
+              }
+            >
+              {errorText(tr, error)}
+            </Callout>
+          ) : null}
+          <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
+        </fieldset>
       </form>
     </Modal>
   )

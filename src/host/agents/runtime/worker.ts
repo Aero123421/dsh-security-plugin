@@ -30,7 +30,7 @@ import type {
   LlmToolSchema,
   LlmUserInput,
 } from '../../dsh/ports.ts'
-import type { BudgetGate } from './budget.ts'
+import { type BudgetGate, chargedCacheReadTokens } from './budget.ts'
 import { classifyFailure } from './failure.ts'
 import { assertValidTool, type ToolResult, toolSchema, type WorkerTool } from './tool.ts'
 
@@ -108,8 +108,9 @@ export interface WorkerResult<T> {
   /** Tool calls handled: executed, rejected, or accepted as the submission. */
   readonly toolCalls: number
   /**
-   * Summed usage over every request. `inputTokens` counts all prompt tokens,
-   * i.e. reported `inputTokens + cacheReadTokens + cacheWriteTokens`.
+   * Summed usage over every request. `inputTokens` is the budget charge:
+   * reported uncached input and cache writes at full rate, cache reads at
+   * `CACHE_READ_CHARGE_RATE`. Raw per-request usage stays in the transcript.
    */
   readonly usage: { readonly inputTokens: number; readonly outputTokens: number; readonly llmCalls: number }
   /** Any non-terminal stream chunk received across attempts (error finish alone is a rejection). */
@@ -143,7 +144,7 @@ export const MAX_ATTEMPTS_PER_TURN = 4
 /** Plain-text replies tolerated (each answered with a nudge) before `no_submission`. */
 export const MAX_NUDGES = 2
 /** Tool calls run per model reply; further calls in the same reply get an error result instead. */
-export const MAX_TOOL_CALLS_PER_TURN = 16
+export const MAX_TOOL_CALLS_PER_TURN = 48
 /** Default for {@link WorkerSpec.idleTimeoutMs}: two minutes without a stream chunk. */
 export const DEFAULT_IDLE_TIMEOUT_MS = 120_000
 
@@ -391,7 +392,8 @@ class WorkerRun<T> {
   }
 
   private recordUsage(usage: LlmTokenUsage): void {
-    this.inputTokens += count(usage.inputTokens) + count(usage.cacheReadTokens) + count(usage.cacheWriteTokens)
+    this.inputTokens +=
+      count(usage.inputTokens) + chargedCacheReadTokens(count(usage.cacheReadTokens)) + count(usage.cacheWriteTokens)
     this.outputTokens += count(usage.outputTokens)
     try {
       this.spec.budget.record(usage)

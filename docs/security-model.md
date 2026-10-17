@@ -50,7 +50,7 @@ Everything read from the repository is data. The controls:
   caps scanned bytes per call (50 MB), and runs each batch in a `node:vm` script with a time budget (2 s per call),
   so catastrophic backtracking is interrupted. A search cut short returns the matches found so far with a "search
   stopped early" note.
-- **Tool use is bounded per reply.** At most 16 tool calls run per model reply; further calls get an error result
+- **Tool use is bounded per reply.** At most 48 tool calls run per model reply; further calls get an error result
   asking the model to batch fewer. The worker yields to the event loop after every tool execution, so one worker's
   synchronous search cannot starve the Host's other work.
 - **Prompting.** The shared system preamble tells every role that repository content (code, comments, strings,

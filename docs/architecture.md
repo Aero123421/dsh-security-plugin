@@ -129,7 +129,7 @@ these increase endpoint priority and appear as hunter steering context, never as
   to 30 s, ±20% jitter, or the provider's retry-after up to 60 s), at most 4 attempts per turn. A stream that sends
   no chunk for `llmIdleTimeoutMs` (default 2 min) is abandoned as a `TIMEOUT`, and a stream that ignores the abort
   signal is abandoned as soon as the worker is cancelled.
-- At most 16 tool calls run per model reply; the rest get an error result asking the model to batch fewer. The loop
+- At most 48 tool calls run per model reply; the rest get an error result asking the model to batch fewer. The loop
   yields to the event loop after each tool execution.
 - On `CONTEXT_WINDOW_EXCEEDED` the loop elides all but the last two tool results and retries once.
 - Provider content-policy refusals end the worker as `blocked_by_provider`. They are never retried and no other
@@ -146,10 +146,10 @@ the severity rubric and the output language. Each role has its own terminal tool
 
 | Role | Terminal tool | Turn cap | Output checks |
 | --- | --- | --- | --- |
-| Planner | `submit_threat_model` | `min(maxTurnsPerWorker, 16)` | At most N hypotheses. |
+| Planner | `submit_threat_model` | `min(maxTurnsPerWorker, 48)` | At most N hypotheses. |
 | Hunter | `submit_findings` | `maxTurnsPerWorker` | A finding whose attack-path quotes all fail verification is sent back (up to 2 times) with the exact mismatches; after that it is accepted and the host drops such findings. |
-| Skeptic | `submit_verdict` | `min(maxTurnsPerWorker, 16)` | `refuted` without a verified counter-evidence quote of code (comment-only quotes do not count) is sent back (up to 2 times), then downgraded to `inconclusive`. `confirmed` without any verified step becomes `inconclusive`. |
-| Chain analyst | `submit_chains` | `min(maxTurnsPerWorker, 16)` | A chain needs at least 2 known findings and at least 1 verified step (1 resubmission). |
+| Skeptic | `submit_verdict` | `min(maxTurnsPerWorker, 48)` | `refuted` without a verified counter-evidence quote of code (comment-only quotes do not count) is sent back (up to 2 times), then downgraded to `inconclusive`. `confirmed` without any verified step becomes `inconclusive`. |
+| Chain analyst | `submit_chains` | `min(maxTurnsPerWorker, 48)` | A chain needs at least 2 known findings and at least 1 verified step (1 resubmission). |
 
 The Skeptic runs in a fresh context. It receives the finding's claim, preconditions and host-verified excerpts, but
 never the hunter's transcript or reasoning. For non-English scans of rule-based findings, it also writes the
@@ -216,12 +216,18 @@ are kept, so "new since last scan" also matches through merges. SARIF results ca
 One `ScanBudgetGate` is shared by all workers of a scan:
 
 - Model calls are reserved before each request, so parallel workers cannot go over `maxLlmCalls`.
-- Tokens (input + cache read/write + output, as reported by the provider) are charged when usage arrives. The token
-  ceiling can therefore be exceeded by at most the requests already in flight.
+- Tokens are charged when usage arrives. The token ceiling can therefore be exceeded by at most the requests
+  already in flight. The charge is the reported uncached input and cache writes at full rate, output at full rate,
+  and cache reads at a tenth (`CACHE_READ_CHARGE_RATE`): budgets are a cost guardrail, and providers price cache
+  reads far below fresh input, so full-rate charging drained budgets about ten times faster than the underlying
+  spend once a worker's resent history was mostly cache hits. Stored `inputTokens` usage is this charge; raw
+  per-request counts stay in transcripts.
 - Minutes count running time only. Time spent paused or interrupted does not count.
 
 When any dimension runs out, no new task starts. Tasks still queued are marked `skipped` (reason `budget`), the scan
-completes normally, and a notice says which budget ran out.
+completes normally, and a notice says which budget ran out. The user can then extend that scan's budget
+(`extendScanBudget`): the frozen budget grows (clamped to the operator ceilings), budget-skipped tasks return to
+`pending`, and the scan is queued again with its findings, usage, and completed tasks intact.
 
 ## Pause, resume and crash recovery
 

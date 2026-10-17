@@ -59,8 +59,9 @@ const outputSchema = z.object({
 export async function runSemgrep(options: SemgrepRunOptions): Promise<AnalyzerRun> {
   const started = Date.now()
   const { tool, configPath } = options
-  if (!tool) return unavailableRun('semgrep', 'semgrep is not installed', started)
-  if (!configPath) return unavailableRun('semgrep', 'no local semgrep rules were configured', started)
+  if (!tool) return unavailableRun('semgrep', 'semgrep is not installed', started, [], 'not-installed')
+  if (!configPath)
+    return unavailableRun('semgrep', 'no local semgrep rules were configured', started, [], 'rules-missing')
   if (!isAbsolute(configPath) || !(await stat(configPath).catch(() => undefined))) {
     return unavailableRun('semgrep', 'the configured semgrep rules path does not exist', started)
   }
