@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Checks this plugin against the newest published DSH alpha.
+ * Checks this plugin against a published DSH version or dist-tag.
  *
  * DSH boots a plugin only when every `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*`
  * peer range satisfies `semver.satisfies(runtime, range, { includePrerelease: true })`
@@ -9,7 +9,7 @@
  * this plugin declares none, so the peer path applies). A miss disables the plugin
  * before it loads.
  *
- *   node scripts/check-dsh-alpha.mjs [--skip-types] [--skip-boot]
+ *   node scripts/check-dsh-alpha.mjs [--dsh-version=alpha|next|VERSION] [--skip-types] [--skip-boot]
  *
  * The command needs network, npm, and pnpm. It resolves the `alpha` dist-tag of
  * `@deepseek-ai/dsh`, checks that tag and the 0.2.x prerelease policy, typechecks
@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const skipTypes = process.argv.includes('--skip-types')
 const skipBoot = process.argv.includes('--skip-boot')
+const selector = process.argv.find(arg => arg.startsWith('--dsh-version='))?.slice('--dsh-version='.length) ?? 'alpha'
 const semverSpec = 'semver@^7.8.5'
 /** Same option DSH passes to `semver.satisfies` when it admits a plugin. */
 const includePrerelease = { includePrerelease: true }
@@ -56,8 +57,8 @@ let server
 let serverOutput = { stdout: '', stderr: '' }
 
 try {
-  const alpha = npmAlpha()
-  console.log(`@deepseek-ai/dsh alpha dist-tag: ${alpha}`)
+  const alpha = npmDshVersion()
+  console.log(`@deepseek-ai/dsh ${selector}: ${alpha}`)
   const semver = installSemver()
   checkPeerRange(semver, alpha)
   if (!skipTypes) typecheckAgainstAlpha(semver, alpha)
@@ -72,10 +73,11 @@ try {
   await stopServer()
 }
 
-function npmAlpha() {
-  const value = npmString(['@deepseek-ai/dsh', 'dist-tags.alpha'])
+function npmDshVersion() {
+  if (!/^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(selector)) throw new Error('Expected a DSH dist-tag or exact version')
+  const value = npmString([`@deepseek-ai/dsh@${selector}`, 'version'])
   if (value === undefined || value.trim() === '') {
-    throw new Error(`npm dist-tag alpha for @deepseek-ai/dsh was ${JSON.stringify(value)}`)
+    throw new Error(`npm version for @deepseek-ai/dsh@${selector} was ${JSON.stringify(value)}`)
   }
   return value
 }

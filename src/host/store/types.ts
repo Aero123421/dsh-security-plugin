@@ -117,6 +117,9 @@ export interface SecurityStore {
   /** Run `fn` inside one write transaction (nested calls join the outer one). */
   transaction<T>(fn: () => T): T
 
+  /** Exclusive scan-controller ownership; released on disposal or store close. */
+  acquireController(): () => void
+
   // Settings -----------------------------------------------------------------
   /** Stored settings JSON (unvalidated) and its revision; revision 0 when none were saved. */
   readSettings(): { readonly value: unknown; readonly revision: number; readonly unreadable?: boolean }

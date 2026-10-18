@@ -86,6 +86,8 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
     let reportTimer: NodeJS.Timeout | undefined
     let killTimer: NodeJS.Timeout | undefined
     let fallbackTimer: NodeJS.Timeout | undefined
+    let closed: { code: number | null; signal: NodeJS.Signals | null } | undefined
+    let terminating = false
 
     const cleanup = (): void => {
       clearTimeout(timeoutTimer)
@@ -113,10 +115,17 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
       })
     }
     const terminate = (): void => {
-      if (child.pid === undefined) return
+      if (child.pid === undefined || terminating || settled) return
+      terminating = true
+      clearTimeout(timeoutTimer)
       killTree(child.pid, 'SIGTERM')
       killTimer = setTimeout(() => {
+        killTimer = undefined
         if (child.pid !== undefined) killTree(child.pid, 'SIGKILL')
+        if (closed) {
+          finish(closed.code, closed.signal)
+          return
+        }
         fallbackTimer = setTimeout(() => {
           child.stdout?.destroy()
           child.stderr?.destroy()
@@ -124,7 +133,7 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
         }, CLOSE_FALLBACK_MS)
         fallbackTimer.unref()
       }, KILL_GRACE_MS)
-      killTimer.unref()
+      // Keep the escalation alive even if the parent closes its pipes first.
     }
     const onAbort = (): void => {
       aborted = true
@@ -166,7 +175,10 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
       cleanup()
       reject(aborted ? signal?.reason : error)
     })
-    child.once('close', (code, exitSignal) => finish(code, exitSignal))
+    child.once('close', (code, exitSignal) => {
+      closed = { code, signal: exitSignal }
+      if (killTimer === undefined) finish(code, exitSignal)
+    })
   })
 }
 
@@ -174,20 +186,26 @@ export function runTool(cmd: string, args: readonly string[], options: RunToolOp
 function killTree(pid: number, sig: NodeJS.Signals): void {
   if (process.platform === 'win32') {
     const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows'
+    const fallback = () => {
+      try {
+        process.kill(pid, sig)
+      } catch {
+        /* Already gone. */
+      }
+    }
     try {
       const killer = spawn(join(systemRoot, 'System32', 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
         shell: false,
       })
-      killer.on('error', () => undefined)
+      // Let taskkill enumerate descendants before killing their parent.
+      killer.on('error', fallback)
+      killer.on('close', code => {
+        if (code !== 0) fallback()
+      })
     } catch {
-      // Fall through to the direct kill below.
-    }
-    try {
-      process.kill(pid, sig)
-    } catch {
-      // Already gone.
+      fallback()
     }
     return
   }

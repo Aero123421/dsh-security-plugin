@@ -66,7 +66,6 @@ export interface ServiceDeps {
 }
 
 const ESTIMATE_TOKENS_PER_TASK = { min: 15_000, max: 90_000 } as const
-const MAX_MODELS_PER_PROVIDER = 100
 const MODEL_INFO_TIMEOUT_MS = 5_000
 
 export function createHandlers(deps: ServiceDeps): RpcHandlers {
@@ -319,33 +318,21 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
     async listModels(_payload, call) {
       const llm = deps.llm()
       if (!llm) return []
-      const signal = workSignal(call)
+      workSignal(call).throwIfAborted()
       const providers = llm.listProviders()
       return await Promise.all(
         providers.map(async (provider): Promise<ProviderOption> => {
           try {
-            const models = (await llm.listModels(provider.id)).slice(0, MAX_MODELS_PER_PROVIDER)
-            const detailed = await Promise.all(
-              models.map(async model => {
-                const info = await withTimeout(
-                  llm.resolveModelInfo(provider.id, model.id, signal),
-                  MODEL_INFO_TIMEOUT_MS,
-                ).catch(() => undefined)
-                return {
-                  id: model.id,
-                  name: model.name,
-                  ...(model.description ? { description: model.description } : {}),
-                  ...(info?.context ? { contextWindow: info.context.contextWindow } : {}),
-                  ...(info?.reasoning
-                    ? {
-                        reasoningEfforts: info.reasoning.efforts.map(e => ({ id: e.id, name: e.name })),
-                        ...(info.reasoning.defaultEffort ? { defaultEffort: info.reasoning.defaultEffort } : {}),
-                      }
-                    : {}),
-                }
-              }),
-            )
-            return { id: provider.id, name: provider.name, models: detailed }
+            const models = await withTimeout(llm.listModels(provider.id), MODEL_INFO_TIMEOUT_MS)
+            return {
+              id: provider.id,
+              name: provider.name,
+              models: models.map(model => ({
+                id: model.id,
+                name: model.name,
+                ...(model.description ? { description: model.description } : {}),
+              })),
+            }
           } catch (error) {
             deps.logger.warn(`dsh-security: listing models of ${provider.id} failed`, error)
             return {
@@ -357,6 +344,30 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
           }
         }),
       )
+    },
+
+    async getModelInfo(payload, call) {
+      const llm = deps.llm()
+      if (!llm?.listProviders().some(p => p.id === payload.provider))
+        throw new RpcError('security/no-model', 'This model provider is unavailable.', {})
+      const signal = AbortSignal.any([workSignal(call), AbortSignal.timeout(MODEL_INFO_TIMEOUT_MS)])
+      signal.throwIfAborted()
+      const info = await withTimeout(
+        llm.resolveModelInfo(payload.provider, payload.model, signal),
+        MODEL_INFO_TIMEOUT_MS,
+      )
+      signal.throwIfAborted()
+      return {
+        id: payload.model,
+        name: info.name,
+        ...(info.context ? { contextWindow: info.context.contextWindow } : {}),
+        ...(info.reasoning
+          ? {
+              reasoningEfforts: info.reasoning.efforts.map(e => ({ id: e.id, name: e.name })),
+              ...(info.reasoning.defaultEffort ? { defaultEffort: info.reasoning.defaultEffort } : {}),
+            }
+          : {}),
+      }
     },
 
     async updateSettings(payload, call) {

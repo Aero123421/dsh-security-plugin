@@ -8,6 +8,7 @@ import {
   type Bootstrap,
   type FindingDetail,
   type FindingSummary,
+  type ModelOption,
   type ProviderOption,
   type ReportFormat,
   type RpcFailure,
@@ -24,7 +25,13 @@ import type { ScanMode, TriageState } from '../shared/domain.ts'
 import type { ModelRef, SecuritySettings, SettingsPatch } from '../shared/settings.ts'
 import { ABORTED_ERROR, failure, type SecurityApi } from './api.ts'
 import { copyText, downloadFile } from './download.ts'
-import { type DshLayout, type DshUiWorkspace, type DshWorkspaces, SECURITY_SLOT_ID } from './dsh.ts'
+import {
+  type DshDirectoryListing,
+  type DshLayout,
+  type DshUiWorkspace,
+  type DshWorkspaces,
+  SECURITY_SLOT_ID,
+} from './dsh.ts'
 import { DEFAULT_FINDINGS_FILTER, type FindingsFilter } from './findings.ts'
 import { type Language, type MessageKey, resolveLanguage } from './i18n.ts'
 import { isPollableStatus, mergeSummary, resultsScan, sortScans } from './selectors.ts'
@@ -106,6 +113,8 @@ export interface SecurityState {
   readonly tab: TabId
   readonly newScan: NewScanRequest | undefined
   readonly models: Loadable<readonly ProviderOption[]>
+  readonly modelListRevision: number
+  readonly connectionGeneration: number
   readonly toolkit: Loadable<readonly ToolkitEntry[]>
   readonly form: SettingsFormState | undefined
   readonly dshLocale: string
@@ -201,7 +210,9 @@ export interface SecurityController {
   contractMismatch(): boolean
 
   canAddProject(): boolean
-  addProjectFolder(signal?: AbortSignal): Promise<AddProjectResult>
+  canBrowseProjectFolders(): boolean
+  listProjectFolders(path?: string, signal?: AbortSignal): Promise<DshDirectoryListing>
+  addProjectFolder(signal?: AbortSignal, path?: string): Promise<AddProjectResult>
   selectWorkspace(workspaceId: string): void
   setTab(tab: TabId): void
   viewScan(scanId: string | undefined): void
@@ -250,6 +261,7 @@ export interface SecurityController {
   copyFixPrompt(scanId: string, findingId: string): Promise<RpcResult<unknown>>
 
   loadModels(force?: boolean): Promise<void>
+  loadModelInfo(provider: string, model: string, force?: boolean): Promise<RpcResult<ModelOption>>
   loadToolkit(force?: boolean): Promise<void>
   installTool(toolId: ToolkitEntry['id']): Promise<RpcResult<ToolkitEntry>>
   updateDraft(update: (draft: SettingsDraft) => SettingsDraft): void
@@ -295,6 +307,8 @@ export function createController(options: ControllerOptions): SecurityController
     tab: 'overview',
     newScan: undefined,
     models: IDLE,
+    modelListRevision: 0,
+    connectionGeneration: 0,
     toolkit: IDLE,
     form: undefined,
     dshLocale,
@@ -320,6 +334,8 @@ export function createController(options: ControllerOptions): SecurityController
   const generations = new Map<string, number>()
   const deletedScans = new Set<string>()
   const loadedEvents = new Set<string>()
+  const loadedModelInfo = new Set<string>()
+  let modelListGeneration = 0
 
   function invalidateRead(key: string): void {
     generations.set(key, (generations.get(key) ?? 0) + 1)
@@ -554,7 +570,7 @@ export function createController(options: ControllerOptions): SecurityController
     loaded = true
     // A picker/create response from the previous connection must not navigate this one.
     generations.set('add-project', (generations.get('add-project') ?? 0) + 1)
-    set(s => ({ ...s, addingProject: false }))
+    set(s => ({ ...s, addingProject: false, connectionGeneration: s.connectionGeneration + 1 }))
     const tasks: Promise<unknown>[] = [reloadBootstrap({ force: true }), refreshWorkspaces(true)]
     const s = get()
     if (s.models.status !== 'idle') tasks.push(loadModels(true))
@@ -590,10 +606,28 @@ export function createController(options: ControllerOptions): SecurityController
   // -------------------------------------------------------------------------
 
   function canAddProject(): boolean {
-    return typeof host.uiWorkspace()?.pickDirectory === 'function' && typeof host.workspaces()?.create === 'function'
+    return (
+      (typeof host.uiWorkspace()?.pickDirectory === 'function' || canBrowseProjectFolders()) &&
+      typeof host.workspaces()?.create === 'function'
+    )
   }
 
-  async function addProjectFolder(signal?: AbortSignal): Promise<AddProjectResult> {
+  function canBrowseProjectFolders(): boolean {
+    return typeof host.uiWorkspace()?.listDirectory === 'function'
+  }
+
+  async function listProjectFolders(path?: string, signal?: AbortSignal): Promise<DshDirectoryListing> {
+    signal?.throwIfAborted()
+    if (disposed) throw new Error('This view is no longer active.')
+    const ui = host.uiWorkspace()
+    if (!ui?.listDirectory) throw new Error('Directory browsing is unavailable.')
+    const result = await ui.listDirectory(path, signal)
+    signal?.throwIfAborted()
+    if (disposed) throw new Error('This view is no longer active.')
+    return result
+  }
+
+  async function addProjectFolder(signal?: AbortSignal, selectedPath?: string): Promise<AddProjectResult> {
     if (disposed || signal?.aborted || get().addingProject || !canAddProject()) return undefined
     return once<AddProjectResult>(
       'add-project',
@@ -601,7 +635,7 @@ export function createController(options: ControllerOptions): SecurityController
         const active = () => isCurrent() && !signal?.aborted
         set(s => ({ ...s, addingProject: true }))
         try {
-          const path = await host.uiWorkspace()?.pickDirectory?.()
+          const path = selectedPath ?? (await host.uiWorkspace()?.pickDirectory?.())
           if (!path || !active()) return undefined
           const workspace = await host.workspaces()?.create?.({ path })
           if (!workspace || !active()) return undefined
@@ -1264,6 +1298,11 @@ export function createController(options: ControllerOptions): SecurityController
     await once(
       'models',
       async isCurrent => {
+        modelListGeneration++
+        loadedModelInfo.clear()
+        for (const key of generations.keys()) {
+          if (key.startsWith('model-info:')) invalidateRead(key)
+        }
         set(s => ({ ...s, models: loading(s.models) }))
         const result = await api.call('listModels', {})
         if (!isCurrent()) return
@@ -1273,7 +1312,45 @@ export function createController(options: ControllerOptions): SecurityController
             s.models,
             result.ok ? { ok: true, value: asList<ProviderOption>(result.value) } : result,
           ),
+          modelListRevision: result.ok ? s.modelListRevision + 1 : s.modelListRevision,
         }))
+      },
+      force,
+    )
+  }
+
+  async function loadModelInfo(provider: string, model: string, force = false): Promise<RpcResult<ModelOption>> {
+    if (disposed) return abortedResult()
+    const key = JSON.stringify([provider, model])
+    const cached = get()
+      .models.value?.find(p => p.id === provider)
+      ?.models.find(m => m.id === model)
+    if (!force && cached && (loadedModelInfo.has(key) || cached.contextWindow !== undefined || cached.reasoningEfforts))
+      return { ok: true, value: cached }
+    const listGeneration = modelListGeneration
+    return once(
+      `model-info:${key}`,
+      async isCurrent => {
+        const result = await api.call('getModelInfo', { provider, model })
+        if (!isCurrent() || listGeneration !== modelListGeneration) return abortedResult()
+        if (result.ok) {
+          loadedModelInfo.add(key)
+          set(s => ({
+            ...s,
+            models: {
+              ...s.models,
+              value: s.models.value?.map(p =>
+                p.id !== provider
+                  ? p
+                  : {
+                      ...p,
+                      models: p.models.map(m => (m.id === model ? { ...m, ...result.value } : m)),
+                    },
+              ),
+            },
+          }))
+        }
+        return result
       },
       force,
     )
@@ -1454,6 +1531,8 @@ export function createController(options: ControllerOptions): SecurityController
     setDshLocale,
     contractMismatch,
     canAddProject,
+    canBrowseProjectFolders,
+    listProjectFolders,
     addProjectFolder,
     selectWorkspace,
     setTab,
@@ -1482,6 +1561,7 @@ export function createController(options: ControllerOptions): SecurityController
     fixInChat,
     copyFixPrompt,
     loadModels,
+    loadModelInfo,
     loadToolkit,
     installTool,
     updateDraft,

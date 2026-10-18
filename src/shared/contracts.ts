@@ -28,7 +28,7 @@ import type { ModelRef, SecuritySettings, SettingsPatch } from './settings.ts'
 /** Endpoint prefix under the shared `/api` channel. */
 export const RPC_NAMESPACE = 'dsh-security'
 /** Bumped on any incompatible change to this file. */
-export const CONTRACT_VERSION = 3
+export const CONTRACT_VERSION = 4
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -413,6 +413,7 @@ export interface RpcMethods {
   getBootstrap: { request: Record<string, never>; response: Bootstrap }
   listWorkspaces: { request: Record<string, never>; response: readonly WorkspaceSummary[] }
   listModels: { request: Record<string, never>; response: readonly ProviderOption[] }
+  getModelInfo: { request: { readonly provider: string; readonly model: string }; response: ModelOption }
   updateSettings: {
     request: { readonly patch: SettingsPatch; readonly expectedRevision: number }
     response: { readonly settings: SecuritySettings; readonly revision: number }
@@ -493,6 +494,7 @@ export const RPC_METHOD_NAMES = [
   'getBootstrap',
   'listWorkspaces',
   'listModels',
+  'getModelInfo',
   'updateSettings',
   'estimateScan',
   'createScan',

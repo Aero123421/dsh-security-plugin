@@ -15,6 +15,7 @@ import { readFile, rm, mkdir } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import * as esbuild from 'esbuild'
+import { STYLE_ATTRIBUTE, STYLES } from '../src/client/styles.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
@@ -79,6 +80,19 @@ const clientOptions = {
   footer: { js: 'return module.exports; } });' },
   logLevel: 'info',
   plugins: [
+    {
+      name: 'dsh-security-scoped-css',
+      setup(build) {
+        if (!production) return
+        build.onLoad({ filter: /[/\\]src[/\\]client[/\\]styles\.ts$/ }, async () => {
+          const css = await esbuild.transform(STYLES, { loader: 'css', minify: true, legalComments: 'none' })
+          return {
+            contents: `export const STYLE_ATTRIBUTE = ${JSON.stringify(STYLE_ATTRIBUTE)};\nexport const STYLES = ${JSON.stringify(css.code)};`,
+            loader: 'js',
+          }
+        })
+      },
+    },
     {
       // The browser bundle may only reach the module table through the
       // externals above; any other @deepseek-ai value import would inline a

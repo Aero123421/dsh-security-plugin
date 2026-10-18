@@ -254,3 +254,14 @@ is enumerated; known unvisited entries and unopened queued directories are recor
 Descendant counts are unknown and are not expanded just to count them. A truncated snapshot always has a coverage
 gap. Generated-content detection uses a high long-line ratio rather than excluding a component for one long SVG/data
 literal; explicit generated headers and genuinely minified bundles remain excluded from source analysis.
+
+## Multiple DSH instances
+
+Only one Security controller may use a `dataDir` at a time. Starting a second instance against the same
+`security.db` refuses activation before scan recovery can alter the first instance's work. Stop the first
+instance before updating or restarting Security. To run independent profiles together, configure a different
+`dataDir` for each. History, consent, settings and triage belong to that directory.
+
+Ownership is stored atomically in the existing database metadata. A clean unload releases it; after a crash,
+an instance on the same machine reclaims it only after the recorded process has exited. An owner on another
+machine is never reclaimed automatically. Do not share a Security data directory across machines.

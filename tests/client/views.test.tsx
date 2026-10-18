@@ -827,6 +827,88 @@ describe('page header', () => {
 })
 
 describe('add project folder', () => {
+  it('allows a new folder pick after a reconnect cancels the previous pick', async () => {
+    const s = services()
+    let finish: (value: string | null) => void = () => {}
+    s.pickDirectory.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finish = resolve
+        }),
+    )
+    const { container, controller: c } = await renderPage(s.handlers, s.host)
+    const add = byText(container, 'button', 'Add project folder…')
+    await click(add)
+    await act(async () => c.reload())
+    await click(add)
+    await flush(10)
+    expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/shop' })
+    await act(async () => {
+      finish('/old/connection')
+      await flush(10)
+    })
+    expect(s.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('browses Host folders in Web mode and never opens the native picker', async () => {
+    const s = services()
+    const listDirectory = vi.fn(async (path?: string) => ({
+      path: path ?? '/home/test',
+      home: '/home/test',
+      crumbs: [{ name: '/', path: '/', hidden: false }],
+      entries: path ? [] : [{ name: 'Shop folder', path: '/code/shop', hidden: false }],
+      truncated: false,
+    }))
+    const { container, controller: c } = await renderPage(s.handlers, {
+      ...s.host,
+      uiWorkspace: () => ({ listDirectory, pickDirectory: s.pickDirectory }),
+    })
+    await click(byText(container, 'button', 'Add project folder…'))
+    await flush(10)
+    await click(byText(document.body, 'button', 'Shop folder'))
+    await flush(10)
+    await click(byText(document.body, 'button', 'Add this folder'))
+    await flush(10)
+    expect(s.pickDirectory).not.toHaveBeenCalled()
+    expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/shop' })
+    expect(c.store.getState().workspaceId).toBe('ws-shop')
+  })
+
+  it('falls back to the native picker only when DSH explicitly reports a native capability', async () => {
+    const s = services()
+    const listDirectory = vi.fn(async () => {
+      throw { rpcError: { code: 'directory-picker/unavailable', details: { capability: 'native' } } }
+    })
+    const { container } = await renderPage(s.handlers, {
+      ...s.host,
+      uiWorkspace: () => ({ listDirectory, pickDirectory: s.pickDirectory }),
+    })
+    await click(byText(container, 'button', 'Add project folder…'))
+    await flush(10)
+    expect(s.pickDirectory).toHaveBeenCalledTimes(1)
+    expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/shop' })
+  })
+
+  it('keeps a failed browser open for retry and cancels without registering a folder', async () => {
+    const s = services()
+    const listDirectory = vi
+      .fn(async () => ({ path: '/code/shop', home: '/home/test', crumbs: [], entries: [], truncated: false }))
+      .mockRejectedValueOnce(new Error('permission denied'))
+    const { container } = await renderPage(s.handlers, {
+      ...s.host,
+      uiWorkspace: () => ({ listDirectory, pickDirectory: s.pickDirectory }),
+    })
+    await click(byText(container, 'button', 'Add project folder…'))
+    await flush(10)
+    expect(document.body.textContent).toContain('Could not open this folder')
+    expect(s.pickDirectory).not.toHaveBeenCalled()
+    await click(byText(document.body, 'button', 'Open folder'))
+    await flush(10)
+    expect(document.body.textContent).not.toContain('Could not open this folder')
+    await click(byText(document.querySelector('[role="dialog"]') as HTMLElement, 'button', 'Cancel'))
+    expect(s.create).not.toHaveBeenCalled()
+  })
+
   const shop = { id: 'ws-shop', title: 'Shop', displayPath: '~/code/shop' }
 
   function services(path: string | null = '/code/shop') {

@@ -27,6 +27,10 @@ export interface OsvQueryResult {
   warnings: string[]
   /** Unique package versions for which OSV answered. */
   queried: number
+  /** Eligible unique package versions, including requests that failed. */
+  requested: number
+  /** Dependency declarations excluded because versions are not exact or disclosure is withheld. */
+  skipped: number
 }
 
 /** Where a vulnerable package was declared; the first entry becomes the signal location. */
@@ -109,10 +113,17 @@ export async function queryOsv(deps: readonly Dependency[], options: OsvQueryOpt
 
   // One query per unique package version; remember every place it was declared.
   const queries = new Map<string, { ecosystem: string; name: string; version: string; refs: OsvPackageRef[] }>()
+  let skipped = 0
   for (const dep of deps) {
-    if (!dep.exact || isSensitivePath(dep.manifest, options.withheldGlobs ?? [])) continue
+    if (!dep.exact || isSensitivePath(dep.manifest, options.withheldGlobs ?? [])) {
+      skipped++
+      continue
+    }
     const version = queryVersion(dep)
-    if (!version) continue
+    if (!version) {
+      skipped++
+      continue
+    }
     const ecosystem = toOsvEcosystem(dep.ecosystem)
     const key = `${ecosystem}\0${dep.name}\0${version}`
     const entry = queries.get(key) ?? { ecosystem, name: dep.name, version, refs: [] }
@@ -194,7 +205,7 @@ export async function queryOsv(deps: readonly Dependency[], options: OsvQueryOpt
     }
   }
   signals.sort((a, b) => compare(a.location.path, b.location.path) || compare(a.ruleId, b.ruleId))
-  return { signals, warnings, queried }
+  return { signals, warnings, queried, requested: entries.length, skipped }
 }
 
 /**

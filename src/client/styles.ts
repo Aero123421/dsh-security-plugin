@@ -804,4 +804,10 @@ const motion = /* css */ `
 }
 `
 
-export const STYLES = [tokens, frame, controls, modal, overview, findings, settings, motion].join('\n')
+const directory = `
+.dshsec-directory-list { list-style: none; padding: 0; margin: 0; max-height: 35vh; overflow: auto; }
+.dshsec-directory-list .dshsec-btn { justify-content: flex-start; width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.dshsec-directory-crumbs .dshsec-btn { max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+`
+
+export const STYLES = [tokens, frame, controls, modal, overview, findings, settings, motion, directory].join('\n')
