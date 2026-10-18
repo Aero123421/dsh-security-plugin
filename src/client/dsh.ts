@@ -50,6 +50,16 @@ export interface DshUiWorkspace {
   startSession?(workspaceId: string, options: { prompt: string; clearPreviousDraft?: boolean }): unknown
   /** Host-native picker; cancellation resolves to null. */
   pickDirectory?(): Promise<string | null>
+  /** Browser-based directory access, when supplied by DSH. Paths come from the Host. */
+  listDirectory?(path?: string, signal?: AbortSignal): Promise<DshDirectoryListing>
+}
+
+export interface DshDirectoryListing {
+  readonly path: string
+  readonly home: string
+  readonly crumbs: readonly { readonly name: string; readonly path: string; readonly hidden: boolean }[]
+  readonly entries: readonly { readonly name: string; readonly path: string; readonly hidden: boolean }[]
+  readonly truncated: boolean
 }
 
 /** `ctx.get('workspaces')` — optional, React-free Workspace Controller. */
@@ -72,7 +82,10 @@ export function asLayout(value: unknown): DshLayout | undefined {
 }
 
 export function asUiWorkspace(value: unknown): DshUiWorkspace | undefined {
-  return isObject(value) && (typeof value.startSession === 'function' || typeof value.pickDirectory === 'function')
+  return isObject(value) &&
+    (typeof value.startSession === 'function' ||
+      typeof value.pickDirectory === 'function' ||
+      typeof value.listDirectory === 'function')
     ? (value as unknown as DshUiWorkspace)
     : undefined
 }

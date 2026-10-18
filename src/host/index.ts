@@ -64,20 +64,26 @@ export function apply(ctx: HostContext, input?: Partial<Config>): void {
     fetch: globalThis.fetch,
   })
   const settings = new SettingsService(store, operatorLimits(config), config.allowRemoteHighRiskSettings, logger)
-  const controller = new ScanController({
-    store,
-    settings,
-    llm,
-    workspaces,
-    toolkit,
-    config,
-    logger,
-    fetch: globalThis.fetch,
-    astGrep: loadEngine,
-    now,
-    pluginVersion: __PLUGIN_VERSION__,
-    dataDir,
-  })
+  let controller: ScanController
+  try {
+    controller = new ScanController({
+      store,
+      settings,
+      llm,
+      workspaces,
+      toolkit,
+      config,
+      logger,
+      fetch: globalThis.fetch,
+      astGrep: loadEngine,
+      now,
+      pluginVersion: __PLUGIN_VERSION__,
+      dataDir,
+    })
+  } catch (error) {
+    store.close()
+    throw error
+  }
 
   // One disposer owns the shutdown order. Cordis runs a fiber's disposers concurrently
   // (`Promise.all` in `_unload`), so separate effects could close the store while scans

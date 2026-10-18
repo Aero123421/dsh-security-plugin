@@ -8,6 +8,31 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-18
+
+### Changed
+
+- Bump the browser/Host contract to version 4 for on-demand model details. Reload open DSH pages after updating.
+  The database schema and saved scan history, consent, settings and triage remain compatible with 0.3.0.
+- One Security controller owns a data directory at a time. A second DSH instance refuses to start Security
+  against the same database instead of interrupting the first instance's work. Stop the other instance or
+  configure a different `dataDir` for an independent profile. Ownership is recovered after its process exits.
+- Model lists include all models. Reasoning and context metadata is fetched for selected models, with retry
+  after failure, instead of resolving up to 100 models concurrently while discarding the remaining entries.
+- Check both the `alpha` and `next` DSH channels in CI; `check:dsh --dsh-version=VERSION` also accepts an exact version.
+
+### Fixed
+
+- Use primary-key lookups for canonical and merged triage fingerprints when counting open findings, avoiding
+  repeated scans through the project's historical triage decisions.
+- Keep process-group SIGKILL escalation alive when an analyzer's parent exits before its descendants. On
+  Windows, let taskkill enumerate the tree before directly terminating the parent as a fallback.
+- Persist incomplete OSV lookups as analyzer failures, coverage limitations and report notices, including
+  network failures, partial responses and missing advisory details.
+- Add a Web-compatible project-folder browser using DSH's Host-directory API. Native-only DSH compositions
+  retain their OS picker. Folder browsing handles cancellation, retry, hidden folders and bounded rendering.
+
+
 ## [0.3.0] - 2026-10-18
 
 ### Added
@@ -288,7 +313,8 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.0...v0.2.1

@@ -50,9 +50,11 @@ export class ScanController {
   private readonly jobs = new Map<string, { job: ScanJob; done: Promise<void> }>()
   private readonly workers = new Map<string, Map<string, WorkerView>>()
   private disposed = false
+  private readonly releaseOwnership: () => void
   private readonly unsubscribe: () => void
 
   constructor(private readonly deps: ControllerDeps) {
+    this.releaseOwnership = deps.store.acquireController()
     // Withdrawing consent applies to scans that are already running, not only to new ones.
     this.unsubscribe = deps.settings.onChange(settings => {
       if (settings.privacy.sendCodeToModel) return
@@ -62,8 +64,10 @@ export class ScanController {
 
   /** Recover from an unclean stop, apply retention, and start queued scans. */
   start(): void {
+    if (this.disposed) return
     const { store } = this.deps
     for (const scan of store.scansNeedingRecovery()) {
+      if (this.jobs.has(scan.id)) continue
       const tasks = store.listTasks(scan.id, ['running'])
       const runs = store.listAgentRuns(scan.id).filter(run => run.status === 'running')
       if (scan.status !== 'running' && tasks.length === 0 && runs.length === 0) continue
@@ -367,10 +371,28 @@ export class ScanController {
     this.unsubscribe()
     const pending = [...this.jobs.values()]
     for (const { job } of pending) job.stop('shutdown')
-    await Promise.race([
-      Promise.allSettled(pending.map(p => p.done)),
-      new Promise(resolve => setTimeout(resolve, SHUTDOWN_GRACE_MS).unref?.()),
-    ])
+    const drained = Promise.allSettled(pending.map(p => p.done))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        drained,
+        new Promise(resolve => {
+          timer = setTimeout(resolve, SHUTDOWN_GRACE_MS)
+          timer.unref?.()
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+    // A non-cooperative analyzer can outlive the grace period. Keep ownership until
+    // it finishes or the Host closes this store and prevents any further writes.
+    if (this.jobs.size === 0) this.releaseOwnership()
+    else
+      void drained
+        .then(() => this.releaseOwnership())
+        .catch(error => {
+          this.deps.logger.warn('dsh-security: could not release scan-controller ownership', error)
+        })
   }
 
   private kick(): void {

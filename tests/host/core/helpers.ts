@@ -232,6 +232,7 @@ export const AI_SETTINGS: SettingsPatch = {
 }
 
 export interface HarnessOptions {
+  readonly fetch?: typeof fetch
   readonly store?: SecurityStore
   readonly llm?: LlmPort | undefined
   readonly workspaces?: readonly WorkspaceEntity[]
@@ -277,7 +278,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     toolkit: options.toolkit,
     config,
     logger: options.logger ?? logger,
-    fetch: noNetwork,
+    fetch: options.fetch ?? noNetwork,
     astGrep: options.astGrep ?? (async () => undefined),
     now: () => new Date(),
     pluginVersion: options.pluginVersion ?? '0.0.0-test',

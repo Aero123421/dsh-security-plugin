@@ -165,7 +165,7 @@ describe('bootstrap, workspaces, and models', () => {
     const local = await invoke('getBootstrap', {})
     expect(local).toMatchObject({
       pluginVersion: '0.0.0-test',
-      contractVersion: 3,
+      contractVersion: 4,
       settingsRevision: 1,
       loopback: true,
       canEditHighRiskSettings: true,
@@ -268,9 +268,6 @@ describe('bootstrap, workspaces, and models', () => {
             id: 'oracle',
             name: 'Oracle',
             description: 'test model',
-            contextWindow: 128_000,
-            reasoningEfforts: [{ id: 'high', name: 'High' }],
-            defaultEffort: 'high',
           },
           { id: 'slow', name: 'Slow' },
         ],
@@ -278,6 +275,13 @@ describe('bootstrap, workspaces, and models', () => {
       { id: 'broken', name: 'Broken', models: [], error: 'Could not list models for this provider.' },
     ])
     expect(h.logger.entries.some(e => e.level === 'warn' && String(e.args[0]).includes('broken'))).toBe(true)
+    expect(await service.getModelInfo({ provider: ORACLE_PROVIDER, model: 'oracle' }, call())).toEqual({
+      id: 'oracle',
+      name: 'oracle',
+      contextWindow: 128_000,
+      reasoningEfforts: [{ id: 'high', name: 'High' }],
+      defaultEffort: 'high',
+    })
   })
 
   it('updates settings with optimistic concurrency', async () => {

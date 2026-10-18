@@ -1,4 +1,5 @@
 import { chmod, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -16,6 +17,8 @@ const isPosix = process.platform !== 'win32'
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
+    // A container's PID 1 may retain an exited orphan as a zombie. It cannot run work.
+    if (process.platform === 'linux' && /^State:\s+Z/m.test(readFileSync(`/proc/${pid}/status`, 'utf8'))) return false
     return true
   } catch {
     return false
@@ -84,7 +87,7 @@ describe('runTool', () => {
     expect(result.truncated).toBe(true)
   })
 
-  it.runIf(isPosix)('kills the whole process tree on timeout', async () => {
+  it('kills the whole process tree on timeout', async () => {
     // The child spawns a long-lived grandchild, prints its pid, then hangs.
     const script = `
       const { spawn } = require('node:child_process')
@@ -95,7 +98,8 @@ describe('runTool', () => {
     const started = Date.now()
     const result = await runTool(NODE, ['-e', script], { cwd: tmpdir(), timeoutMs: 500, maxOutputBytes: 1024 })
     expect(result.timedOut).toBe(true)
-    expect(result.code).toBeNull()
+    if (isPosix) expect(result.code).toBeNull()
+    else expect(result.code).not.toBe(0)
     expect(Date.now() - started).toBeLessThan(8000)
     const grandchild = Number(result.stdout)
     expect(grandchild).toBeGreaterThan(0)
@@ -108,6 +112,50 @@ describe('runTool', () => {
     expect(result.timedOut).toBe(true)
     expect(result.signal).toBe('SIGKILL')
   })
+
+  it.runIf(isPosix).each(['timeout', 'abort'] as const)(
+    'kills a SIGTERM-resistant grandchild after its parent closes (%s)',
+    async mode => {
+      const { dir, cleanup } = await makeTempDir()
+      const ready = join(dir, 'ready')
+      const grandchild = `process.on('SIGTERM', () => {}); process.send('ready'); setInterval(() => {}, 1000)`
+      const script = `const {spawn}=require('node:child_process');
+        const g=spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:['ignore','ignore','ignore','ipc']});
+        g.on('message',()=>require('node:fs').writeFileSync(${JSON.stringify(ready)},String(g.pid)));
+        setInterval(()=>{},1000);`
+      const abort = new AbortController()
+      let pid: number | undefined
+      try {
+        const pending = runTool(NODE, ['-e', script], {
+          cwd: dir,
+          timeoutMs: mode === 'timeout' ? 1500 : 15_000,
+          maxOutputBytes: 1024,
+          signal: abort.signal,
+        })
+        const outcome = pending.then(
+          value => ({ value }),
+          error => ({ error }),
+        )
+        expect(await waitFor(() => existsSync(ready))).toBe(true)
+        pid = Number(readFileSync(ready, 'utf8'))
+        expect(pid).toBeGreaterThan(0)
+        if (mode === 'abort') abort.abort(new Error('review cancelled'))
+        const result = await outcome
+        if ('value' in result) expect(result.value.timedOut).toBe(true)
+        else expect(result.error).toMatchObject({ message: 'review cancelled' })
+        expect(await waitFor(() => !isAlive(pid as number))).toBe(true)
+      } finally {
+        if (pid && isAlive(pid)) {
+          try {
+            process.kill(pid, 'SIGKILL')
+          } catch {}
+        }
+        abort.abort()
+        await cleanup()
+      }
+    },
+    15_000,
+  )
 
   it('kills the child and rejects with the abort reason', async () => {
     const controller = new AbortController()

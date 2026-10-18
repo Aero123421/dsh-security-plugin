@@ -447,6 +447,22 @@ function ModelRoute(props: {
   const descId = `${selectId}-desc`
   const provider = providers.find(p => p.id === value.provider)
   const model = asModels(provider).find(m => m.id === value.model)
+  const listed = model !== undefined
+  const [infoError, setInfoError] = useState(false)
+  const [infoAttempt, setInfoAttempt] = useState(0)
+  const modelListRevision = useSecurity(s => s.modelListRevision)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: retry and catalog revisions intentionally reload metadata
+  useEffect(() => {
+    let current = true
+    setInfoError(false)
+    if (listed && value.provider && value.model)
+      void controller.loadModelInfo(value.provider, value.model).then(result => {
+        if (current) setInfoError(!result.ok)
+      })
+    return () => {
+      current = false
+    }
+  }, [controller, value.provider, value.model, listed, infoAttempt, modelListRevision])
   const efforts = Array.isArray(model?.reasoningEfforts) ? model.reasoningEfforts : []
   const set = (next: ModelDraft) => controller.updateDraft(d => ({ ...d, models: { ...d.models, [slot]: next } }))
   const isDefault = slot === 'default'
@@ -517,6 +533,14 @@ function ModelRoute(props: {
           <div className="dshsec-field-error" id={`${selectId}-error`}>
             {modelError}
           </div>
+        ) : null}
+        {infoError ? (
+          <Callout tone="warn">
+            {tr.t('settings.modelInfoFailed')}{' '}
+            <Button size="sm" onClick={() => setInfoAttempt(n => n + 1)}>
+              {tr.t('common.retry')}
+            </Button>
+          </Callout>
         ) : null}
         {value.provider ? (
           <details className="dshsec-advanced" open={Boolean(outputError) || undefined}>

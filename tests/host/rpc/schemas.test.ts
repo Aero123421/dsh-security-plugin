@@ -35,6 +35,13 @@ describe('requestSchemas', () => {
     expect(requestSchemas.getFinding.safeParse({ scanId: 's', findingId: 'f/1' }).success).toBe(false)
   })
 
+  it('requires bounded provider and model identities for lazy model details', () => {
+    expect(requestSchemas.getModelInfo.safeParse({ provider: 'router', model: 'vendor/model-v2' }).success).toBe(true)
+    expect(requestSchemas.getModelInfo.safeParse({ provider: '', model: 'm' }).success).toBe(false)
+    expect(requestSchemas.getModelInfo.safeParse({ provider: 'p', model: 'x'.repeat(201) }).success).toBe(false)
+    expect(requestSchemas.getModelInfo.safeParse({ provider: 'p', model: 'm', extra: true }).success).toBe(false)
+  })
+
   it('validates scan creation', () => {
     expect(requestSchemas.createScan.safeParse({ workspaceId: 'w1', mode: 'deep' }).success).toBe(true)
     expect(requestSchemas.createScan.safeParse({ workspaceId: 'w1', mode: 'ultra' }).success).toBe(false)

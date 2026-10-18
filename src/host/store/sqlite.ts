@@ -23,7 +23,9 @@
  * - Orderings break remaining ties by id so results are deterministic.
  */
 
-import { chmodSync, mkdirSync, realpathSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { dirname } from 'node:path'
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite'
 import { gunzipSync, gzipSync } from 'node:zlib'
@@ -221,12 +223,14 @@ const SQL = {
   countOpenFindings: `SELECT f.severity AS severity, f.verification AS verification, COUNT(*) AS n
     FROM findings f
     LEFT JOIN triage t ON t.root_key_base = ?2 AND t.fingerprint = (
-      SELECT candidate.fingerprint FROM triage candidate
-      WHERE candidate.root_key_base = ?2 AND (
-        candidate.fingerprint = f.fingerprint OR candidate.fingerprint IN (
-          SELECT value FROM json_each(f.data, '$.mergedFingerprints')
-        )
-      )
+      SELECT candidate.fingerprint FROM (
+        SELECT fingerprint, state, updated_at FROM triage
+        WHERE root_key_base = ?2 AND fingerprint = f.fingerprint
+        UNION ALL
+        SELECT alias.fingerprint, alias.state, alias.updated_at
+        FROM json_each(f.data, '$.mergedFingerprints') AS merged
+        CROSS JOIN triage alias ON alias.root_key_base = ?2 AND alias.fingerprint = merged.value
+      ) candidate
       ORDER BY candidate.updated_at DESC, (candidate.state = 'open') DESC, candidate.fingerprint ASC
       LIMIT 1
     )
@@ -309,6 +313,7 @@ class SqliteSecurityStore implements SecurityStore {
   private readonly statements = new Map<string, StatementSync>()
   private depth = 0
   private closed = false
+  private releaseController: (() => void) | undefined
 
   constructor(
     private readonly db: DatabaseSync,
@@ -317,6 +322,12 @@ class SqliteSecurityStore implements SecurityStore {
 
   close(): void {
     if (this.closed) return
+    let problem: unknown
+    try {
+      this.releaseController?.()
+    } catch (error) {
+      problem = toStoreError(error, 'close')
+    }
     this.closed = true
     this.statements.clear()
     try {
@@ -327,12 +338,58 @@ class SqliteSecurityStore implements SecurityStore {
     try {
       this.db.close()
     } catch (error) {
-      throw toStoreError(error, 'close')
+      problem ??= toStoreError(error, 'close')
     }
+    if (problem !== undefined) throw problem
   }
 
   transaction<T>(fn: () => T): T {
     return this.guard('transaction', () => (this.depth === 0 ? this.outer(fn) : this.nested(fn)))
+  }
+
+  acquireController(): () => void {
+    const key = 'scan_controller_owner'
+    const owner = JSON.stringify({ id: randomUUID(), pid: process.pid, host: hostname() })
+    this.transaction(() => {
+      const row = this.stmt('SELECT value FROM meta WHERE key = ?').get(key)
+      if (row) {
+        let previous: { pid: number; host: string }
+        try {
+          previous = JSON.parse(String(row.value))
+          if (!Number.isSafeInteger(previous.pid) || previous.pid <= 0 || typeof previous.host !== 'string')
+            throw new Error('invalid owner')
+        } catch {
+          throw new StoreError('corrupt', 'Invalid scan-controller owner record; inspect the database before retrying.')
+        }
+        let dead = false
+        if (previous.host === hostname()) {
+          try {
+            process.kill(previous.pid, 0)
+            if (process.platform === 'linux')
+              dead = /^State:\s+Z/m.test(readFileSync(`/proc/${previous.pid}/status`, 'utf8'))
+          } catch (error) {
+            dead = (error as NodeJS.ErrnoException).code === 'ESRCH'
+          }
+        }
+        if (!dead)
+          throw new StoreError(
+            'constraint',
+            'Another DSH Security instance owns this database. Stop it, or configure a separate dataDir for this profile.',
+          )
+      }
+      this.stmt(
+        'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+      ).run(key, owner)
+    })
+    let released = false
+    const release = () => {
+      if (released || this.closed) return
+      this.guard('releaseController', () => this.stmt('DELETE FROM meta WHERE key = ? AND value = ?').run(key, owner))
+      released = true
+      this.releaseController = undefined
+    }
+    this.releaseController = release
+    return release
   }
 
   // Settings -----------------------------------------------------------------

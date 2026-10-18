@@ -12,7 +12,7 @@ DSH Security has two halves, built by `scripts/build.mjs`. Both are declared in 
   optionally `layout` and `uiWorkspace`). The build fails if it imports anything outside DSH's module table.
 
 Shared types and pure functions live in `src/shared/`: `domain.ts` (vocabulary), `settings.ts` (user settings and
-defaults) and `contracts.ts` (the RPC contract, `CONTRACT_VERSION = 1`).
+defaults) and `contracts.ts` (the RPC contract, `CONTRACT_VERSION = 4`).
 
 ## Components
 
@@ -278,3 +278,14 @@ refused. Tables: `settings` (one row, with a revision for compare-and-set), `sca
 `transcripts` (gzip, up to 32 MiB of JSON each), `evidence`, `findings`, `triage`, `events`, `meta`. Every per-scan
 table cascades from `scans`. At startup, retention deletes scans created more than `retentionDays` ago, except
 scans that are queued, running or paused.
+
+### Controller ownership and model catalogs
+
+A scan controller atomically claims the store's `scan_controller_owner` metadata before recovery or queue
+admission. Another live controller is refused, preserving the owner's running tasks and concurrency limits.
+The claim is released on unload/store close and can be recovered after process exit on the same host.
+
+`listModels` enumerates model identities without truncating catalogs or resolving every model. `getModelInfo`
+resolves the selected model's context and reasoning metadata with a bounded request lifetime. The Client
+coalesces identical requests and invalidates details on model-list refresh or connection reset. Contract v4
+requires older open pages to reload; it does not change the SQLite schema.

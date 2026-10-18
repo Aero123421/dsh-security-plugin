@@ -356,6 +356,9 @@ export class ScanJob {
       ...(snapshot.commit ? { commit: snapshot.commit } : {}),
     })
     for (const warning of this.analysis.warnings.slice(0, 30)) this.event('warn', 'analysis-warning', warning)
+    const osv = this.analysis.analyzers.find(a => a.id === 'osv')
+    if (osv && !osv.available && osv.source !== 'disabled')
+      this.notice('warn', 'dependency-lookup-incomplete', osv.reason ?? 'OSV dependency lookup did not complete.')
     for (const analyzer of this.analysis.analyzers) {
       if (!analyzer.available && analyzer.source !== 'disabled') {
         this.event('warn', 'analyzer-unavailable', `${analyzer.id}: ${analyzer.reason ?? 'unavailable'}`)
@@ -1099,7 +1102,7 @@ export class ScanJob {
     }
     if (
       this.analysis.dependencies.length > 0 &&
-      !this.scan.settings.privacy.allowDependencyLookup &&
+      !this.analysis.dependencyLookupComplete &&
       !this.analysis.dependencyScannerChecked
     ) {
       const scanner = this.analysis.analyzers.find(a => a.id === 'osv-scanner')
@@ -1110,7 +1113,7 @@ export class ScanJob {
           : 'OSV-Scanner did not check dependencies'
       gap(
         'dependencies-unchecked',
-        `${this.analysis.dependencies.length} dependencies were found but not checked for known vulnerabilities: OSV lookup is off and ${scannerGap}. Enable dependency lookup in Privacy settings or configure offline OSV-Scanner.`,
+        `${this.analysis.dependencies.length} dependencies were found but not checked for known vulnerabilities: OSV lookup ${this.scan.settings.privacy.allowDependencyLookup ? 'did not complete' : 'is off'} and ${scannerGap}. Check dependency lookup in Privacy settings or configure offline OSV-Scanner.`,
         { count: this.analysis.dependencies.length },
       )
     }

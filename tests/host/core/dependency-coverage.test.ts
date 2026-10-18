@@ -80,7 +80,7 @@ describe('dependency vulnerability coverage', () => {
           h.store
             .getScan(scan.id)
             ?.coverage?.gaps.filter(gap => gap.includes('dependencies were found but not checked')) ?? []
-        const expected = dependencies > 0 && !lookup && !checked
+        const expected = dependencies > 0 && !checked
         expect(gaps).toHaveLength(expected ? 1 : 0)
         const details = h.store.getScan(scan.id)?.coverage?.gapDetails ?? []
         expect(details.map(detail => detail.fallback)).toEqual(h.store.getScan(scan.id)?.coverage?.gaps)
@@ -88,7 +88,7 @@ describe('dependency vulnerability coverage', () => {
         if (expected) {
           expect(details.find(detail => detail.code === 'dependencies-unchecked')?.params).toEqual({ count: 2 })
           expect(gaps[0]).toContain(
-            '2 dependencies were found but not checked for known vulnerabilities: OSV lookup is off',
+            `2 dependencies were found but not checked for known vulnerabilities: OSV lookup ${lookup ? 'did not complete' : 'is off'}`,
           )
           expect(gaps[0]).not.toContain(dir)
           expect(gaps[0]).not.toContain('minimist')
@@ -121,7 +121,7 @@ describe('dependency vulnerability coverage', () => {
         const scan = await h.controller.create({ workspaceId: 'ws', mode: 'quick', aiReview: false })
         expect(await h.settle(scan.id)).toBe('completed')
         expect(h.store.getScan(scan.id)?.coverage?.gaps).toContain(
-          '2 dependencies were found but not checked for known vulnerabilities: OSV lookup is off and OSV-Scanner did not check dependencies. Enable dependency lookup in Privacy settings or configure offline OSV-Scanner.',
+          '2 dependencies were found but not checked for known vulnerabilities: OSV lookup is off and OSV-Scanner did not check dependencies. Check dependency lookup in Privacy settings or configure offline OSV-Scanner.',
         )
       } finally {
         await h.controller.dispose()

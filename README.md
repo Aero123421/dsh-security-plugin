@@ -50,13 +50,13 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
 1. **Install** the plugin. In the DSH Web UI, open **Plugins → Add plugin** and enter:
 
    ```text
-   github:Aero123421/dsh-security-plugin#v0.3.0
+   github:Aero123421/dsh-security-plugin#v0.4.0
    ```
 
    Or from a terminal (the `web` profile here):
 
    ```sh
-   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.3.0
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.4.0
    ```
 
    Use the tag of the [release](https://github.com/Aero123421/dsh-security-plugin/releases) you want; without

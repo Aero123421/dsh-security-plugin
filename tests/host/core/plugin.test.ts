@@ -157,7 +157,7 @@ describe('plugin entry', () => {
     if (!body.result.ok) throw new Error(body.result.error.message)
     expect(body.result.value).toMatchObject({
       pluginVersion: PKG_VERSION,
-      contractVersion: 3,
+      contractVersion: 4,
       settingsRevision: 0,
       loopback: true,
       capabilities: { llm: false, workspaces: false },

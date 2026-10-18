@@ -35,6 +35,7 @@ export interface AnalysisContext {
   readonly dependencies: readonly Dependency[]
   /** OSV-Scanner returned package results (a clean result counts too). */
   readonly dependencyScannerChecked: boolean
+  readonly dependencyLookupComplete: boolean
   readonly analyzers: readonly AnalyzerStatus[]
   readonly warnings: readonly string[]
   readonly astGrep?: AstGrepHandle
@@ -113,6 +114,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   let endpoints: Endpoint[] = []
   let dependencies: Dependency[] = []
   let dependencyScannerChecked = false
+  let dependencyLookupComplete = false
   if (!options.lightweight) {
     step('sast')
     collect(await runSast(snapshot, { ...(options.astGrep ? { astGrep: options.astGrep } : {}), signal }))
@@ -153,7 +155,21 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
       })
       signals.push(...osv.signals)
       warnings.push(...osv.warnings.slice(0, 10))
-      analyzers.push({ id: 'osv', available: true, source: 'builtin' })
+      dependencyLookupComplete =
+        deps.dependencies.length === 0 ||
+        (osv.queried > 0 && osv.queried === osv.requested && osv.skipped === 0 && osv.warnings.length === 0)
+      analyzers.push({
+        id: 'osv',
+        available: dependencyLookupComplete,
+        source: 'builtin',
+        ...(!dependencyLookupComplete
+          ? {
+              reasonCode: 'incomplete',
+              reason:
+                `OSV dependency lookup was incomplete (${osv.queried}/${osv.requested} package versions answered; ${osv.skipped} declarations not eligible or withheld). ${osv.warnings.slice(0, 3).join('; ')}`.trim(),
+            }
+          : {}),
+      })
     } else {
       analyzers.push({
         id: 'osv',
@@ -241,6 +257,7 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
     endpoints,
     dependencies,
     dependencyScannerChecked,
+    dependencyLookupComplete,
     analyzers,
     warnings,
     ...(astGrep ? { astGrep } : {}),

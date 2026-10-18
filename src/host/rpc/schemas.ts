@@ -191,6 +191,7 @@ export const requestSchemas = {
   getBootstrap: emptyRequestSchema,
   listWorkspaces: emptyRequestSchema,
   listModels: emptyRequestSchema,
+  getModelInfo: z.strictObject({ provider: modelIdSchema, model: modelIdSchema }),
   updateSettings: z.strictObject({ patch: settingsPatchSchema, expectedRevision: nonNegativeIntSchema }),
   estimateScan: workspaceModeSchema,
   createScan: workspaceModeSchema.extend({

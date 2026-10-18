@@ -128,7 +128,7 @@ rpc() {  # rpc <method> [json-payload]
     "$BASE/api/dsh-security/$1"; echo
 }
 
-rpc getBootstrap          # pluginVersion, contractVersion 1, default settings, loopback: true
+rpc getBootstrap          # pluginVersion, contractVersion 4, default settings, loopback: true
 rpc listModels            # includes {"id":"scripted", "models":[{"id":"oracle", …}]}
 rpc listWorkspaces
 curl -s -o /dev/null -w '%{http_code}\n' -H 'content-type: application/json' \

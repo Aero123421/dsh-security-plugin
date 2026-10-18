@@ -201,6 +201,19 @@ describe('recheck depth repair', () => {
 })
 
 describe('stale model list repair', () => {
+  it('reloads selected model metadata after refreshing the catalog', async () => {
+    const { api, c } = await setup({
+      getModelInfo: () => ok({ id: 'm', name: 'Model', reasoningEfforts: [{ id: 'high', name: 'High' }] }),
+    })
+    mounted = mount(<SettingsSection controller={c} />)
+    await flush(10)
+    expect(api.callsOf('getModelInfo')).toHaveLength(1)
+    await act(async () => c.loadModels(true))
+    await flush(10)
+    expect(api.callsOf('getModelInfo')).toHaveLength(2)
+    expect(c.store.getState().models.value?.[0]?.models[0]?.reasoningEfforts).toHaveLength(1)
+  })
+
   it('keeps models visible but shows a refresh failure and retry in Settings', async () => {
     const { api, c } = await setup()
     mounted = mount(<SettingsSection controller={c} />)

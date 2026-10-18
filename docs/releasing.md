@@ -119,9 +119,9 @@ DSH skips the plugin when `semver.satisfies(runtime, range, { includePrerelease:
 (`evaluatePluginCompatibility` in `@deepseek-ai/dsh-app-boot`). With that option the range matches
 `0.2.1-alpha.3`, later 0.2.x prereleases such as `0.2.2-alpha.1`, and stable 0.2.x. It does not match
 `0.2.1-alpha.1` or a `0.3.0` prerelease. The `@deepseek-ai/*` devDependencies stay on the minimum supported
-release, so `pnpm typecheck` covers that floor. `pnpm check:dsh` (CI job *DSH alpha compatibility*) resolves the
-npm dist-tag `alpha`, checks it the same way, typechecks the structural ports against that release, and boots a
-scratch web profile. Before widening the range:
+release, so `pnpm typecheck` covers that floor. `pnpm check:dsh` resolves the npm dist-tag `alpha` by default.
+CI checks both `alpha` and `next`: each check validates the peer range, typechecks the structural ports against
+that release, and boots a scratch web profile. Before widening the range:
 
 - update the `@deepseek-ai/*` devDependencies to the new DSH version;
 - re-check the structural DSH views in `src/host/dsh/ports.ts` and `src/client/dsh.ts` against the new DSH types,
@@ -129,3 +129,7 @@ scratch web profile. Before widening the range:
 - run the manual verification above against that version.
 
 That `package.json` change belongs to a code pull request, not a release commit.
+
+Use `pnpm check:dsh --dsh-version=next` for the current release candidate, or pass an exact DSH version to
+reproduce compatibility checks. Run these commands sequentially in one checkout because SDK checks temporarily
+replace dependency pins and restore them afterward.

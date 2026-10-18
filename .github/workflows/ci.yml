@@ -38,8 +38,12 @@ jobs:
       - run: node scripts/verify-package.mjs
 
   dsh-alpha:
-    name: DSH alpha compatibility
+    name: DSH ${{ matrix.dsh }} compatibility
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: [alpha, next]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # pnpm version comes from "packageManager" in package.json (pnpm@10.28.0).
@@ -51,7 +55,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # Resolves the npm dist-tag "alpha", checks the peer range the way DSH boots plugins,
       # typechecks against that SDK, and boots a scratch web profile. See scripts/check-dsh-alpha.mjs.
-      - run: pnpm check:dsh
+      - run: pnpm check:dsh --dsh-version=${{ matrix.dsh }}
 
   test-os:
     name: ${{ matrix.os }} · Node 22
