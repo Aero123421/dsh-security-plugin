@@ -110,6 +110,13 @@ SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string c
 `literal(...)` (including named imports). Static placeholder predicates with separate parameter objects and
 object filters are not SQL text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
 
+`js.path-traversal`, `js.ssrf` and `js.open-redirect` also emit a low `sink` when the value is dynamic but its
+origin is not visible (a parameter, a stored record, another module): file reads, writes, deletes and downloads
+(not `stat`, `mkdir`, `exists`-style calls) unless `root` is set or every dynamic part goes through
+`path.basename()`; outgoing requests outside browser code (`'use client'`, JSX/TSX/Vue/Svelte files, UI-library
+imports) unless the scheme and host are fixed; redirects unless the target is a same-site path or
+`new URL('/path', req.url)`. These steer AI review only and never become findings.
+
 ### Python (`python.ts`)
 
 Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .tmpl .tpl` (`|safe`,
@@ -141,6 +148,11 @@ Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .
 SQLAlchemy `text(...)` is also checked inside `filter(...)`, `where(...)` and `having(...)`. Request data
 interpolated or concatenated into a predicate is a SQL injection sink; constant text with bound parameters is not.
 Standalone text construction, without a recognized execution/query-builder context, is not reported.
+
+`py.path-traversal`, `py.ssrf` and `py.open-redirect` also emit a low `sink` for a dynamic value whose origin is
+not visible: file operations other than listing and `stat`/`mkdir`/`chmod`-style calls unless every dynamic part
+goes through `secure_filename()`/`os.path.basename()`, outgoing requests unless the scheme and host are fixed, and
+redirects unless the target is a same-site path or built by `url_for()`/`reverse()`. They steer AI review only.
 
 Cookie rules cover top-level/class assignments, member or dict-style assignments (such as
 `app.config['SESSION_COOKIE_SECURE'] = False`), and keyword arguments to `app.config.update(...)`. Only the explicit

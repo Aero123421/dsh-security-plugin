@@ -106,7 +106,7 @@ app.get('/f', (req, res) => {
   res.sendFile(req.query.name, { root: '/srv/public' }) // SINK
   fs.readFile(path.join(__dirname, 'uploads', path.basename(req.query.name)), cb)
   fs.readFile(path.join(__dirname, 'static', 'index.html'), cb)
-  fs.unlink(tmpFile, cb)
+  fs.unlink(tmpFile, cb) // SINK
 })`,
   },
   {

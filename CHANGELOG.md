@@ -114,6 +114,11 @@ changes; they are called out explicitly.
   traversal and XSS. Sweeps and sensitive-file reviews were asked only about authentication, authorization,
   business logic, crypto and configuration, and endpoint reviews added other categories only from rule hits in
   the handler file; rule hits in the route file now count too.
+- Give the AI review a hint for SSRF, path traversal and open redirect sinks whose value has no visible source,
+  such as a webhook URL loaded from the database or a file name passed in by a caller. These rules used to stay
+  silent unless request data was visible; they now emit a low-severity `sink` (never a finding) for dynamic
+  values, except for fixed hosts, same-site paths, sanitized file names, framework-built URLs, metadata-only file
+  calls and requests made from browser code. Findings are unchanged.
 
 ## [0.4.0] - 2026-10-18
 

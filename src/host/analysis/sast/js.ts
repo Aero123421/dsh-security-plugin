@@ -96,7 +96,7 @@ const CODEI: RuleMeta = {
 const PATH: RuleMeta = {
   id: 'js.path-traversal',
   title: 'Path traversal',
-  sinkTitle: 'File path from user input (check the containment logic)',
+  sinkTitle: 'File operation on a dynamic path (check where it comes from)',
   category: 'path-traversal',
   cwe: 'CWE-22',
   severity: 'high',
@@ -104,7 +104,7 @@ const PATH: RuleMeta = {
   message:
     'A file path is built from request data and then read, written, deleted or sent back. Sequences like `../` (or an absolute path) let an attacker reach files outside the intended folder, such as source code, `.env` files or system files.',
   sinkMessage:
-    'A file path built from request data reaches a file operation, but some containment logic (a `root` option or a prefix check) is nearby. Make sure the check runs on the final, normalized path.',
+    'A file operation receives a path that is not a fixed value. If any part of it can come from users (a request, an upload name, a stored record), `../` or an absolute path can reach files outside the intended folder.',
   recommendation:
     'Strip directories with `path.basename()`, or resolve the full path with `path.resolve(baseDir, input)` and reject it unless it starts with `baseDir + path.sep`. For downloads prefer `res.sendFile(name, { root: baseDir })`, or map IDs to file names on the server.',
   references: [REF.accessControl, cweUrl('CWE-22')],
@@ -113,7 +113,7 @@ const PATH: RuleMeta = {
 const SSRF: RuleMeta = {
   id: 'js.ssrf',
   title: 'Server-side request forgery (SSRF)',
-  sinkTitle: 'Outgoing request to a partly user-controlled URL',
+  sinkTitle: 'Outgoing request to a dynamic URL (check where it comes from)',
   category: 'ssrf',
   cwe: 'CWE-918',
   severity: 'high',
@@ -121,7 +121,7 @@ const SSRF: RuleMeta = {
   message:
     'The server makes an HTTP request to a URL taken from the incoming request. An attacker can point it at internal services, cloud metadata endpoints (such as `http://169.254.169.254/`) or `localhost` admin panels that are not reachable from the internet.',
   sinkMessage:
-    'An outgoing request URL contains user-controlled parts. The host appears to be fixed, so the main risk is reaching unexpected paths on that host; check that input cannot change the host (for example via `@`, `//` or encoded characters).',
+    'The server sends a request to a URL that is not a fixed value. If users can influence it (a request parameter, a webhook or callback URL they registered, a stored record), they can make the server call internal services or cloud metadata endpoints.',
   recommendation:
     'Do not fetch arbitrary URLs. Map user choices to known URLs, or parse the URL with `new URL()` and allow only expected schemes and host names. Block private and link-local IP ranges after DNS resolution, and disable redirects or re-check every redirect target.',
   references: [REF.ssrf, cweUrl('CWE-918')],
@@ -130,7 +130,7 @@ const SSRF: RuleMeta = {
 const REDIRECT: RuleMeta = {
   id: 'js.open-redirect',
   title: 'Open redirect',
-  sinkTitle: 'Redirect to a user-controlled URL (check the validation)',
+  sinkTitle: 'Redirect to a dynamic URL (check where it comes from and how it is validated)',
   category: 'business-logic',
   cwe: 'CWE-601',
   severity: 'medium',
@@ -138,7 +138,7 @@ const REDIRECT: RuleMeta = {
   message:
     'The response redirects the browser to a URL taken from the request. Attackers can craft links on your trusted domain that bounce victims to a phishing site, or leak tokens in OAuth-style flows.',
   sinkMessage:
-    'The response redirects to a URL taken from the request, but some validation appears nearby. Confirm it rejects other hosts, protocol-relative URLs (`//evil.com`) and `javascript:` URLs.',
+    'The response redirects to a URL that is not a fixed value. If users can influence it, they can send victims to another site; confirm that only relative paths or allow-listed hosts pass and that protocol-relative (`//evil.com`) and `javascript:` URLs are rejected.',
   recommendation:
     'Redirect only to relative paths you control or to an allow-list of hosts. Parse the target with `new URL(target, base)` and check its origin, or accept a short key and map it to a known URL on the server.',
   references: [REF.accessControl, cweUrl('CWE-601')],
@@ -523,6 +523,9 @@ const CP_SPAWN = /^(?:child_process\.(?:spawn|spawnSync|execFile|execFileSync)|e
 
 const FS_OPS =
   /^(?:fs|fs\.promises)\.(?:readFile|readFileSync|createReadStream|createWriteStream|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|readdir|readdirSync|open|openSync|copyFile|copyFileSync|rename|renameSync|mkdir|mkdirSync|access|accessSync|stat|statSync|lstat|lstatSync|exists|existsSync|readlink|readlinkSync|symlink|symlinkSync|truncate|truncateSync|chmod|chmodSync|chown|chownSync|cp|cpSync|opendir|opendirSync|outputFile|outputFileSync|remove|removeSync|readJson|readJsonSync|writeJson|writeJsonSync|readJSON|writeJSON|pathExists|ensureFile|move|moveSync|copy|copySync)$/
+/** File-system calls that only inspect or prepare paths (no file content is read, written or removed). */
+const FS_METADATA =
+  /^(?:readdir|mkdir|access|stat|lstat|exists|readlink|chmod|chown|opendir|pathExists|ensureDir|mkdirp)(?:Sync)?$/
 const RES_RECEIVER = /^(?:res|response|resp|ctx\.res|reply\.raw)$/
 const CONTAINMENT_CHECK =
   /\.startsWith\s*\(|\.indexOf\s*\(\s*['"`]\.\.|\.includes\s*\(\s*['"`]\.\.|isPathInside|path\.relative\s*\(|is_relative_to|commonpath/
@@ -778,7 +781,17 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
     taint = chk.ex.taintResolved(span)
     if (taint) break
   }
-  if (!taint) return
+  if (!taint) {
+    // Origin unknown: steer review to content reads, writes, deletes and downloads of dynamic paths that are
+    // not confined by `root` or `path.basename()` (metadata calls such as `stat` or `mkdir` are left out).
+    if (
+      !protectedBy &&
+      !FS_METADATA.test(call.name) &&
+      paths.some(span => span !== undefined && chk.dynamic(span) && !isConfinedPath(chk, span))
+    )
+      chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
   if (!protectedBy && CONTAINMENT_CHECK.test(chk.scopeText(call.start))) {
     protectedBy = 'A prefix or `..` check appears in the same function; confirm it checks the final resolved path.'
   }
@@ -820,9 +833,14 @@ function openRedirect(chk: Checker, call: CallFact, q: string): void {
   if (/^\d+$/.test(chk.text(target).trim()) && call.args.length > 1) target = chk.positional(call, 1)
   if (!target) return
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
   const values = [target, ...chk.values(target)]
-  if (values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)) return
+  const fixed = values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)
+  if (!taint) {
+    if (!fixed && chk.dynamic(target) && !isSameOriginUrlCall(chk, target))
+      chk.report(REDIRECT, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) return
   const cls = classifyTaint(REDIRECT, taint)
   if (!cls) return
   if (REDIRECT_CHECK.test(chk.scopeText(call.start))) {
@@ -1370,14 +1388,29 @@ function classifyTaint(rule: RuleMeta, taint: Taint): Classification | undefined
   }
 }
 
-/** Report SSRF-style URL taint: fixed origin or browser input becomes a sink. */
+/**
+ * Report SSRF-style URL taint: fixed origin or browser input becomes a sink. A dynamic URL of unknown origin
+ * is a sink too, except in browser code, where the request leaves from the user's machine.
+ */
 function reportUrlTaint(chk: Checker, rule: RuleMeta, call: CallFact, target: Span): void {
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
   const values = [target, ...chk.values(target)]
-  if (values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)) {
+  const fixed = values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)
+  if (!taint) {
+    if (!fixed && chk.dynamic(target) && !isBrowserCode(chk.model))
+      chk.report(rule, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) {
     if (taint.origin !== 'request') return
-    chk.report(rule, call, { kind: 'sink', confidence: 'low', taint })
+    chk.report(
+      rule,
+      call,
+      { kind: 'sink', confidence: 'low', taint },
+      {
+        note: 'The scheme and host are fixed, so input can only change the path; check that it cannot change the host (for example via `@`, `//` or encoded characters).',
+      },
+    )
     return
   }
   const cls = classifyTaint(rule, taint)
@@ -1399,6 +1432,53 @@ function reportUrlTaint(chk: Checker, rule: RuleMeta, call: CallFact, target: Sp
 /** Allow-list or host validation of an outgoing URL. */
 const URL_CHECK =
   /allow(?:ed)?_?(?:list|Hosts?|Origins?|Domains?|Urls?)|white_?list|ALLOWED_|isAllowed\w*\s*\(|isSafeUrl|isValidUrl|validateUrl|\.hostname\s*(?:===|!==|==|!=)|\.host\s*(?:===|!==|==|!=)|\.origin\s*(?:===|!==|==|!=)|\b\w*(?:allow|white|safe|trusted|permitted|hosts|domains|origins|urls)\w*\.(?:includes|has|indexOf|some)\s*\(/i
+
+/** Note for sinks whose value has no visible source. */
+const UNKNOWN_ORIGIN =
+  'Where the value comes from is not visible here (a parameter, a stored record or another module); review the callers.'
+
+/** Browser code: a `'use client'` module, a JSX/TSX/Vue/Svelte file, or one importing a UI library. */
+function isBrowserCode(model: FileModel): boolean {
+  const first = model.tokens[0]
+  if (first?.type === 'str' && /^['"]use client['"]$/.test(first.value)) return true
+  if (/\.(?:jsx|tsx|vue|svelte|html?)$/i.test(model.path)) return true
+  return model.imports.some(imp =>
+    /^(?:react|react-dom(?:\/client)?|vue|svelte|@angular\/[\w-]+|preact|solid-js|swr|@tanstack\/[\w-]+)$/.test(
+      imp.source,
+    ),
+  )
+}
+
+/**
+ * A path whose dynamic parts are all stripped of directories (`path.basename(name)`, also inside
+ * `path.join(dir, path.basename(name))` or a template), looking through one level of local assignment.
+ */
+function isConfinedPath(chk: Checker, span: Span, depth = 0): boolean {
+  if (depth > 3) return false
+  return chk.values(span).every(value => {
+    if (!chk.dynamic(value)) return true
+    const call = callAt(chk.model, value)
+    if (call) {
+      const q = chk.qualify(call.callee)
+      if (/^(?:path\.(?:posix\.|win32\.)?)?basename$/.test(q)) return true
+      if (!/^path\.(?:posix\.|win32\.)?(?:join|resolve|normalize)$/.test(q)) return false
+      return call.args.every(arg => !chk.dynamic(arg) || isConfinedPath(chk, arg, depth + 1))
+    }
+    const parts = chk.ex.dynamicParts(value)
+    return parts?.every(part => !chk.dynamic(part) || isConfinedPath(chk, part, depth + 1)) === true
+  })
+}
+
+/** `new URL('/login', req.url)`: a same-site path resolved against the request's own URL or a constant base. */
+function isSameOriginUrlCall(chk: Checker, target: Span): boolean {
+  const call = callAt(chk.model, target)
+  if (call?.callee !== 'URL' || call.args.length < 2) return false
+  const base = chk.text(call.args[1]!).replace(/\s+/g, '')
+  return (
+    chk.ex.hasFixedOrigin(call.args[0]!) &&
+    (/^(?:req|request)\.(?:url|nextUrl)$/.test(base) || chk.ex.isConstant(call.args[1]!))
+  )
+}
 
 /** `new URL(path, 'https://fixed.example')` with a constant base and a path-only input. */
 function hasFixedOriginUrlCall(chk: Checker, target: Span): boolean {

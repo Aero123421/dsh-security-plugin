@@ -83,7 +83,7 @@ const DESER: RuleMeta = {
 const PATH: RuleMeta = {
   id: 'py.path-traversal',
   title: 'Path traversal',
-  sinkTitle: 'File path from user input (check the containment logic)',
+  sinkTitle: 'File operation on a dynamic path (check where it comes from)',
   category: 'path-traversal',
   cwe: 'CWE-22',
   severity: 'high',
@@ -91,7 +91,7 @@ const PATH: RuleMeta = {
   message:
     'A file path is built from request data and then opened, sent or deleted. `../` sequences or an absolute path (note that `os.path.join(base, "/etc/passwd")` drops `base`) let an attacker reach files outside the intended folder.',
   sinkMessage:
-    'A file path from request data reaches a file operation, but a containment check or a safe helper appears nearby. Make sure the check runs on the final, resolved path.',
+    'A file operation receives a path that is not a fixed value. If any part of it can come from users (a request, an upload name, a stored record), `../` or an absolute path can reach files outside the intended folder.',
   recommendation:
     'Use `werkzeug.utils.secure_filename()` or `os.path.basename()` for names, or resolve with `Path(base, name).resolve()` and reject it unless `is_relative_to(base)`. Flask `send_from_directory` is safer than `send_file` with a joined path.',
   references: [REF.accessControl, cweUrl('CWE-22')],
@@ -100,7 +100,7 @@ const PATH: RuleMeta = {
 const SSRF: RuleMeta = {
   id: 'py.ssrf',
   title: 'Server-side request forgery (SSRF)',
-  sinkTitle: 'Outgoing request to a partly user-controlled URL',
+  sinkTitle: 'Outgoing request to a dynamic URL (check where it comes from)',
   category: 'ssrf',
   cwe: 'CWE-918',
   severity: 'high',
@@ -108,7 +108,7 @@ const SSRF: RuleMeta = {
   message:
     'The server fetches a URL taken from the incoming request. An attacker can make it call internal services, cloud metadata endpoints (`http://169.254.169.254/`) or `localhost` admin interfaces.',
   sinkMessage:
-    'An outgoing request URL contains user-controlled parts but the host appears fixed. Check that the input cannot change the host (for example with `@`, `//` or encoded characters).',
+    'The server sends a request to a URL that is not a fixed value. If users can influence it (a request parameter, a webhook or callback URL they registered, a stored record), they can make the server call internal services or cloud metadata endpoints.',
   recommendation:
     'Map user choices to known URLs, or parse with `urllib.parse.urlparse` and allow only expected schemes and hosts. Block private, loopback and link-local addresses after DNS resolution and disable automatic redirects.',
   references: [REF.ssrf, cweUrl('CWE-918')],
@@ -151,7 +151,7 @@ const XSS: RuleMeta = {
 const REDIRECT: RuleMeta = {
   id: 'py.open-redirect',
   title: 'Open redirect',
-  sinkTitle: 'Redirect to a user-controlled URL (check the validation)',
+  sinkTitle: 'Redirect to a dynamic URL (check where it comes from and how it is validated)',
   category: 'business-logic',
   cwe: 'CWE-601',
   severity: 'medium',
@@ -159,7 +159,7 @@ const REDIRECT: RuleMeta = {
   message:
     'The response redirects to a URL taken from the request (for example `?next=`). Attackers can use links on your domain to send victims to phishing pages.',
   sinkMessage:
-    'A redirect target comes from the request, but some URL validation appears nearby. Confirm it rejects other hosts and `//evil.com`.',
+    'The response redirects to a URL that is not a fixed value. If users can influence it, they can send victims to another site; confirm that only relative paths or allow-listed hosts pass and that `//evil.com` is rejected.',
   recommendation:
     'Redirect only to relative paths or allow-listed hosts. Django provides `url_has_allowed_host_and_scheme()`; in Flask, check `urlparse(target).netloc == ""` and that the path starts with a single `/`.',
   references: [REF.accessControl, cweUrl('CWE-601')],
@@ -590,7 +590,17 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
   )
     return
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
+  if (!taint) {
+    // Origin unknown: steer review to content reads, writes, deletes and downloads of dynamic, unsanitized paths.
+    if (
+      !FILE_METADATA.test(q) &&
+      !/^(?:iterdir|glob)$/.test(call.name) &&
+      chk.dynamic(target) &&
+      !isSafePath(chk, target)
+    )
+      chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
   const cls = classify(PATH, taint)
   if (!cls) return
   if (CONTAINMENT_CHECK.test(chk.scopeText(call.start))) {
@@ -614,9 +624,22 @@ function ssrf(chk: Checker, call: CallFact, q: string): void {
   if (!url) return
   if (call.name === 'request' && chk.positional(call, 1) === undefined) url = chk.positional(call, 0) ?? url
   const taint = chk.ex.taintResolved(url)
-  if (!taint) return
-  if ([url, ...chk.values(url)].some(v => chk.ex.hasFixedOrigin(v))) {
-    if (taint.origin === 'request') chk.report(SSRF, call, { kind: 'sink', confidence: 'low', taint })
+  const fixed = [url, ...chk.values(url)].some(v => chk.ex.hasFixedOrigin(v))
+  if (!taint) {
+    if (!fixed && chk.dynamic(url))
+      chk.report(SSRF, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) {
+    if (taint.origin === 'request')
+      chk.report(
+        SSRF,
+        call,
+        { kind: 'sink', confidence: 'low', taint },
+        {
+          note: 'The scheme and host are fixed, so input can only change the path; check that it cannot change the host (for example with `@`, `//` or encoded characters).',
+        },
+      )
     return
   }
   const cls = classify(SSRF, taint)
@@ -633,6 +656,37 @@ function ssrf(chk: Checker, call: CallFact, q: string): void {
     return
   }
   chk.report(SSRF, call, cls)
+}
+
+/** Note for sinks whose value has no visible source. */
+const UNKNOWN_ORIGIN =
+  'Where the value comes from is not visible here (a parameter, a stored record or another module); review the callers.'
+
+/** File operations that only list, inspect or prepare paths. */
+const FILE_METADATA = /^os\.(?:listdir|scandir|chmod|chown|makedirs|mkdir|stat)$/
+
+/** URLs built by the framework from route names: `url_for('index')`, `reverse('orders:detail', args=[...])`. */
+const INTERNAL_URL =
+  /^(?:flask\.url_for|url_for|django\.urls\.reverse|django\.urls\.reverse_lazy|django\.shortcuts\.resolve_url|reverse|reverse_lazy|resolve_url)$/
+
+/**
+ * A path whose dynamic parts all pass through a filename sanitizer (`secure_filename`, `os.path.basename`),
+ * also inside `os.path.join(...)`, `Path(...)` or an f-string, looking through local assignments.
+ */
+function isSafePath(chk: Checker, span: Span, depth = 0): boolean {
+  if (depth > 3) return false
+  return chk.values(span).every(value => {
+    if (!chk.dynamic(value)) return true
+    const call = callAt(chk.model, value)
+    if (call) {
+      const q = chk.qualify(call.callee)
+      if (PATH_SAFE_CALL.test(q)) return true
+      if (!/^(?:os\.path\.join|posixpath\.join|(?:pathlib\.)?(?:Pure)?Path)$/.test(q)) return false
+      return call.args.every(arg => !chk.dynamic(arg) || isSafePath(chk, arg, depth + 1))
+    }
+    const parts = chk.ex.dynamicParts(value)
+    return parts?.every(part => !chk.dynamic(part) || isSafePath(chk, part, depth + 1)) === true
+  })
 }
 
 /** Allow-list or host validation of an outgoing URL. */
@@ -670,8 +724,18 @@ function openRedirect(chk: Checker, call: CallFact, q: string): void {
     chk.keyword(call, 'redirect_to')
   if (!target) return
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
-  if ([target, ...chk.values(target)].some(v => chk.ex.hasFixedOrigin(v))) return
+  const values = [target, ...chk.values(target)]
+  const fixed = values.some(v => chk.ex.hasFixedOrigin(v))
+  if (!taint) {
+    const internal = values.every(v => {
+      const c = callAt(chk.model, v)
+      return c !== undefined && INTERNAL_URL.test(chk.qualify(c.callee))
+    })
+    if (!fixed && !internal && chk.dynamic(target))
+      chk.report(REDIRECT, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) return
   const cls = classify(REDIRECT, taint)
   if (!cls) return
   if (REDIRECT_CHECK.test(chk.scopeText(call.start))) {
