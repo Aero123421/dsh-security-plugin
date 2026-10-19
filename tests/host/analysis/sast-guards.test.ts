@@ -71,16 +71,13 @@ describe.each(PY_MODES)('Python allow-list guards and re flags (%s mode)', (_mod
     expect(await verdict(compiled)).toEqual(['9 sink'])
   })
 
-  it.each([
-    'branch, re.M',
-    'branch, re.MULTILINE',
-    'branch, re.I | re.M',
-    'branch, flags=re.M',
-    'branch, FLAGS',
-  ])('does not trust re.match(…, %s): "$" also matches before a newline', async args => {
-    const code = program(`    if not re.match(r"^[\\w.-]+$", ${args}): abort(400)`)
-    expect(await verdict(code)).toEqual(['9 vulnerability'])
-  })
+  it.each(['branch, re.M', 'branch, re.MULTILINE', 'branch, re.I | re.M', 'branch, flags=re.M', 'branch, FLAGS'])(
+    'does not trust re.match(…, %s): "$" also matches before a newline',
+    async args => {
+      const code = program(`    if not re.match(r"^[\\w.-]+$", ${args}): abort(400)`)
+      expect(await verdict(code)).toEqual(['9 vulnerability'])
+    },
+  )
 
   it.each(['re.M', 're.MULTILINE', 're.I | re.M', 'FLAGS', 're.X'])(
     'does not trust a compiled pattern with flags %s',
