@@ -297,13 +297,17 @@ export function coverageLedger(input: LedgerInput): CoverageUnit[] {
     const tasks = new Set(finding.supportEvidenceIds.flatMap(id => taskOfEvidence.get(id) ?? []))
     for (const task of tasks) findingsPerTask.set(task, (findingsPerTask.get(task) ?? 0) + 1)
   }
+  // Ids stay unique: a unit re-planned under a new key (endpoints added on resume) is listed by its task key.
+  const ids = new Set<string>()
   const units: CoverageUnit[] = input.tasks
     .filter(task => HUNT_TASK_KINDS.has(task.kind))
     .map(task => {
       const findings = findingsPerTask.get(task.id) ?? 0
       const surface = task.input.surface ?? surfaceOf(task.input.endpointIds ?? [], input.endpoints)
+      const id = task.input.unitId !== undefined && !ids.has(task.input.unitId) ? task.input.unitId : task.key
+      ids.add(id)
       const base = {
-        id: task.input.unitId ?? task.key,
+        id,
         title: task.title,
         ...(task.input.component ? { component: task.input.component } : {}),
         ...(surface ? { surface } : {}),

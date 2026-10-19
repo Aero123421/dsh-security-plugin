@@ -218,6 +218,10 @@ describe('coverageLedger', () => {
         input: { targetPaths: ['src/routes/orders.ts'], focus: ['authz'], endpointIds: [endpoint.id] },
       }),
       task('hypothesis:abc', { kind: 'hunt-hypothesis', input: { targetPaths: [], focus: ['authz'] } }),
+      // Re-planned with an endpoint added on resume: same unit, new task key.
+      task('clean:refresh:0123', {
+        input: { targetPaths: ['src/app.ts'], focus: ['authz'], unitId: 'unit:clean', origin: 'recon' },
+      }),
       task('threat-model', { kind: 'threat-model', role: 'planner' }),
       task('review:x', { kind: 'review', role: 'skeptic' }),
     ]
@@ -264,6 +268,8 @@ describe('coverageLedger', () => {
       title: 'Review 1 endpoint in src/routes/orders.ts',
     })
     expect(byId['hypothesis:abc']?.origin).toBe('recon')
+    expect(byId['clean:refresh:0123']?.status).toBe('covered')
+    expect(new Set(units.map(u => u.id)).size).toBe(units.length)
     expect(byId.unassigned).toMatchObject({
       title: '2 source files not assigned to any review unit',
       paths: ['src/a.go', 'src/b.go'],
