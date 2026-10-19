@@ -184,6 +184,20 @@ describe('phase budgets', () => {
     expect(tiny.review.llmCalls).toBe(3)
   })
 
+  it('keeps the coverage-critic reserve inside the hunt ceiling, at most 20% of it, without touching the review reserve', () => {
+    const none = reserve({ reviews: 10 })
+    expect(none.wave).toEqual(none.hunt)
+    // One Deep pass: the critic (8) and its wave of 8 units (12 each).
+    const deep = reserve({ reviews: 10, critic: 8 + 8 * 12 })
+    expect(deep.hunt).toEqual(none.hunt)
+    expect(deep.review).toEqual(none.review)
+    expect(deep.wave.llmCalls).toBe(none.hunt.llmCalls - 104)
+    expect(deep.wave.tokens).toBeLessThan(none.hunt.tokens)
+    expect(deep.wave.elapsedMs).toBeLessThan(none.hunt.elapsedMs)
+    // Capped at 20% of what the hunt ceiling allows.
+    expect(reserve({ critic: 10_000 }).wave.llmCalls).toBe(896 - Math.floor(896 * 0.2))
+  })
+
   it('stops ordinary requests at the phase ceiling and lets wrap-up requests through up to the scan limits', () => {
     const { budget } = gate({ maxLlmCalls: 10, maxTokens: 10_000 })
     let ceiling = { llmCalls: 2, tokens: 10_000, elapsedMs: 60_000 }

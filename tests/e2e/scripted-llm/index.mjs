@@ -148,11 +148,13 @@ function decide(options, apps) {
   const listed = collectListed(messages)
   const role = /"planner"/.test(system)
     ? 'planner'
-    : /"independent reviewer"/.test(system)
-      ? 'skeptic'
-      : /"attack-chain researcher"/.test(system)
-        ? 'chain'
-        : 'hunter'
+    : /"coverage critic"/.test(system)
+      ? 'critic'
+      : /"independent reviewer"/.test(system)
+        ? 'skeptic'
+        : /"attack-chain researcher"/.test(system)
+          ? 'chain'
+          : 'hunter'
   // First turn: look at the project layout, like a real reviewer, so the
   // answers below come from this project's ground truth only.
   if (apps.length > 1 && listed.size === 0 && tools.has('list_files')) {
@@ -172,7 +174,12 @@ function decide(options, apps) {
   }
   switch (role) {
     case 'planner':
-      return { blocks: [call('submit_threat_model', plannerAnswer(truth))] }
+      return { blocks: [call('submit_review_plan', plannerAnswer(first, truth))] }
+    case 'critic':
+      // The plan already covers every planted issue: the critic finds no gap worth another wave.
+      return {
+        blocks: [call('submit_coverage_review', { done: true, units: [], note: 'Scripted: coverage is adequate.' })],
+      }
     case 'skeptic':
       return { blocks: [call('submit_verdict', skepticAnswer(first, reads, truth))] }
     case 'chain':
@@ -237,16 +244,39 @@ function lineOf(numbered, anchor) {
   return undefined
 }
 
-/** @param {{ findings: any[] }} truth */
-function plannerAnswer(truth) {
-  const ai = truth.findings.filter(f => f.detectableBy.includes('ai')).slice(0, 4)
+/**
+ * Reconnaissance: one coverage unit per file of the answer key (AI-detectable
+ * issues first), up to the limit the task states, so every planted issue sits
+ * in a unit a hunter reads.
+ * @param {string} task @param {{ findings: any[] }} truth
+ */
+function plannerAnswer(task, truth) {
+  const limit = Number(/Plan up to (\d+) coverage units/.exec(task)?.[1] ?? 8)
+  /** @type {Map<string, { categories: Set<string>, ai: boolean, titles: string[] }>} */
+  const files = new Map()
+  for (const finding of truth.findings) {
+    const entry = files.get(finding.path) ?? { categories: new Set(), ai: false, titles: [] }
+    entry.categories.add(finding.category)
+    entry.ai ||= finding.detectableBy.includes('ai')
+    entry.titles.push(finding.title)
+    files.set(finding.path, entry)
+  }
+  const ordered = [...files.entries()].sort((a, b) => Number(b[1].ai) - Number(a[1].ai) || (a[0] < b[0] ? -1 : 1))
   return {
     summary: 'A small web application with user accounts, an API, and an admin area (scripted test model).',
     assets: ['user accounts', 'orders and personal data'],
     actors: ['anonymous visitor', 'logged-in customer', 'administrator'],
     trust_boundaries: ['HTTP API entry points'],
-    priorities: ai.map(f => ({ target: f.path, reason: f.title })),
-    hypotheses: ai.map(f => ({ title: f.title, category: f.category, target_paths: [f.path], rationale: f.notes })),
+    components: [{ name: 'application', paths: ordered.map(([path]) => path).slice(0, 10) }],
+    units: ordered.slice(0, limit).map(([path, entry]) => ({
+      title: `Review ${path}`,
+      component: 'application',
+      focus: [...entry.categories].slice(0, 6),
+      target_paths: [path],
+      priority: entry.ai ? 'high' : 'medium',
+      rationale: entry.titles.slice(0, 3).join('; ').slice(0, 700) || 'Security-relevant code.',
+    })),
+    excluded: [],
   }
 }
 
@@ -310,7 +340,13 @@ function hunterAnswer(task, reads, truth) {
     const negative = truth.negatives.find(n => n.path === path && Math.abs(n.line - Number(line)) <= 3)
     assessments.push({ id, verdict: negative ? 'false_positive' : 'true_positive', reason: 'Scripted assessment.' })
   }
-  return { findings, signal_assessments: assessments, reviewed_paths: [...reads.keys()], notes: 'scripted' }
+  return {
+    findings,
+    signal_assessments: assessments,
+    coverage: 'complete',
+    reviewed_paths: [...reads.keys()],
+    notes: 'scripted',
+  }
 }
 
 /** @param {string} task @param {Map<string, string>} reads @param {{ findings: any[], negatives: any[] }} truth */

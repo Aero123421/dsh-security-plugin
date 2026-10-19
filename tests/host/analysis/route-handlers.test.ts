@@ -127,7 +127,7 @@ describe.each(MODES)('handlers imported from controller modules (%s mode)', (_mo
       snapshot,
       endpoints,
       signals: [],
-      hypotheses: [],
+      units: [],
       includeTests: false,
       maxTasks: 50,
     })

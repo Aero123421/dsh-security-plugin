@@ -1,25 +1,28 @@
 /**
- * Deterministic task planning: turns the attack surface (endpoints), rule
- * hits, sensitive files, planner hypotheses, and a bounded source sweep into
- * ranked AI review tasks with stable keys, so re-planning after a resume yields the
- * same tasks.
+ * Hunt task planning: turns the review plan (coverage units from
+ * reconnaissance) into hunter tasks, then fills what the plan left out from
+ * the deterministic analysis, in any language: every rule hit still gets a
+ * verdict, endpoints in no unit get endpoint tasks, and in-scope source files
+ * in no unit get low-priority sweeps as far as the task and budget room
+ * allows. Keys are stable, so re-planning after a resume yields the same
+ * tasks.
  */
 
 import { createHash } from 'node:crypto'
 import {
   type FindingCategory,
+  type RoleName,
   type ScanMode,
   type Severity,
   severityAtLeast,
   severityRank,
 } from '../../shared/domain.ts'
-import { resolveTargetPath, type TargetIndex } from '../agents/tools/paths.ts'
+import type { TargetIndex } from '../agents/tools/paths.ts'
 import { MUTATING_METHODS } from '../analysis/routes/signals.ts'
 import { identifierWords } from '../analysis/sast/helpers.ts'
 import { SAST_RULES } from '../analysis/sast/index.ts'
 import type { Endpoint, Signal, Snapshot, SnapshotFile } from '../analysis/types.ts'
-import type { FindingRecord, TaskInput, TaskKind } from '../core/model.ts'
-import type { RoleName } from '../../shared/domain.ts'
+import type { FindingRecord, PlanUnitRecord, TaskInput, TaskKind } from '../core/model.ts'
 import { signalFingerprint } from './findings.ts'
 import { hasVisibleEvidence } from './privacy.ts'
 
@@ -32,20 +35,19 @@ export interface PlannedTask {
   readonly input: TaskInput
 }
 
-export interface Hypothesis {
-  readonly title: string
-  readonly category: FindingCategory
-  readonly targetPaths: readonly string[]
-  readonly rationale: string
-}
-
 export interface HuntPlanInput {
   readonly mode: ScanMode
   readonly snapshot: Snapshot
   readonly endpoints: readonly Endpoint[]
   readonly signals: readonly Signal[]
-  readonly hypotheses: readonly Hypothesis[]
+  /** Validated coverage units of the review plan, most important first (none without reconnaissance). */
+  readonly units: readonly PlanUnitRecord[]
+  /** Files and directories reconnaissance left out of the sweep (vendored, generated, docs, fixtures). */
+  readonly excluded?: readonly string[]
+  /** Files other tasks already target (critic units of a resumed scan); the sweep leaves them out. */
+  readonly targeted?: ReadonlySet<string>
   readonly includeTests: boolean
+  /** Hunt tasks this plan may hold (task slots kept for later critic waves already subtracted). */
   readonly maxTasks: number
   /**
    * Hunt tasks the budget is expected to pay for. Low-priority sweeps only
@@ -55,11 +57,6 @@ export interface HuntPlanInput {
    */
   readonly budgetTasks?: number
   /**
-   * The planner's priority targets (files or `METHOD /route` entry points),
-   * most important first. Tasks covering one rank higher.
-   */
-  readonly priorities?: readonly string[]
-  /**
    * Paths that must never be shown to a model. No task is planned for work
    * whose only material is in such files, and they are left out of target
    * lists (a worker cannot read them anyway).
@@ -67,12 +64,38 @@ export interface HuntPlanInput {
   readonly isWithheld?: (path: string) => boolean
 }
 
+export interface HuntPlan {
+  /** Tasks to run, best first. */
+  readonly tasks: PlannedTask[]
+  /** Tasks beyond `maxTasks`: recorded as not run (`task-limit`) so the coverage ledger shows them. */
+  readonly cut: PlannedTask[]
+  /** Planned work that does not run: cut tasks plus sweep groups beyond the room. */
+  readonly overflow: number
+  /** In-scope source files no task targets after the sweep, best first. */
+  readonly unassigned: readonly string[]
+  /** What limited the sweep: the task slots or the hunt budget. */
+  readonly unassignedReason: 'task-limit' | 'budget'
+}
+
 const ENDPOINTS_PER_TASK = 8
 const SIGNALS_PER_TASK = 12
-const MAX_SENSITIVE_FILE_TASKS = 6
+/** Endpoints a unit task attaches from its files; the rest get endpoint tasks of their own. */
+const ENDPOINTS_PER_UNIT = 20
+/** Sinks (steering, not verdicts) shown in a unit task. */
+const SINKS_PER_UNIT = 6
 const SWEEP_FILES_PER_TASK = 4
 /** Untrusted input reaching an interpreter, the network, the file system or HTML: worth checking in any file. */
 const INPUT_FOCUS: readonly FindingCategory[] = ['injection', 'command-execution', 'ssrf', 'path-traversal', 'xss']
+/** What a sweep looks for. */
+export const SWEEP_FOCUS: readonly FindingCategory[] = [
+  'authn',
+  'authz',
+  ...INPUT_FOCUS,
+  'business-logic',
+  'crypto',
+  'misconfiguration',
+  'data-exposure',
+]
 /** Words for code that enforces security: authentication, authorization, secrets, crypto, uploads. */
 const MECHANISM_WORDS: ReadonlySet<string> = new Set([
   'auth',
@@ -156,7 +179,8 @@ const DOMAIN_WORDS: ReadonlySet<string> = new Set([
 /** Directories of data-layer and routing files. */
 const LAYER_DIR =
   /(?:^|\/)(?:repositories|repository|repos|services|service|controllers|controller|models|model|entities|entity|dtos?|schemas|routes|handlers)\//
-const SOURCE_LANGUAGES = new Set([
+/** Languages whose files count as source code for units, sweeps and the unassigned-file count. */
+export const SOURCE_LANGUAGES: ReadonlySet<string> = new Set([
   'javascript',
   'typescript',
   'python',
@@ -169,8 +193,18 @@ const SOURCE_LANGUAGES = new Set([
   'rust',
 ])
 
-/** Hunt tasks for one scan, best first, cut at `maxTasks`. */
-export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTask[]; readonly overflow: number } {
+/** Base priority of a unit task by the planner's priority (Deep/Research; Quick ranks units below triage). */
+const UNIT_PRIORITY = { critical: 90, high: 80, medium: 70, low: 55 } as const
+
+/**
+ * Hunt tasks for one scan, best first, cut at `maxTasks`. Quick puts rule-hit
+ * triage first, then the plan's units, then endpoints no unit covers; Deep
+ * and Research rank units by the planner's priority, and endpoint and
+ * rule-hit tasks for what the units leave out by risk. Sweeps of unassigned
+ * source files are appended in every mode, only within the room left by
+ * `maxTasks` and `budgetTasks`.
+ */
+export function planHuntTasks(input: HuntPlanInput): HuntPlan {
   const withheld = input.isWithheld ?? (() => false)
   const visible = (path: string) => !withheld(path)
   const inScope = (path: string) =>
@@ -178,48 +212,124 @@ export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTa
   const steering = input.signals.filter(
     s => (s.kind === 'vulnerability' || s.kind === 'sink') && inScope(s.location.path),
   )
-  const endpoints = input.endpoints.filter(e => visible(e.declaredAt.path))
-  const candidates: PlannedTask[] =
-    input.mode === 'quick'
-      ? [
-          ...planTriage(steering),
-          ...planQuickEndpoints(
-            endpoints.filter(e => inScope(endpointPath(e))),
-            steering,
-          ),
-        ]
-      : [
-          ...planEndpoints(
-            endpoints.filter(e => inScope(endpointPath(e))),
-            steering,
-          ),
-          ...planSignals(steering, endpoints),
-          ...(input.hypotheses.length > 0
-            ? planHypotheses(
-                resolveHypotheses(input.hypotheses, targetIndex(input.snapshot, inScope), visible, inScope),
-                steering,
-              )
-            : []),
-        ]
-  if (input.mode !== 'quick') {
-    const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
-    candidates.push(...planSensitiveFiles(input.snapshot, targeted, inScope))
-    boostPriorities(candidates, input.priorities ?? [], input.snapshot, endpoints, inScope)
+  const endpoints = input.endpoints.filter(e => visible(e.declaredAt.path) && inScope(endpointPath(e)))
+  const claimed = new Set<Signal>()
+  const quick = input.mode === 'quick'
+  const candidates: PlannedTask[] = []
+  if (quick) {
+    // Quick verifies the riskiest rule hits first, whatever the plan says.
+    const triage = steering.filter(triageWorthy)
+    for (const signal of triage) claimed.add(signal)
+    candidates.push(...planTriage(triage))
   }
-  // Quick stays within its configured task/request budgets: triage first,
-  // then only the riskiest endpoint groups that fit. No hypotheses or sweep.
+  const units = unitTasks(input.units, input.mode, steering, endpoints, claimed)
+  candidates.push(...units.tasks)
+  const remaining = endpoints.filter(e => !units.endpoints.has(e.id))
+  const endpointTasks = planEndpoints(remaining, steering, claimed)
+  candidates.push(...(quick ? belowUnits(endpointTasks, remaining) : endpointTasks))
+  if (!quick) {
+    // Every reportable hit no unit or endpoint task took gets a verdict; sinks steer where no task looks yet.
+    const covered = new Set(candidates.flatMap(task => task.input.targetPaths))
+    candidates.push(
+      ...planSignals(
+        steering.filter(s => (s.kind === 'vulnerability' ? !claimed.has(s) : !covered.has(s.location.path))),
+      ),
+    )
+  }
   const ranked = candidates.sort((a, b) => b.priority - a.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-  const tasks = ranked.slice(0, input.maxTasks)
-  let overflow = Math.max(0, ranked.length - input.maxTasks)
-  if (input.mode !== 'quick') {
-    const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
-    const room = Math.min(input.maxTasks, Math.max(0, Math.floor(input.budgetTasks ?? input.maxTasks)))
-    const sweep = planSweep(input.snapshot, targeted, inScope, Math.max(0, room - tasks.length))
-    // Append only: sweep work must never displace an existing task family.
-    tasks.push(...sweep.tasks)
-    overflow += sweep.overflow
+  const slots = Math.max(0, Math.floor(input.maxTasks))
+  const tasks = ranked.slice(0, slots)
+  const cut = ranked.slice(slots)
+  const targeted = new Set([...(input.targeted ?? []), ...ranked.flatMap(task => task.input.targetPaths)])
+  const budgetRoom = Math.max(0, Math.floor(input.budgetTasks ?? slots))
+  const room = Math.min(slots, budgetRoom)
+  const excluded = input.excluded ?? []
+  const files = sweepCandidates(input.snapshot, path => inScope(path) && !isExcludedPath(path, excluded), targeted)
+  const sweep = planSweep(files, Math.max(0, room - tasks.length))
+  // Append only: sweep work must never displace an existing task family.
+  tasks.push(...sweep.tasks)
+  return {
+    tasks,
+    cut,
+    overflow: cut.length + sweep.overflow,
+    unassigned: sweep.unassigned,
+    unassignedReason: budgetRoom < slots ? 'budget' : 'task-limit',
   }
-  return { tasks, overflow }
+}
+
+/**
+ * One `hunt-unit` task per unit, ranked by the unit's priority, then its
+ * place in the plan. Each unit takes the reportable rule hits in its files
+ * that no earlier task claimed (up to 12, so the hunter gives them
+ * verdicts), up to 6 sinks there as steering, and the endpoints whose handler
+ * or route file it targets (up to 20). Mutates `claimed`.
+ */
+export function unitTasks(
+  units: readonly PlanUnitRecord[],
+  mode: ScanMode,
+  signals: readonly Signal[],
+  endpoints: readonly Endpoint[],
+  claimed: Set<Signal>,
+): { readonly tasks: PlannedTask[]; readonly endpoints: ReadonlySet<string> } {
+  const taken = new Set<string>()
+  const order = units
+    .map((unit, index) => ({ unit, index }))
+    .sort((a, b) => severityRank(a.unit.priority) - severityRank(b.unit.priority) || a.index - b.index)
+  const tasks = order.map(({ unit }, rank): PlannedTask => {
+    const files = new Set(unit.targetPaths)
+    const reportable = sortSignals(
+      signals.filter(s => s.kind === 'vulnerability' && files.has(s.location.path) && !claimed.has(s)),
+    ).slice(0, SIGNALS_PER_TASK)
+    for (const signal of reportable) claimed.add(signal)
+    const sinks = sortSignals(
+      signals.filter(s => s.kind === 'sink' && files.has(s.location.path) && !claimed.has(s)),
+    ).slice(0, SINKS_PER_UNIT)
+    const own = endpoints
+      .filter(e => !taken.has(e.id) && (files.has(endpointPath(e)) || files.has(e.declaredAt.path)))
+      .slice(0, ENDPOINTS_PER_UNIT)
+    for (const endpoint of own) taken.add(endpoint.id)
+    const attached = [...reportable, ...sinks]
+    const base = mode === 'quick' ? 48 : UNIT_PRIORITY[unit.priority]
+    return {
+      key: unit.id,
+      kind: 'hunt-unit',
+      role: 'hunter',
+      title: unit.title,
+      priority: base - rank / (order.length + 1),
+      input: {
+        targetPaths: unit.targetPaths,
+        focus: unique<FindingCategory>([...unit.focus, ...categoriesOf(reportable)]),
+        unitId: unit.id,
+        origin: unit.origin,
+        ...(unit.component ? { component: unit.component } : {}),
+        ...(unit.surface ? { surface: unit.surface } : {}),
+        rationale: unit.rationale,
+        ...(unit.hypothesis ? { hypothesis: unit.hypothesis } : {}),
+        ...(own.length > 0 ? { endpointIds: own.map(e => e.id) } : {}),
+        ...(attached.length > 0 ? { signalFingerprints: attached.map(signalFingerprint) } : {}),
+      },
+    }
+  })
+  return { tasks, endpoints: taken }
+}
+
+/** Whether `path` is one of `excluded` or lies below one of them. */
+export function isExcludedPath(path: string, excluded: readonly string[]): boolean {
+  return excluded.some(entry => path === entry || path.startsWith(`${entry}/`))
+}
+
+/** In-scope, hand-written source files nobody targets yet, best first. */
+export function sweepCandidates(
+  snapshot: Snapshot,
+  inScope: (path: string) => boolean,
+  targeted: ReadonlySet<string>,
+): SnapshotFile[] {
+  return (
+    [...snapshot.files.values()]
+      .filter(f => SOURCE_LANGUAGES.has(f.language) && !f.isGenerated && inScope(f.path) && !targeted.has(f.path))
+      // Even with includeTests, spare sweep capacity goes to production first.
+      .sort(preferForReview)
+  )
 }
 
 /** Findings that deserve an independent review in this mode, most severe first. */
@@ -258,7 +368,7 @@ export function planReviewTasks(
 }
 
 // ---------------------------------------------------------------------------
-// Task families
+// Task families for what the plan leaves out
 // ---------------------------------------------------------------------------
 
 /** Base severity of each built-in rule, to tell the sinks of high/critical rules apart. */
@@ -277,8 +387,7 @@ function triageWorthy(signal: Signal): boolean {
 }
 
 function planTriage(signals: readonly Signal[]): PlannedTask[] {
-  const relevant = signals.filter(triageWorthy)
-  return groupByPath(relevant, s => s.location.path).flatMap(([path, group]) =>
+  return groupByPath(signals, s => s.location.path).flatMap(([path, group]) =>
     chunk(sortSignals(group), SIGNALS_PER_TASK).map((part, index) => ({
       key: `triage:${path}#${index}`,
       kind: 'triage-signals' as const,
@@ -289,82 +398,84 @@ function planTriage(signals: readonly Signal[]): PlannedTask[] {
         targetPaths: [path],
         signalFingerprints: part.map(signalFingerprint),
         focus: categoriesOf(part),
+        origin: 'gap' as const,
       },
     })),
   )
 }
 
-function planQuickEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[]): PlannedTask[] {
+/** Quick: endpoint tasks below the plan's units, unguarded mutating endpoints first. */
+function belowUnits(tasks: readonly PlannedTask[], endpoints: readonly Endpoint[]): PlannedTask[] {
   const risky = new Set(
     endpoints.filter(e => e.authHints.length === 0 && MUTATING_METHODS.has(e.method)).map(e => e.id),
   )
   const riskCount = (task: PlannedTask) => task.input.endpointIds?.filter(id => risky.has(id)).length ?? 0
-  const tasks = planEndpoints(endpoints, signals, false).sort(
+  const sorted = [...tasks].sort(
     (a, b) => riskCount(b) - riskCount(a) || b.priority - a.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
   )
-  // Keep every endpoint below triage (priority >= 50), including in the worker queue.
-  return tasks.map((task, index) => ({ ...task, priority: 49 - index / (tasks.length + 1) }))
+  // Below triage (>= 50) and units (47-48), also in the worker queue.
+  return sorted.map((task, index) => ({ ...task, priority: 46 - index / (sorted.length + 1) }))
 }
 
-function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[], spillSignals = true): PlannedTask[] {
+/**
+ * Endpoints grouped by handler file, 8 per task. The first task of a file
+ * takes that file's rule hits no other task claimed (up to 12; mutates
+ * `claimed` for the reportable ones).
+ */
+function planEndpoints(
+  endpoints: readonly Endpoint[],
+  signals: readonly Signal[],
+  claimed: Set<Signal>,
+): PlannedTask[] {
   return groupByPath(endpoints, endpointPath).flatMap(([path, group]) => {
     const sorted = [...group].sort((a, b) => a.declaredAt.startLine - b.declaredAt.startLine)
     const fileSignals = signals.filter(s => s.location.path === path)
-    const attached = new Set(sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK))
-    // Rule hits beyond what the first endpoint task carries get signal tasks of their own, so none goes unassessed
-    // (Quick triages rule hits separately).
-    const spilled = spillSignals
-      ? sortSignals(fileSignals.filter(s => s.kind === 'vulnerability' && !attached.has(s)))
-      : []
-    const spill = chunk(spilled, SIGNALS_PER_TASK).map((part, index) => ({
-      key: `signals:${path}#${index}`,
-      kind: 'hunt-signals' as const,
-      role: 'hunter' as const,
-      title: `Trace ${part.length} more risky operation${part.length === 1 ? '' : 's'} in ${path}`,
-      priority: 40 + weight(part),
-      input: { targetPaths: [path], signalFingerprints: part.map(signalFingerprint), focus: categoriesOf(part) },
-    }))
-    return [
-      ...spill,
-      ...chunk(sorted, ENDPOINTS_PER_TASK).map((part, index) => {
-        const unguarded = part.filter(e => e.authHints.length === 0).length
-        const mutating = part.filter(e => MUTATING_METHODS.has(e.method)).length
-        const params = part.reduce((n, e) => n + e.params.length, 0)
-        // Groups are keyed by the handler file; also start from the file that declares (mounts) the route.
-        const declarationPaths = part.flatMap(e => (e.declaredAt.path !== path ? [e.declaredAt.path] : []))
-        return {
-          key: `endpoints:${path}#${index}`,
-          kind: 'hunt-endpoints' as const,
-          role: 'hunter' as const,
-          title: `Review ${part.length} endpoint${part.length === 1 ? '' : 's'} in ${path}`,
-          priority: 50 + unguarded * 4 + mutating * 3 + Math.min(params, 6) * 2 + weight(fileSignals),
-          input: {
-            targetPaths: unique([path, ...declarationPaths]),
-            endpointIds: part.map(e => e.id),
-            ...(index === 0 && fileSignals.length > 0
-              ? { signalFingerprints: sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK).map(signalFingerprint) }
-              : {}),
-            // Rule hits in the route file count too, not only those in the handler file.
-            focus: unique<FindingCategory>([
-              'authz',
-              'authn',
-              ...INPUT_FOCUS,
-              'business-logic',
-              ...categoriesOf(
-                signals.filter(s => s.location.path === path || declarationPaths.includes(s.location.path)),
-              ),
-            ]),
-          },
-        }
-      }),
-    ]
+    const attached = sortSignals(fileSignals.filter(s => !claimed.has(s))).slice(0, SIGNALS_PER_TASK)
+    for (const signal of attached) if (signal.kind === 'vulnerability') claimed.add(signal)
+    return chunk(sorted, ENDPOINTS_PER_TASK).map((part, index) => {
+      const unguarded = part.filter(e => e.authHints.length === 0).length
+      const mutating = part.filter(e => MUTATING_METHODS.has(e.method)).length
+      const params = part.reduce((n, e) => n + e.params.length, 0)
+      // Groups are keyed by the handler file; also start from the file that declares (mounts) the route.
+      const declarationPaths = part.flatMap(e => (e.declaredAt.path !== path ? [e.declaredAt.path] : []))
+      return {
+        key: `endpoints:${path}#${index}`,
+        kind: 'hunt-endpoints' as const,
+        role: 'hunter' as const,
+        title: `Review ${part.length} endpoint${part.length === 1 ? '' : 's'} in ${path}`,
+        priority: 50 + unguarded * 4 + mutating * 3 + Math.min(params, 6) * 2 + weight(fileSignals),
+        input: {
+          targetPaths: unique([path, ...declarationPaths]),
+          endpointIds: part.map(e => e.id),
+          ...(index === 0 && attached.length > 0 ? { signalFingerprints: attached.map(signalFingerprint) } : {}),
+          // Rule hits in the route file count too, not only those in the handler file.
+          focus: unique<FindingCategory>([
+            'authz',
+            'authn',
+            ...INPUT_FOCUS,
+            'business-logic',
+            ...categoriesOf(
+              signals.filter(s => s.location.path === path || declarationPaths.includes(s.location.path)),
+            ),
+          ]),
+          origin: 'gap' as const,
+          surface: surfaceOf(part),
+        },
+      }
+    })
   })
 }
 
-function planSignals(signals: readonly Signal[], endpoints: readonly Endpoint[]): PlannedTask[] {
-  const endpointFiles = new Set(endpoints.map(endpointPath))
-  const remaining = signals.filter(s => !endpointFiles.has(s.location.path))
-  return groupByPath(remaining, s => s.location.path).flatMap(([path, group]) =>
+/** `GET /a, POST /b (+3 more)` for a group of endpoints. */
+function surfaceOf(endpoints: readonly Endpoint[]): string {
+  const shown = endpoints.slice(0, 3).map(e => `${e.method} ${e.route}`)
+  const more = endpoints.length - shown.length
+  const text = `${shown.join(', ')}${more > 0 ? ` (+${more} more)` : ''}`
+  return text.length <= 200 ? text : `${text.slice(0, 199)}…`
+}
+
+function planSignals(signals: readonly Signal[]): PlannedTask[] {
+  return groupByPath(signals, s => s.location.path).flatMap(([path, group]) =>
     chunk(sortSignals(group), SIGNALS_PER_TASK).map((part, index) => ({
       key: `signals:${path}#${index}`,
       kind: 'hunt-signals' as const,
@@ -375,94 +486,10 @@ function planSignals(signals: readonly Signal[], endpoints: readonly Endpoint[])
         targetPaths: [path],
         signalFingerprints: part.map(signalFingerprint),
         focus: categoriesOf(part),
+        origin: 'gap' as const,
       },
     })),
   )
-}
-
-/** A hypothesis with its targets resolved to in-scope snapshot files, and the paths its task key is built from. */
-interface ResolvedHypothesis {
-  readonly hypothesis: Hypothesis
-  readonly keyPaths: readonly string[]
-  readonly targets: readonly string[]
-}
-
-/**
- * Map planner targets onto snapshot files (`resolveTargetPath`). A hypothesis
- * whose targets resolve only to withheld or out-of-scope files is dropped
- * (no task targets them); one whose targets cannot be resolved at all is
- * kept without targets, so its hunter starts by searching instead of the
- * task being skipped as stale.
- */
-function resolveHypotheses(
-  hypotheses: readonly Hypothesis[],
-  index: TargetIndex,
-  visible: (path: string) => boolean,
-  inScope: (path: string) => boolean,
-): ResolvedHypothesis[] {
-  return hypotheses.flatMap(hypothesis => {
-    const resolved = unique(hypothesis.targetPaths.flatMap(target => resolveTargetPath(target, index).paths))
-    const targets = resolved.filter(inScope)
-    if (resolved.length > 0 && targets.length === 0) return []
-    // The key keeps its original basis so tasks of a resumed scan keep their identity.
-    return [{ hypothesis, keyPaths: hypothesis.targetPaths.filter(visible), targets }]
-  })
-}
-
-function planHypotheses(hypotheses: readonly ResolvedHypothesis[], signals: readonly Signal[]): PlannedTask[] {
-  return hypotheses.map(({ hypothesis: h, keyPaths, targets }, index) => {
-    const targetPaths = unique(targets).slice(0, 6)
-    // Rule hits in the hypothesis's files are part of the same question: the hunter gives them verdicts too.
-    const overlapping = sortSignals(
-      signals.filter(s => s.kind === 'vulnerability' && targetPaths.includes(s.location.path)),
-    ).slice(0, SIGNALS_PER_TASK)
-    return {
-      key: `hypothesis:${shortHash(`${h.title}\u0000${keyPaths.join('\u0000')}`)}`,
-      kind: 'hunt-hypothesis' as const,
-      role: 'hunter' as const,
-      title: h.title,
-      // Planner order expresses its own ranking.
-      priority: 70 - Math.min(index, 20),
-      input: {
-        targetPaths,
-        ...(overlapping.length > 0 ? { signalFingerprints: overlapping.map(signalFingerprint) } : {}),
-        focus: [h.category],
-        hypothesis: `${h.title}\n${h.rationale}`,
-      },
-    }
-  })
-}
-
-/** Priority added to an endpoint, signal or file task that covers one of the planner's priorities. */
-const PLANNER_PRIORITY_BOOST = 6
-
-/**
- * Rank up tasks covering what the planner named as deserving the closest
- * review: a priority resolving to a file the task targets, or naming the
- * route of one of its endpoints (`POST /orders/:id`). Hypothesis tasks
- * already carry the planner's ranking. Mutates `tasks`.
- */
-function boostPriorities(
-  tasks: PlannedTask[],
-  priorities: readonly string[],
-  snapshot: Snapshot,
-  endpoints: readonly Endpoint[],
-  inScope: (path: string) => boolean,
-): void {
-  if (priorities.length === 0) return
-  const index = targetIndex(snapshot, inScope)
-  const files = new Set(priorities.flatMap(target => resolveTargetPath(target, index, 50).paths))
-  const routes = new Set(
-    endpoints
-      .filter(e => priorities.some(target => target.includes(`${e.method} ${e.route}`) || target.trim() === e.route))
-      .map(e => e.id),
-  )
-  for (const [i, task] of tasks.entries()) {
-    if (task.kind === 'hunt-hypothesis') continue
-    const covers =
-      task.input.targetPaths.some(path => files.has(path)) || (task.input.endpointIds ?? []).some(id => routes.has(id))
-    if (covers) tasks[i] = { ...task, priority: task.priority + PLANNER_PRIORITY_BOOST }
-  }
 }
 
 /**
@@ -491,53 +518,20 @@ export function targetIndex(
   }
 }
 
-/** Production files first, then sensitive names, then larger files. */
-function preferForReview(a: SnapshotFile, b: SnapshotFile): number {
+/** Production files first, then names that say what the code enforces (most telling first), then larger files. */
+export function preferForReview(a: SnapshotFile, b: SnapshotFile): number {
   return (
     Number(a.isTest) - Number(b.isTest) ||
-    Number(sensitivity(b.path) > 0) - Number(sensitivity(a.path) > 0) ||
+    sensitivity(b.path) - sensitivity(a.path) ||
     b.size - a.size ||
     (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
   )
 }
 
-function planSensitiveFiles(
-  snapshot: Snapshot,
-  targeted: ReadonlySet<string>,
-  inScope: (path: string) => boolean,
-): PlannedTask[] {
-  const files = [...snapshot.files.values()].filter(
-    f =>
-      SOURCE_LANGUAGES.has(f.language) &&
-      !f.isGenerated &&
-      inScope(f.path) &&
-      !targeted.has(f.path) &&
-      sensitivity(f.path) > 0,
-  )
-  // Names that say what the code enforces (`requireRole`, `tenantScope`, `tokens`, `upload`) before size.
-  return files
-    .sort((a, b) => sensitivity(b.path) - sensitivity(a.path) || b.size - a.size || (a.path < b.path ? -1 : 1))
-    .slice(0, MAX_SENSITIVE_FILE_TASKS)
-    .map(f => ({
-      key: `file:${f.path}`,
-      kind: 'hunt-file' as const,
-      role: 'hunter' as const,
-      title: `Review security-sensitive logic in ${f.path}`,
-      priority: 45,
-      input: { targetPaths: [f.path], focus: ['authn', 'authz', 'business-logic', 'crypto', ...INPUT_FOCUS] },
-    }))
-}
-
 function planSweep(
-  snapshot: Snapshot,
-  targeted: ReadonlySet<string>,
-  inScope: (path: string) => boolean,
+  files: readonly SnapshotFile[],
   remaining: number,
-): { tasks: PlannedTask[]; overflow: number } {
-  const files = [...snapshot.files.values()]
-    .filter(f => SOURCE_LANGUAGES.has(f.language) && !f.isGenerated && inScope(f.path) && !targeted.has(f.path))
-    // Even with includeTests, spare sweep capacity goes to production first.
-    .sort(preferForReview)
+): { tasks: PlannedTask[]; overflow: number; unassigned: string[] } {
   const groups = chunk(files, SWEEP_FILES_PER_TASK)
   return {
     tasks: groups.slice(0, remaining).map((part, index) => ({
@@ -547,12 +541,10 @@ function planSweep(
       title: `Sweep ${part.length} otherwise-untargeted source file${part.length === 1 ? '' : 's'}`,
       // Preserve file ranking in the persisted worker queue too; all sweeps stay below other hunt families.
       priority: 10 - index / (groups.length + 1),
-      input: {
-        targetPaths: part.map(f => f.path),
-        focus: ['authn', 'authz', ...INPUT_FOCUS, 'business-logic', 'crypto', 'misconfiguration', 'data-exposure'],
-      },
+      input: { targetPaths: part.map(f => f.path), focus: SWEEP_FOCUS, origin: 'gap' },
     })),
     overflow: Math.max(0, groups.length - remaining),
+    unassigned: groups.slice(remaining).flatMap(part => part.map(f => f.path)),
   }
 }
 
@@ -622,6 +614,6 @@ function unique<T>(items: readonly T[]): T[] {
   return [...new Set(items)]
 }
 
-function shortHash(text: string): string {
+export function shortHash(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16)
 }

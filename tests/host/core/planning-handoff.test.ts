@@ -15,7 +15,7 @@ function plan(files: Record<string, string>, overrides: Partial<HuntPlanInput> =
     snapshot: snapshotOf(files),
     endpoints: [],
     signals: [],
-    hypotheses: [],
+    units: [],
     includeTests: false,
     maxTasks: 100,
     ...overrides,
@@ -23,17 +23,14 @@ function plan(files: Record<string, string>, overrides: Partial<HuntPlanInput> =
 }
 
 describe('task focus', () => {
-  it('asks sweeps and sensitive-file reviews to look for injection, command, SSRF, path and XSS flaws', () => {
+  it('asks sweeps to look for injection, command, SSRF, path and XSS flaws', () => {
     const { tasks } = plan({
       'src/services/report.service.ts': 'export function build(name) { return exec("render " + name) }\n',
       'src/middleware/requireRole.ts': 'export const requireRole = role => (req, res, next) => next()\n',
     })
     const sweep = tasks.find(t => t.key.startsWith('sweep:'))
-    const sensitive = tasks.find(t => t.key === 'file:src/middleware/requireRole.ts')
-    expect(sweep?.input.targetPaths).toEqual(['src/services/report.service.ts'])
-    for (const task of [sweep, sensitive]) {
-      expect(task?.input.focus).toEqual(expect.arrayContaining(['authn', 'authz', ...INPUT_FLAWS]))
-    }
+    expect(sweep?.input.targetPaths).toEqual(['src/middleware/requireRole.ts', 'src/services/report.service.ts'])
+    expect(sweep?.input.focus).toEqual(expect.arrayContaining(['authn', 'authz', ...INPUT_FLAWS]))
   })
 
   it('always covers input flaws for endpoints, plus the categories of rule hits in the route file', () => {
@@ -106,15 +103,17 @@ describe('Quick triage', () => {
         ],
       },
     )
-    expect(tasks.map(t => t.key).sort()).toEqual([
-      'triage:src/jobs/thumbnail.ts#0',
-      'triage:src/repositories/report.repository.ts#0',
-    ])
+    expect(
+      tasks
+        .filter(t => !t.key.startsWith('sweep:'))
+        .map(t => t.key)
+        .sort(),
+    ).toEqual(['triage:src/jobs/thumbnail.ts#0', 'triage:src/repositories/report.repository.ts#0'])
   })
 })
 
-describe('sensitive-file reviews', () => {
-  it('pick the files whose names say what they enforce before large CRUD and utility files', () => {
+describe('source sweeps', () => {
+  it('take the files whose names say what they enforce before large CRUD and utility files', () => {
     const big = 'x\n'.repeat(2000)
     const { tasks } = plan({
       'src/middleware/rateLimit.ts': big,
@@ -128,14 +127,14 @@ describe('sensitive-file reviews', () => {
       'src/middleware/upload.ts': 'x\n',
       'src/config/index.ts': 'x\n',
     })
-    const keys = tasks.filter(t => t.key.startsWith('file:')).map(t => t.key)
-    expect(keys.sort()).toEqual([
-      'file:src/config/index.ts',
-      'file:src/middleware/requireRole.ts',
-      'file:src/middleware/tenantScope.ts',
-      'file:src/middleware/upload.ts',
-      'file:src/utils/crypto.ts',
-      'file:src/utils/tokens.ts',
+    const swept = tasks.filter(t => t.key.startsWith('sweep:')).flatMap(t => t.input.targetPaths)
+    expect(swept.slice(0, 6).sort()).toEqual([
+      'src/config/index.ts',
+      'src/middleware/requireRole.ts',
+      'src/middleware/tenantScope.ts',
+      'src/middleware/upload.ts',
+      'src/utils/crypto.ts',
+      'src/utils/tokens.ts',
     ])
   })
 })

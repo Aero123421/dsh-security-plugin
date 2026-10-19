@@ -32,6 +32,10 @@ export const CALLS_PER_REVIEW = 6
 export const CALLS_PER_HUNT = 12
 /** Model requests the chain run is expected to need. */
 export const CALLS_PER_CHAIN = 12
+/** Model requests one coverage-critic run is expected to need. */
+export const CALLS_PER_CRITIC = 8
+/** Largest share of the hunt ceiling's calls kept for coverage-critic passes and their waves. */
+const CRITIC_SHARE = 0.2
 /** Largest share of each budget dimension kept for the review phase. */
 export const REVIEW_SHARE = { quick: 0, deep: 0.3, research: 0.35 } as const
 /** Largest share kept for the chain run (Research). */
@@ -181,6 +185,12 @@ export interface ReserveInput {
   readonly workers: number
   /** Observed budget tokens per model request; 0 or less uses the budget's own ratio. */
   readonly tokensPerCall: number
+  /**
+   * Requests the coverage-critic passes not yet run are expected to need (each
+   * pass: the critic plus its wave of units). Kept back from the `wave`
+   * ceiling, at most 20% of the hunt ceiling's calls. Default 0.
+   */
+  readonly critic?: number
 }
 
 /**
@@ -189,9 +199,14 @@ export interface ReserveInput {
  * at most {@link REVIEW_SHARE} of the budget; the chain reserve is at most
  * 5%; the wrap-up reserve is two requests per worker, at most 5% (and 3% of
  * the time). Tokens and time are reserved in proportion to the calls.
+ *
+ * `wave` is the hunt ceiling less the critic reserve: hunt waves stop there,
+ * so the coverage critic and its units can still run within the hunt
+ * ceiling; once no critic pass is left, `wave` equals `hunt`.
  */
 export function phaseCeilings(input: ReserveInput): {
   readonly hunt: BudgetCeiling
+  readonly wave: BudgetCeiling
   readonly review: BudgetCeiling
   readonly chain: BudgetCeiling
 } {
@@ -213,8 +228,14 @@ export function phaseCeilings(input: ReserveInput): {
     tokens: limits.maxTokens - tokensFor(reserved),
     elapsedMs: maxMs - timeReserved,
   })
+  const huntReserved = review + chain + wrap
+  const critic = Math.min(
+    Math.max(0, Math.floor(input.critic ?? 0)),
+    Math.floor(Math.max(0, maxCalls - huntReserved) * CRITIC_SHARE),
+  )
   return {
-    hunt: ceiling(review + chain + wrap, timeFor(review + chain) + wrapMs),
+    hunt: ceiling(huntReserved, timeFor(review + chain) + wrapMs),
+    wave: ceiling(huntReserved + critic, timeFor(review + chain + critic) + wrapMs),
     review: ceiling(chain + wrap, timeFor(chain) + wrapMs),
     chain: ceiling(wrap, wrapMs),
   }

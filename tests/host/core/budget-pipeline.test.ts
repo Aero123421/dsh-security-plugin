@@ -48,9 +48,9 @@ afterAll(async () => {
  * A model that investigates for `turns` replies per task before submitting,
  * and submits at once when a last-chance note asks for it, as real models do.
  */
-function patientModel(turns: Record<'planner' | 'hunter' | 'skeptic' | 'chain', number>) {
-  const wrapUps = { planner: 0, hunter: 0, skeptic: 0, chain: 0 }
-  const calls = { planner: 0, hunter: 0, skeptic: 0, chain: 0 }
+function patientModel(turns: Record<'planner' | 'critic' | 'hunter' | 'skeptic' | 'chain', number>) {
+  const wrapUps = { planner: 0, critic: 0, hunter: 0, skeptic: 0, chain: 0 }
+  const calls = { planner: 0, critic: 0, hunter: 0, skeptic: 0, chain: 0 }
   let id = 0
   const llm = scriptedLlm(async function* (options: LlmGenerateOptions): AsyncGenerator<LlmStreamChunk> {
     const role = roleOf(options)
@@ -68,7 +68,9 @@ function patientModel(turns: Record<'planner' | 'hunter' | 'skeptic' | 'chain', 
     const task = options.messages[0]?.content.map(block => (block as { text?: string }).text ?? '').join('\n') ?? ''
     const ids = [...task.matchAll(/^(S\d+):/gm)].map(match => match[1])
     const submissions = {
-      planner: ['submit_threat_model', { summary: 'An API.' }],
+      // No units: the Host's gap filling plans the endpoint tasks.
+      planner: ['submit_review_plan', { summary: 'An API.' }],
+      critic: ['submit_coverage_review', { done: true }],
       hunter: [
         'submit_findings',
         {
@@ -93,7 +95,7 @@ describe('budget reserve for the independent review', () => {
   }
 
   it('caps hunting so every pending review still runs, and lets running hunters submit their work', async () => {
-    const model = patientModel({ planner: 1, hunter: 14, skeptic: 3, chain: 1 })
+    const model = patientModel({ planner: 1, critic: 1, hunter: 14, skeptic: 3, chain: 1 })
     const h = createHarness({ llm: model.llm, workspaces: [{ id: 'ws', path: root, title: 'budget-app' }], settings })
     const scan = await h.controller.create({ workspaceId: 'ws', mode: 'deep' })
     expect(await h.settle(scan.id)).toBe('completed')
@@ -106,14 +108,17 @@ describe('budget reserve for the independent review', () => {
     expect(reviews.every(t => t.status === 'done')).toBe(true)
     expect(model.calls.skeptic).toBe(ROUTERS * 4)
 
-    // Hunting stopped at its ceiling: the lowest-priority hunt tasks were left for a budget extension.
-    const skipped = hunts.filter(t => t.status === 'skipped')
-    expect(skipped.length).toBeGreaterThan(0)
-    expect(skipped.every(t => t.error?.code === 'budget')).toBe(true)
-    expect(skipped[0]?.error?.message).toBe(
-      'Skipped to keep the rest of the scan budget for the phases that follow (independent review).',
-    )
-    expect(h.notices(scan.id)).toContain('hunt-budget-reserved')
+    // Hunting stopped at its ceiling: the lowest-priority work (the sweep of the remaining source files) did not
+    // fit and is reported as not run for budget, never dropped silently.
+    expect(hunts.every(t => t.status === 'done')).toBe(true)
+    const coverage = h.store.getScan(scan.id)?.coverage
+    expect(coverage?.unassignedFiles).toBe(2)
+    expect(coverage?.units?.find(unit => unit.id === 'unassigned')).toMatchObject({
+      status: 'not-run',
+      reason: { code: 'budget' },
+      paths: ['src/app.ts', 'src/db.ts'],
+    })
+    expect(coverage?.gapDetails?.map(gap => gap.code)).toContain('unassigned-files')
 
     // Hunters still running at the ceiling got a wrap-up request and submitted; none lost its work mid-run.
     expect(model.wrapUps.hunter).toBeGreaterThan(0)
@@ -126,7 +131,7 @@ describe('budget reserve for the independent review', () => {
   })
 
   it('keeps nothing back from hunting when nothing needs a review', async () => {
-    const model = patientModel({ planner: 1, hunter: 14, skeptic: 3, chain: 1 })
+    const model = patientModel({ planner: 1, critic: 1, hunter: 14, skeptic: 3, chain: 1 })
     const h = createHarness({
       llm: model.llm,
       workspaces: [{ id: 'ws', path: root, title: 'budget-app' }],

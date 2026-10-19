@@ -30,7 +30,8 @@ import {
   hunterTask,
   type TaskSignal,
 } from '../agents/roles/hunter.ts'
-import { plannerSubmitTool, plannerSystem, plannerTask, type ThreatModelOutput } from '../agents/roles/planner.ts'
+import { type CriticOutput, criticSubmitTool, criticSystem, criticTask } from '../agents/roles/critic.ts'
+import { plannerSubmitTool, plannerSystem, plannerTask, type ReconOutput } from '../agents/roles/planner.ts'
 import { type SkepticOutput, skepticSubmitTool, skepticSystem, skepticTask } from '../agents/roles/skeptic.ts'
 import type { BudgetGate } from '../agents/runtime/budget.ts'
 import type { WorkerTool } from '../agents/runtime/tool.ts'
@@ -41,12 +42,26 @@ import type { AstGrepHandle } from '../analysis/astgrep.ts'
 import { findSymbol } from '../analysis/outline.ts'
 import type { Toolkit } from '../analysis/toolkit.ts'
 import type { Config } from '../config.ts'
-import type { AgentRunRecord, FindingRecord, ScanRecord, TaskRecord, ThreatModelRecord } from '../core/model.ts'
+import type {
+  AgentRunRecord,
+  FindingRecord,
+  PlanUnitRecord,
+  ScanRecord,
+  TaskRecord,
+  ThreatModelRecord,
+} from '../core/model.ts'
 import type { LlmPort, LlmResolvedModelInfo, LoggerPort } from '../dsh/ports.ts'
 import { createPathMasker, type PathMasker } from '../paths.ts'
 import type { SecurityStore } from '../store/types.ts'
 import { type AnalysisContext, type AnalysisStep, analyzeWorkspace } from './analysis.ts'
-import { affordableHuntTasks, type PhaseBudget, phaseCeilings, ScanBudgetGate } from './budget.ts'
+import {
+  affordableHuntTasks,
+  CALLS_PER_CRITIC,
+  CALLS_PER_HUNT,
+  type PhaseBudget,
+  phaseCeilings,
+  ScanBudgetGate,
+} from './budget.ts'
 import {
   applySkepticOutput,
   applyUnreviewedDismissals,
@@ -60,7 +75,28 @@ import {
 } from './findings.ts'
 import { resolveScanRoot, sameScanRoot, scanRoot } from './root.ts'
 import { snapshotDigest } from './fingerprint.ts'
-import { endpointPath, planHuntTasks, planReviewTasks, type PlannedTask, targetIndex } from './planning.ts'
+import {
+  endpointPath,
+  isExcludedPath,
+  type PlannedTask,
+  planHuntTasks,
+  planReviewTasks,
+  sweepCandidates,
+  targetIndex,
+  unitTasks,
+} from './planning.ts'
+import {
+  CRITIC_PASSES,
+  CRITIC_UNITS,
+  coverageLedger,
+  directoryTree,
+  HUNT_TASK_KINDS,
+  RECON_UNITS,
+  type RawUnit,
+  resolveUnits,
+  type UnitResolution,
+  validExclusions,
+} from './units.ts'
 
 /** Why a run stopped early on request. */
 export type StopRequest = 'pause' | 'cancel' | 'shutdown'
@@ -91,14 +127,14 @@ export interface PipelineDeps {
   readonly registeredWorkspaceRoot?: (workspaceId: string) => string | undefined
 }
 
-const HUNT_KINDS = new Set<TaskRecord['kind']>([
-  'triage-signals',
-  'hunt-endpoints',
-  'hunt-signals',
-  'hunt-file',
-  'hunt-hypothesis',
-])
-const MAX_HYPOTHESES = { quick: 0, deep: 8, research: 16 } as const
+/** Reconnaissance replies in Quick mode: a light map from the inventory and a few reads. */
+const QUICK_RECON_TURNS = 10
+/** Replies of one coverage-critic run. */
+const CRITIC_TURNS = 24
+/** Source files listed for the critic. */
+const CRITIC_UNREAD_FILES = 60
+/** Largest share of the task limit kept for coverage-critic units. */
+const CRITIC_TASK_SHARE = 0.2
 /** Total worker runs per task, including interrupted runs and explicit resumes. */
 export const MAX_TASK_ATTEMPTS = 3
 const MAX_SHORT_ROLE_TURNS = 48
@@ -150,10 +186,16 @@ export class ScanJob {
   private budget!: ScanBudgetGate
   /** Phase views of `budget`: each stops ordinary requests at its ceiling, leaving a reserve for later phases. */
   private huntBudget!: PhaseBudget
+  /** Hunt waves stop here: the hunt ceiling less what the coverage-critic passes still to run need. */
+  private waveBudget!: PhaseBudget
   private reviewBudget!: PhaseBudget
   private chainBudget!: PhaseBudget
   /** Reviews the review phase would run now; sizes the reserve hunting leaves for it. */
   private reviewDemand = 0
+  /** Coverage-critic passes not yet started in this run; sizes the reserve hunt waves leave for them. */
+  private criticPassesLeft = 0
+  /** What limited the source sweep of this run's hunt plan (for the ledger's unassigned files). */
+  private sweepLimit: 'task-limit' | 'budget' | undefined
   private analysis!: AnalysisContext
   private scan: ScanRecord
   private discarded = 0
@@ -217,6 +259,7 @@ export class ScanJob {
     })
     this.budget = new ScanBudgetGate(this.scan.budget, this.scan.usage, this.signal, () => this.deps.now().getTime())
     this.huntBudget = this.budget.phase(() => this.ceilings().hunt)
+    this.waveBudget = this.budget.phase(() => this.ceilings().wave)
     this.reviewBudget = this.budget.phase(() => this.ceilings().review)
     this.chainBudget = this.budget.phase(() => this.ceilings().chain)
     this.event('info', 'run-start', `Scan ${resumed ? 'resumed' : 'started'}`)
@@ -406,10 +449,20 @@ export class ScanJob {
     }
   }
 
+  /**
+   * Reconnaissance: one Planner run maps the repository and plans the review
+   * as coverage units (every AI mode; Quick with few replies). A stored plan
+   * is never planned again, and a scan whose hunt began before
+   * reconnaissance existed for its mode keeps working without one.
+   */
   private async threatModel(): Promise<void> {
-    if (this.scan.mode === 'quick' || this.scan.threatModel) {
-      if (this.scan.mode === 'quick') this.skipPhases('threat-model')
-      else this.finishPhase('threat-model')
+    if (this.scan.threatModel) {
+      this.finishPhase('threat-model')
+      return
+    }
+    const existing = this.deps.store.listTasks(this.scan.id)
+    if (!existing.some(t => t.kind === 'threat-model') && existing.some(t => HUNT_TASK_KINDS.has(t.kind))) {
+      this.skipPhases('threat-model')
       return
     }
     this.phase('threat-model')
@@ -418,12 +471,11 @@ export class ScanJob {
       this.skipPhases('threat-model')
       return
     }
-    const max = MAX_HYPOTHESES[this.scan.mode]
     const task = this.ensure({
       key: 'threat-model',
       kind: 'threat-model',
       role: 'planner',
-      title: 'Build threat model',
+      title: 'Map the repository and plan the review',
       priority: 1000,
       input: { targetPaths: [], focus: [] },
     })
@@ -431,45 +483,72 @@ export class ScanJob {
       this.finishPhase('threat-model')
       return
     }
+    const { snapshot, privacy } = this.analysis
+    const limit = this.unitLimit()
     // The planner works before hunting and shares its ceiling, so it cannot eat into the review reserve.
     this.updateReviewDemand()
-    const { result } = await this.runAgent<ThreatModelOutput>(task, route, {
+    const visibleFiles = [...snapshot.files.values()].filter(f => !privacy.isWithheld(f.path))
+    const { result } = await this.runAgent<ReconOutput>(task, route, {
       budget: this.huntBudget,
       system: plannerSystem(this.language()),
       task: plannerTask({
         language: this.language(),
+        mode: this.scan.mode,
         inventory: this.analysis.inventory,
-        fileCount: this.analysis.snapshot.files.size,
+        fileCount: snapshot.files.size,
+        tree: directoryTree(visibleFiles),
         endpoints: this.modelEndpoints(),
-        signals: this.analysis.signals.map(signal => this.analysis.privacy.signal(signal)),
-        maxHypotheses: max,
+        signals: this.analysis.signals
+          .filter(signal => !privacy.isWithheld(signal.location.path))
+          .map(signal => privacy.signal(signal)),
+        maxUnits: limit,
       }),
-      submit: plannerSubmitTool(max, this.plannerTargets()),
-      maxTurns: Math.min(this.scan.budget.maxTurnsPerWorker, MAX_SHORT_ROLE_TURNS),
+      submit: plannerSubmitTool(limit, this.unitResolver('recon', limit)),
+      maxTurns: Math.min(
+        this.scan.budget.maxTurnsPerWorker,
+        this.scan.mode === 'quick' ? QUICK_RECON_TURNS : MAX_SHORT_ROLE_TURNS,
+      ),
     })
     if (result.status === 'submitted' && result.output) {
       const out = result.output
+      const resolve = this.plannerTargets()
+      const scrub = (text: string) => clipLine(privacy.scrub(text), 300)
       const threatModel: ThreatModelRecord = {
-        summary: out.summary,
-        assets: out.assets,
-        actors: out.actors,
-        trustBoundaries: out.trust_boundaries,
-        priorities: out.priorities,
-        hypotheses: out.hypotheses.map(h => ({
-          title: h.title,
-          category: h.category,
-          targetPaths: h.target_paths,
-          rationale: h.rationale,
+        summary: privacy.scrub(out.summary),
+        assets: out.assets.map(scrub),
+        actors: out.actors.map(scrub),
+        trustBoundaries: out.trustBoundaries.map(scrub),
+        components: out.components.map(component => ({
+          name: clipLine(privacy.scrub(component.name), 120),
+          paths: [...new Set(component.paths.flatMap(path => resolve(path).paths))].slice(0, 10),
         })),
+        units: out.units,
+        excluded: validExclusions(
+          out.excluded,
+          visibleFiles.map(f => f.path),
+        ),
       }
       this.scan = this.deps.store.updateScan(this.scan.id, { threatModel })
-      this.completeTask(task, { hypotheses: threatModel.hypotheses.length })
+      this.completeTask(task, { units: out.units.length, dropped: out.dropped })
+      this.event(
+        'info',
+        'review-plan',
+        `Review plan: ${out.units.length} coverage unit(s)${out.dropped > 0 ? `, ${out.dropped} proposed unit(s) dropped (duplicate, beyond the limit, or no file in scope)` : ''}.`,
+        { units: out.units.length, dropped: out.dropped },
+      )
     } else {
       this.failTask(task, result)
     }
     this.finishPhase('threat-model')
   }
 
+  /**
+   * Hunting in waves: the plan's units with the Host's gap filling first,
+   * then up to `CRITIC_PASSES` coverage-critic passes, each followed by a
+   * wave for the units it adds. Waves stop at the wave ceiling (the hunt
+   * ceiling less the critic reserve) and leave what did not start pending; a
+   * final pass then runs what is left under the full hunt ceiling.
+   */
   private async hunt(): Promise<void> {
     this.phase('hunt')
     const route = this.route('hunter')
@@ -477,21 +556,47 @@ export class ScanJob {
       this.skipPhases('hunt')
       return
     }
+    const { store } = this.deps
+    // Critic passes that already ended (resume); one that found nothing to add, or failed, ends the passes.
+    const critics = store
+      .listTasks(this.scan.id)
+      .filter(t => t.kind === 'critic' && t.status !== 'pending' && t.status !== 'running')
+    const stopped = critics.some(t => t.status !== 'done' || t.outcome?.units === 0)
+    const passes = this.route('planner') && !stopped ? CRITIC_PASSES[this.scan.mode] : critics.length
+    const passesRun = critics.length
+    this.criticPassesLeft = Math.max(0, passes - passesRun)
     this.updateReviewDemand()
+    const threatModel = this.scan.threatModel
+    const criticTargets = store
+      .listTasks(this.scan.id)
+      .filter(t => t.input.origin === 'critic')
+      .flatMap(t => t.input.targetPaths)
     const plan = planHuntTasks({
       mode: this.scan.mode,
       snapshot: this.analysis.snapshot,
       endpoints: this.modelEndpoints(),
       signals: this.analysis.signals,
-      hypotheses: this.scan.threatModel?.hypotheses ?? [],
-      priorities: (this.scan.threatModel?.priorities ?? []).map(priority => priority.target),
+      units: threatModel?.units ?? [],
+      excluded: [...(threatModel?.excluded ?? []).map(entry => entry.path)],
+      targeted: new Set(criticTargets),
       includeTests: this.scan.settings.scan.includeTests,
-      maxTasks: this.scan.budget.maxTasks,
-      // Low-priority sweeps only fill what the hunt budget (after the review reserve) can pay for.
-      budgetTasks: affordableHuntTasks(this.ceilings().hunt, this.budget.usage(), this.tokensPerCall()),
+      // Task slots for the critic's units stay free (at most a fifth of the task limit).
+      maxTasks: Math.max(
+        0,
+        this.scan.budget.maxTasks -
+          Math.min(
+            Math.max(0, passes - passesRun) * CRITIC_UNITS[this.scan.mode],
+            Math.floor(this.scan.budget.maxTasks * CRITIC_TASK_SHARE),
+          ),
+      ),
+      // Low-priority sweeps only fill what the wave budget (after the review and critic reserves) can pay for.
+      budgetTasks: affordableHuntTasks(this.ceilings().wave, this.budget.usage(), this.tokensPerCall()),
       isWithheld: path => this.analysis.privacy.isWithheld(path),
     })
+    this.sweepLimit = plan.unassignedReason
+    const known = new Set(store.listTasks(this.scan.id).map(t => t.key))
     for (const planned of plan.tasks) this.ensure(planned)
+    for (const planned of plan.cut) this.ensureNotRun(planned, !known.has(planned.key))
     if (plan.overflow > 0) {
       this.notice(
         'info',
@@ -499,7 +604,13 @@ export class ScanJob {
         `${plan.overflow} lower-priority review areas were not scheduled because of the task or budget limit for this mode.`,
       )
     }
-    const tasks = this.deps.store.listTasks(this.scan.id).filter(t => HUNT_KINDS.has(t.kind))
+    await this.huntWave(route)
+    for (let pass = passesRun + 1; pass <= passes; pass++) {
+      if (!(await this.critic(pass))) break
+      await this.huntWave(route)
+    }
+    this.criticPassesLeft = 0
+    const tasks = store.listTasks(this.scan.id).filter(t => HUNT_TASK_KINDS.has(t.kind))
     const pool = await this.runPool(tasks, route, this.huntBudget, task => this.runHunter(task, route))
     if (pool.skipped > 0 && !pool.scanExhausted && this.reviewDemand > 0) {
       this.notice(
@@ -509,6 +620,122 @@ export class ScanJob {
       )
     }
     this.finishPhase('hunt')
+  }
+
+  /** Runs the pending hunt tasks up to the wave ceiling; tasks that do not start stay pending. */
+  private async huntWave(route: ModelRef): Promise<void> {
+    const tasks = this.deps.store.listTasks(this.scan.id).filter(t => HUNT_TASK_KINDS.has(t.kind))
+    await this.runPool(tasks, route, this.waveBudget, task => this.runHunter(task, route), { leavePending: true })
+  }
+
+  /**
+   * One coverage-critic pass: the critic reads the ledger, the source files
+   * no worker read and the endpoints no task reviewed, and proposes new
+   * units (validated like reconnaissance units) or stops. Returns whether it
+   * added units, i.e. whether another wave and pass make sense. A pass that
+   * already ran (resume) is not run again.
+   */
+  private async critic(pass: number): Promise<boolean> {
+    const route = this.route('planner')
+    this.criticPassesLeft = Math.max(0, this.criticPassesLeft - 1)
+    // A route that rejected its first request (or never calls tools) is not tried again for the critic.
+    if (!route || this.huntBudget.exhausted() || this.brokenRoutes.has(routeKey(route))) return false
+    const { store } = this.deps
+    const hunts = store.listTasks(this.scan.id).filter(t => HUNT_TASK_KINDS.has(t.kind))
+    const slots = this.scan.budget.maxTasks - hunts.filter(t => t.error?.code !== 'task-limit').length
+    const maxUnits = Math.min(CRITIC_UNITS[this.scan.mode], slots)
+    if (maxUnits <= 0) return false
+    const task = this.ensure({
+      key: `critic:${pass}`,
+      kind: 'critic',
+      role: 'planner',
+      title: `Check review coverage (pass ${pass})`,
+      priority: 5,
+      input: { targetPaths: [], focus: [] },
+    })
+    if (task.status !== 'pending' && task.status !== 'running') return false
+    const { snapshot } = this.analysis
+    const read = new Set(store.listAgentRuns(this.scan.id).flatMap(run => run.filesRead))
+    const excluded = (this.scan.threatModel?.excluded ?? []).map(entry => entry.path)
+    const unread = sweepCandidates(snapshot, path => this.inScope(path) && !isExcludedPath(path, excluded), read)
+    const reviewed = new Set(hunts.filter(t => t.status === 'done').flatMap(t => t.input.endpointIds ?? []))
+    const endpoints = this.modelEndpoints().filter(e => !reviewed.has(e.id))
+    const existing = new Set(hunts.flatMap(t => [t.key, ...(t.input.unitId ? [t.input.unitId] : [])]))
+    const { result } = await this.runAgent<CriticOutput>(task, route, {
+      budget: this.huntBudget,
+      system: criticSystem(this.language()),
+      task: criticTask({
+        ledger: this.ledger(hunts, { paths: [], reason: 'task-limit' }),
+        unread: unread.slice(0, CRITIC_UNREAD_FILES).map(f => ({
+          path: f.path,
+          language: f.language,
+          lines: f.content.split('\n').length,
+        })),
+        unreadTotal: unread.length,
+        endpoints,
+        maxUnits,
+        pass,
+      }),
+      submit: criticSubmitTool(maxUnits, this.unitResolver('critic', maxUnits, existing)),
+      maxTurns: Math.min(this.scan.budget.maxTurnsPerWorker, CRITIC_TURNS),
+    })
+    if (result.status !== 'submitted' || !result.output) {
+      this.failTask(task, result)
+      return false
+    }
+    const units = result.output.units
+    const steering = this.analysis.signals.filter(s => s.kind === 'sink' && this.inScope(s.location.path))
+    // Rule hits already have their verdict tasks; critic units take only steering sinks and unreviewed endpoints.
+    for (const planned of unitTasks(units, this.scan.mode, steering, endpoints, new Set()).tasks) this.ensure(planned)
+    this.completeTask(task, { units: units.length, done: result.output.done, dropped: result.output.dropped })
+    this.event(
+      'info',
+      'coverage-critic',
+      units.length > 0
+        ? `Coverage check ${pass}: ${units.length} more coverage unit(s) planned.`
+        : `Coverage check ${pass}: no gaps worth another review wave.`,
+      { pass, units: units.length },
+    )
+    return units.length > 0
+  }
+
+  /** Units reconnaissance may plan in this scan. */
+  private unitLimit(): number {
+    return Math.max(0, Math.min(RECON_UNITS[this.scan.mode], this.scan.budget.maxTasks))
+  }
+
+  /** Validation of model-proposed units against this scan's snapshot, scope and privacy settings. */
+  private unitResolver(
+    origin: PlanUnitRecord['origin'],
+    limit: number,
+    existing: ReadonlySet<string> = new Set(),
+  ): (units: readonly RawUnit[]) => UnitResolution {
+    const resolve = this.plannerTargets()
+    const { privacy } = this.analysis
+    return units =>
+      resolveUnits(units, {
+        resolve,
+        inScope: path => this.inScope(path),
+        limit,
+        origin,
+        existing,
+        scrub: text => privacy.scrub(text),
+      })
+  }
+
+  /**
+   * Records a planned task that does not fit the task limit as not run, so
+   * the coverage ledger lists it. A task that already existed keeps its state.
+   */
+  private ensureNotRun(planned: PlannedTask, isNew: boolean): void {
+    const task = this.ensure(planned)
+    if (isNew && task.status === 'pending') {
+      this.deps.store.updateTask(task.id, {
+        status: 'skipped',
+        finishedAt: this.iso(),
+        error: { code: 'task-limit', message: 'Not run: beyond the task limit for this mode.' },
+      })
+    }
   }
 
   private async review(): Promise<void> {
@@ -735,6 +962,16 @@ export class ScanJob {
         endpoints,
         signals: signals.map(({ id, signal }) => ({ id, signal: privacy.signal(signal) })),
         ...(task.input.hypothesis ? { hypothesis: task.input.hypothesis } : {}),
+        ...(task.kind === 'hunt-unit'
+          ? {
+              unit: {
+                title: task.title,
+                ...(task.input.component ? { component: task.input.component } : {}),
+                ...(task.input.surface ? { surface: task.input.surface } : {}),
+                ...(task.input.rationale ? { rationale: task.input.rationale } : {}),
+              },
+            }
+          : {}),
         ...(this.scan.threatModel
           ? {
               threatModelSummary: this.scan.threatModel.summary,
@@ -774,12 +1011,15 @@ export class ScanJob {
         `${task.title}: ${outcome.discarded} finding(s) dropped because none of their code quotes matched the source.`,
       )
     }
+    const coverage = result.output.coverage
     this.completeTask(task, {
       created: outcome.created,
       merged: outcome.merged,
       discarded: outcome.discarded,
       assessed: outcome.assessed,
       disputed: outcome.disputed,
+      ...(coverage ? { coverage: coverage.verdict } : {}),
+      ...(coverage?.note ? { coverageNote: clipLine(this.mask(privacy.scrub(coverage.note)), 300) } : {}),
     })
     // New findings need reviews: the hunt ceiling follows the reserve they call for.
     if (outcome.created > 0) this.updateReviewDemand()
@@ -829,6 +1069,7 @@ export class ScanJob {
     route: ModelRef,
     budget: PhaseBudget,
     run: (task: TaskRecord) => Promise<void>,
+    options: { readonly leavePending?: boolean } = {},
   ): Promise<{ readonly skipped: number; readonly scanExhausted: boolean }> {
     tasks = tasks.map(task => this.refreshTargets(task))
     const queue = tasks.filter(t => t.status === 'pending' || t.status === 'running')
@@ -879,8 +1120,9 @@ export class ScanJob {
     const failure = results.find(result => result.status === 'rejected')
     if (failure) throw failure.reason
     this.checkStopped()
-    // Budget ran out: what is left will not run in this scan.
+    // Budget ran out: what is left will not run in this scan (unless a later pool picks it up).
     const scanExhausted = budget.scanExhausted() !== undefined
+    if (options.leavePending) return { skipped: 0, scanExhausted }
     const message = scanExhausted
       ? 'Skipped because the scan budget was used up.'
       : 'Skipped to keep the rest of the scan budget for the phases that follow (independent review).'
@@ -1233,6 +1475,7 @@ export class ScanJob {
       chain: this.scan.mode === 'research' && this.route('chain') !== undefined,
       workers: this.workers(),
       tokensPerCall: this.tokensPerCall(),
+      critic: this.criticPassesLeft * (CALLS_PER_CRITIC + CRITIC_UNITS[this.scan.mode] * CALLS_PER_HUNT),
     })
   }
 
@@ -1284,6 +1527,41 @@ export class ScanJob {
   /** In-scope endpoints a model may be told about (route text from withheld files is withheld too). */
   private modelEndpoints() {
     return this.inScopeEndpoints().filter(e => this.analysis.privacy.endpointVisible(e))
+  }
+
+  /** Whether a model may be shown `path` and it is in this scan's scope (tests per `includeTests`). */
+  private inScope(path: string): boolean {
+    return (
+      !this.analysis.privacy.isWithheld(path) &&
+      (this.scan.settings.scan.includeTests || this.analysis.snapshot.files.get(path)?.isTest !== true)
+    )
+  }
+
+  /** The coverage ledger for `tasks` (see `coverageLedger`). */
+  private ledger(
+    tasks: readonly TaskRecord[],
+    unassigned: { readonly paths: readonly string[]; readonly reason: 'task-limit' | 'budget' | 'consent-revoked' },
+  ) {
+    const { store } = this.deps
+    return coverageLedger({
+      tasks,
+      findings: store.listFindings(this.scan.id),
+      evidence: store.listEvidence(this.scan.id),
+      endpoints: new Map(this.analysis.endpoints.map(e => [e.id, e])),
+      unassigned,
+    })
+  }
+
+  /**
+   * In-scope, hand-written source files no hunt task targets (whatever became
+   * of the task), except those the review plan excluded with a valid reason.
+   */
+  private unassignedFiles(tasks: readonly TaskRecord[]): { readonly paths: string[]; readonly excluded: number } {
+    const targeted = new Set(tasks.filter(t => HUNT_TASK_KINDS.has(t.kind)).flatMap(t => t.input.targetPaths))
+    const excluded = (this.scan.threatModel?.excluded ?? []).map(entry => entry.path)
+    const candidates = sweepCandidates(this.analysis.snapshot, path => this.inScope(path), targeted)
+    const paths = candidates.filter(f => !isExcludedPath(f.path, excluded)).map(f => f.path)
+    return { paths, excluded: candidates.length - paths.length }
   }
 
   private inScopeEndpoints() {
@@ -1382,6 +1660,24 @@ export class ScanJob {
         'No HTTP endpoints were detected; the attack surface may use a framework this version does not recognize.',
       )
     }
+    // The coverage ledger exists for AI scans only.
+    const unassigned = this.aiEnabled() ? this.unassignedFiles(tasks) : undefined
+    const unassignedReason = this.consentRevoked ? 'consent-revoked' : (this.sweepLimit ?? 'task-limit')
+    if (unassigned && unassigned.paths.length > 0) {
+      const count = unassigned.paths.length
+      gap(
+        'unassigned-files',
+        `${count} in-scope source file(s) were not part of any AI review unit (${unassignedReason === 'budget' ? 'budget' : unassignedReason === 'consent-revoked' ? 'AI review stopped' : 'task limit'}).`,
+        { count, reason: unassignedReason },
+      )
+    }
+    if (unassigned && unassigned.excluded > 0) {
+      gap(
+        'excluded-by-plan',
+        `${unassigned.excluded} source file(s) were left out of the AI review as vendored, generated, documentation or fixture code by the review plan.`,
+        { count: unassigned.excluded },
+      )
+    }
     for (const analyzer of this.maskedAnalyzers()) {
       if (!analyzer.available && analyzer.source !== 'disabled')
         gap('analyzer-unavailable', `${analyzer.id} unavailable: ${analyzer.reason ?? 'unknown'}`, {
@@ -1406,6 +1702,12 @@ export class ScanJob {
       discardedUnverifiable: this.discarded > discarded ? this.discarded : discarded,
       gaps,
       gapDetails,
+      ...(unassigned
+        ? {
+            units: this.ledger(tasks, { paths: unassigned.paths, reason: unassignedReason }),
+            unassignedFiles: unassigned.paths.length,
+          }
+        : {}),
     }
   }
 
@@ -1509,7 +1811,7 @@ export class ScanJob {
 export function initialPhases(mode: ScanRecord['mode'], aiEnabled: boolean): ScanRecord['phases'] {
   const skipped = new Set<ScanPhase>()
   if (!aiEnabled) for (const p of ['threat-model', 'hunt', 'review', 'chain'] as const) skipped.add(p)
-  if (mode === 'quick') for (const p of ['threat-model', 'review', 'chain'] as const) skipped.add(p)
+  if (mode === 'quick') for (const p of ['review', 'chain'] as const) skipped.add(p)
   if (mode === 'deep') skipped.add('chain')
   return SCAN_PHASES.filter(p => p !== 'done').map(phase => ({
     phase,

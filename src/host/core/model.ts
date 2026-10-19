@@ -29,18 +29,59 @@ export interface ScanError {
   readonly message: string
 }
 
-/** Planner output kept for later workers and the report. */
+/** Priority a reconnaissance or critic unit was given, most important first. */
+export type UnitPriority = 'critical' | 'high' | 'medium' | 'low'
+
+/** Who proposed a coverage unit. */
+export type UnitOrigin = 'recon' | 'critic' | 'gap'
+
+/**
+ * One part of the project the review plan sets out to examine, after the
+ * Host resolved its target paths onto the snapshot. Each becomes a
+ * `hunt-unit` task with the same id as key.
+ */
+export interface PlanUnitRecord {
+  /** `unit:<hash of sorted target paths and focus>`; also the task key. */
+  readonly id: string
+  readonly title: string
+  readonly component?: string
+  /** Entry surface, e.g. `POST /api/orders/:id`, `CLI arguments`, `queue consumer`. */
+  readonly surface?: string
+  readonly focus: readonly FindingCategory[]
+  /** Snapshot files the hunter starts from (resolved, in scope, at most 8). */
+  readonly targetPaths: readonly string[]
+  readonly priority: UnitPriority
+  readonly rationale: string
+  readonly hypothesis?: string
+  readonly origin: 'recon' | 'critic'
+}
+
+/**
+ * The reconnaissance result kept for later workers, the critic and the
+ * report: the threat model plus the review plan. Stored as a JSON object
+ * column; records written before the plan existed have only the threat
+ * model, `priorities` and `hypotheses`.
+ */
 export interface ThreatModelRecord extends ThreatModelView {
-  /** Entry points the planner considers most important, with reasons. */
-  readonly priorities: readonly { readonly target: string; readonly reason: string }[]
-  /** Planner hypotheses; each becomes a hunter task. */
-  readonly hypotheses: readonly {
+  /** Entry points the planner considered most important (records before the review plan). */
+  readonly priorities?: readonly { readonly target: string; readonly reason: string }[]
+  /** Planner hypotheses of records before the review plan; each became a `hunt-hypothesis` task. */
+  readonly hypotheses?: readonly {
     readonly title: string
     readonly category: FindingCategory
     readonly targetPaths: readonly string[]
     readonly rationale: string
   }[]
+  /** Components or subsystems with their (resolved) files. */
+  readonly components?: readonly { readonly name: string; readonly paths: readonly string[] }[]
+  /** Coverage units of the reconnaissance plan, most important first. */
+  readonly units?: readonly PlanUnitRecord[]
+  /** Paths the reconnaissance left out of the source sweep (vendored, generated, docs, fixtures). */
+  readonly excluded?: readonly { readonly path: string; readonly reason: ExcludedReason }[]
 }
+
+/** Why reconnaissance may leave a path out of the sweep. */
+export type ExcludedReason = 'vendored' | 'generated' | 'docs' | 'fixtures'
 
 export interface ScanRecord {
   readonly id: string
@@ -84,6 +125,8 @@ export type TaskKind =
   | 'hunt-signals'
   | 'hunt-file'
   | 'hunt-hypothesis'
+  | 'hunt-unit'
+  | 'critic'
   | 'review'
   | 'chain'
 
@@ -105,6 +148,16 @@ export interface TaskInput {
   readonly focus: readonly FindingCategory[]
   /** Free-text hypothesis or instructions from the planner. */
   readonly hypothesis?: string
+  /** Coverage unit this task examines (`hunt-unit`), see {@link PlanUnitRecord}. */
+  readonly unitId?: string
+  /** Who proposed the work; absent on tasks from before the coverage ledger (derived from the kind). */
+  readonly origin?: UnitOrigin
+  /** Component or subsystem of the unit. */
+  readonly component?: string
+  /** Entry surface of the unit. */
+  readonly surface?: string
+  /** Why the planner wants this examined. */
+  readonly rationale?: string
 }
 
 export interface TaskRecord {

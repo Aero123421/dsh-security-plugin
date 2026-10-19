@@ -78,7 +78,7 @@ describe.skipIf(!isPosix)('withheld files never reach a model (full research sca
   it('sends no secret value or withheld content in any model request', () => {
     expect(llm.calls.length).toBeGreaterThan(0)
     const roles = new Set(llm.calls.map(roleOf))
-    expect(roles).toEqual(new Set(['planner', 'hunter', 'skeptic', 'chain']))
+    expect(roles).toEqual(new Set(['planner', 'critic', 'hunter', 'skeptic', 'chain']))
     for (const call of llm.calls) {
       const json = JSON.stringify({ system: call.system, messages: call.messages, tools: call.tools })
       for (const value of [ENV_SECRET, ENV_BLOB, SAST_MARKER, STRIPE_PREFIX]) expect(json).not.toContain(value)

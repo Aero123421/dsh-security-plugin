@@ -78,6 +78,14 @@ const assessmentSchema = z.object({
   evidence: citationSchema.optional().describe('Code that proves the verdict (the vulnerable flow, or the defense).'),
 })
 
+const coverageSchema = z
+  .enum(['complete', 'partial', 'needs-runtime'])
+  .optional()
+  .describe(
+    'How completely you examined the part described in the task: complete; partial (you could not finish); needs-runtime (the outcome depends on deployment or runtime state you cannot see in the source).',
+  )
+const coverageNoteSchema = z.string().max(400).optional().describe('One sentence on what is left open, if anything.')
+
 const submissionSchema = z.object({
   findings: z.array(findingSchema).max(10).describe('Verified vulnerabilities. An empty list is a valid result.'),
   signal_assessments: z
@@ -85,6 +93,8 @@ const submissionSchema = z.object({
     .max(40)
     .default([])
     .describe('A verdict for every rule hit (S1, S2, …) listed in the task.'),
+  coverage: coverageSchema,
+  coverage_note: coverageNoteSchema,
 })
 
 type Submission = z.output<typeof submissionSchema>
@@ -115,6 +125,8 @@ export interface HunterAssessment {
 export interface HunterOutput {
   readonly findings: readonly HunterFinding[]
   readonly assessments: readonly HunterAssessment[]
+  /** The hunter's own verdict on how completely it examined its part; absent when not given. */
+  readonly coverage?: { readonly verdict: 'complete' | 'partial' | 'needs-runtime'; readonly note?: string }
 }
 
 /** A deterministic hit shown to the hunter with a short id for its verdict. */
@@ -130,6 +142,13 @@ export interface HunterTaskInput {
   readonly endpoints: readonly Endpoint[]
   readonly signals: readonly TaskSignal[]
   readonly hypothesis?: string
+  /** The coverage unit this task examines (plan, critic or gap units). */
+  readonly unit?: {
+    readonly title: string
+    readonly component?: string
+    readonly surface?: string
+    readonly rationale?: string
+  }
   readonly threatModelSummary?: string
   /** The planner's actors (who uses the system, with which privileges). */
   readonly actors?: readonly string[]
@@ -185,6 +204,17 @@ export function hunterTask(input: HunterTaskInput): string {
     }
     sections.push(`${context.join('\n')}\n(The threat model is the planner's reading of the code, not verified facts.)`)
   }
+  if (input.unit) {
+    const rows = [
+      `Unit: ${clipLine(input.unit.title, 200)}`,
+      ...(input.unit.component ? [`Component: ${clipLine(input.unit.component, 120)}`] : []),
+      ...(input.unit.surface ? [`Entry surface: ${clipLine(input.unit.surface, 200)}`] : []),
+      ...(input.unit.rationale ? [`What to verify (planner's view): ${clipLine(input.unit.rationale, 800)}`] : []),
+    ]
+    sections.push(
+      `The part of the application assigned to you (a coverage unit of the review plan; examine all of it, following calls into other files as needed):\n${rows.join('\n')}`,
+    )
+  }
   if (input.hypothesis) {
     sections.push(`Hypothesis from the planner (unverified — check it, do not assume it):\n${input.hypothesis}`)
   }
@@ -224,7 +254,8 @@ export function hunterTask(input: HunterTaskInput): string {
   sections.push(`Rules for submit_findings:
 - Report only issues you verified by reading the code. Each finding needs an attack_path of 1-8 steps from the entry point to the harmful effect, each citing exact code.
 - Use defenses_checked to show which protections you looked for and why they do not stop the attack.
-- If, after checking the code, nothing is exploitable, submit an empty findings list.`)
+- If, after checking the code, nothing is exploitable, submit an empty findings list.
+- Optionally set coverage: complete, partial (you could not examine all of it), or needs-runtime (the outcome depends on deployment or runtime state the source does not show), with a short coverage_note.`)
   return sections.join('\n\n')
 }
 
@@ -276,6 +307,8 @@ export function hunterSubmitTool(
     coerce: submitCoercion(submissionSchema, [
       [referencesSchema, keepUrls],
       [signalIdSchema, normalizeShortId('S')],
+      [coverageSchema, normalizeCoverage],
+      [coverageNoteSchema, value => (typeof value === 'string' ? value.slice(0, 400) : undefined)],
     ]),
     terminal: {
       validate: (args, context) => {
@@ -334,7 +367,12 @@ export function hunterSubmitTool(
         const unverified: RawFinding[] = []
         for (const finding of args.findings) if (!save(finding)) unverified.push(finding)
         for (const assessment of args.signal_assessments) assessed.set(assessment.id.trim().toUpperCase(), assessment)
-        return toHunterOutput(source, [...saved.values(), ...unverified], [...assessed.values()])
+        return toHunterOutput(
+          source,
+          [...saved.values(), ...unverified],
+          [...assessed.values()],
+          args.coverage ? { verdict: args.coverage, note: args.coverage_note } : undefined,
+        )
       },
     },
   })
@@ -351,6 +389,19 @@ function findingKey(finding: RawFinding, verified: readonly VerifiedCitation[]):
   return undefined
 }
 
+/**
+ * A coverage verdict in the model's words mapped onto the three values; an
+ * unknown one is dropped (the verdict is optional), never sent back.
+ */
+function normalizeCoverage(value: unknown): unknown {
+  if (typeof value !== 'string') return undefined
+  const text = value.toLowerCase()
+  if (/runtime|deploy|config|environment|depends/.test(text)) return 'needs-runtime'
+  if (/partial|incomplete|unfinished|limited/.test(text)) return 'partial'
+  if (/complete|full|done|finished/.test(text)) return 'complete'
+  return undefined
+}
+
 /** References that are URLs; other text (an OWASP label, a CWE id) is dropped instead of failing the call. */
 function keepUrls(value: unknown): unknown {
   if (value === null || value === undefined) return undefined
@@ -362,6 +413,7 @@ function toHunterOutput(
   source: QuoteSource,
   findings: readonly RawFinding[],
   assessments: readonly RawAssessment[],
+  coverage: { readonly verdict: NonNullable<Submission['coverage']>; readonly note?: string | undefined } | undefined,
 ): HunterOutput {
   const verify = (citations: readonly Citation[]) => citations.map(c => verifyCitation(source, c))
   return {
@@ -384,5 +436,8 @@ function toHunterOutput(
       reason: a.reason,
       ...(a.evidence ? { evidence: verifyCitation(source, a.evidence) } : {}),
     })),
+    ...(coverage
+      ? { coverage: { verdict: coverage.verdict, ...(coverage.note?.trim() ? { note: coverage.note.trim() } : {}) } }
+      : {}),
   }
 }

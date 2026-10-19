@@ -3,7 +3,16 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { callReply } from '../agents/runtime/helpers.ts'
 import { fakeGitleaksToolkit } from './toolkit-helpers.ts'
-import { AI_SETTINGS, copyFixture, createHarness, failingStream, gatedLlm, oracleLlm, scriptedLlm } from './helpers.ts'
+import {
+  AI_SETTINGS,
+  copyFixture,
+  createHarness,
+  failingStream,
+  gatedLlm,
+  oracleLlm,
+  roleOf,
+  scriptedLlm,
+} from './helpers.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => {
@@ -94,7 +103,7 @@ describe('B3 scan resilience', () => {
     const h = createHarness({ llm, workspaces: [workspace], settings: serial })
     const scan = await h.controller.create({ workspaceId: workspace.id, mode: 'quick' })
     await h.settle(scan.id)
-    const task = h.store.listTasks(scan.id)[0]!
+    const task = h.store.listTasks(scan.id).find(t => t.role === 'hunter')!
     // A failed task is retained even if another task/run caused the scan to be interrupted.
     h.store.updateScan(scan.id, { status: 'interrupted' })
     h.controller.resume(scan.id)
@@ -169,7 +178,13 @@ describe('B3 scan resilience', () => {
     'replans an existing positional endpoint group without mutating %s history',
     async status => {
       const workspace = await setup()
-      const llm = gatedLlm(await oracleLlm(), () => true)
+      // Reconnaissance plans no units, so the endpoints get the Host's positional endpoint groups.
+      const oracle = await oracleLlm()
+      const inner = scriptedLlm(async function* (options) {
+        if (roleOf(options) === 'planner') yield* callReply('plan', 'submit_review_plan', { summary: 'A shop.' })
+        else yield* oracle.stream(options)
+      })
+      const llm = gatedLlm(inner, options => roleOf(options) === 'hunter')
       const h = createHarness({
         llm,
         workspaces: [workspace],

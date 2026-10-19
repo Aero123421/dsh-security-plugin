@@ -121,9 +121,10 @@ export async function* failingStream(code: string, message: string): AsyncGenera
   yield { type: 'finish', reason: { kind: 'error', failure: { code, message } } }
 }
 
-export function roleOf(options: LlmGenerateOptions): 'planner' | 'hunter' | 'skeptic' | 'chain' {
+export function roleOf(options: LlmGenerateOptions): 'planner' | 'critic' | 'hunter' | 'skeptic' | 'chain' {
   const system = options.system ?? ''
   if (system.includes('"planner"')) return 'planner'
+  if (system.includes('"coverage critic"')) return 'critic'
   if (system.includes('"independent reviewer"')) return 'skeptic'
   if (system.includes('"attack-chain researcher"')) return 'chain'
   return 'hunter'

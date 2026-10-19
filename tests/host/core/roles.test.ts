@@ -12,7 +12,10 @@ import {
   verifyCitation,
 } from '../../../src/host/agents/roles/common.ts'
 import { hunterSubmitTool, hunterSystem, hunterTask } from '../../../src/host/agents/roles/hunter.ts'
+import { criticSubmitTool, criticSystem, criticTask } from '../../../src/host/agents/roles/critic.ts'
 import { plannerSubmitTool, plannerSystem, plannerTask } from '../../../src/host/agents/roles/planner.ts'
+import type { TargetResolution } from '../../../src/host/agents/tools/paths.ts'
+import { type RawUnit, resolveUnits } from '../../../src/host/scan/units.ts'
 import { skepticSubmitTool, skepticSystem, skepticTask } from '../../../src/host/agents/roles/skeptic.ts'
 import { coerceToolArgs, type TerminalContext, type WorkerTool } from '../../../src/host/agents/runtime/tool.ts'
 import { Redactor } from '../../../src/host/analysis/secrets.ts'
@@ -141,21 +144,62 @@ describe('task prompts', () => {
     testFiles: 0,
   }
 
-  it('planner lists the facts and the hypothesis cap', () => {
-    const task = plannerTask({
-      language: 'en',
+  it('reconnaissance lists the inventory, tree, endpoints, rule hits per file and the unit cap', () => {
+    const input = {
+      language: 'en' as const,
+      mode: 'deep' as const,
       inventory,
       fileCount: 3,
+      tree: ['src/  2 files (typescript 2)', 'vendor/lib/  1 file (php 1) [vendored?]'],
       endpoints: [endpointOf('GET', '/orders/:id', 'src/routes/orders.ts', 6, { authHints: ['requireAuth'] })],
-      signals: [signalOf({ location: { path: 'src/db.ts', startLine: 2, endLine: 2 } }), signalOf({ kind: 'secret' })],
-      maxHypotheses: 5,
-    })
-    expect(task).toContain('- Files in scope: 3')
+      signals: [
+        signalOf({ location: { path: 'src/db.ts', startLine: 2, endLine: 2 } }),
+        signalOf({ location: { path: 'src/db.ts', startLine: 9, endLine: 9 }, kind: 'sink' }),
+        signalOf({ kind: 'secret' }),
+      ],
+      maxUnits: 5,
+    }
+    const task = plannerTask(input)
+    expect(task).toContain('- Files in scope: 3 (test files: 0)')
     expect(task).toContain('typescript (3 files)')
-    expect(task).toContain('GET /orders/:id  src/routes/orders.ts:6  middleware=[] auth=[requireAuth]')
-    expect(task).toContain('js.sql-injection (high) src/db.ts:2')
-    expect(task).toContain('Pattern-rule hits (hints, often false positives; 1 shown)')
-    expect(task).toContain('Propose up to 5 concrete hypotheses')
+    expect(task).toContain('- vendor/lib/ 1 file (php 1) [vendored?]')
+    expect(task).toContain('GET /orders/:id  src/routes/orders.ts:6  auth=[requireAuth]')
+    expect(task).toContain('- src/db.ts: 2 (js.sql-injection)')
+    expect(task).toContain('Plan up to 5 coverage units')
+    expect(task).toContain('Cover every entry surface and trust boundary first')
+    expect(task).toContain('in any language or framework')
+    expect(task).toContain('Explore with list_files')
+    // Quick recon is light: few reads, the overview does most of the work.
+    expect(plannerTask({ ...input, mode: 'quick' })).toContain('you have only a few replies')
+  })
+
+  it('critic shows the ledger, unread files and unreviewed endpoints', () => {
+    const task = criticTask({
+      ledger: [
+        {
+          id: 'u1',
+          title: 'Orders API',
+          surface: 'GET /orders/:id',
+          focus: ['authz'],
+          paths: ['src/routes/orders.ts'],
+          status: 'blocked',
+          findings: 0,
+          reason: { code: 'needs-runtime', fallback: 'x' },
+          origin: 'recon',
+        },
+      ],
+      unread: [{ path: 'src/admin/export.go', language: 'go', lines: 120 }],
+      unreadTotal: 7,
+      endpoints: [endpointOf('POST', '/admin/export', 'src/admin/export.go', 3)],
+      maxUnits: 8,
+      pass: 1,
+    })
+    expect(task).toContain('[blocked: needs-runtime] Orders API — GET /orders/:id — src/routes/orders.ts')
+    expect(task).toContain('Source files no reviewer opened (7, 1 most review-worthy shown)')
+    expect(task).toContain('- src/admin/export.go  (go, 120 lines)')
+    expect(task).toContain('- POST /admin/export  src/admin/export.go')
+    expect(task).toContain('propose up to 8 new units')
+    expect(criticSystem('en')).toContain('"coverage critic"')
   })
 
   it('hunter shows endpoints, signal ids, hypothesis, known issues, and starting files', () => {
@@ -611,52 +655,149 @@ describe('chainSubmitTool', () => {
 })
 
 describe('plannerSubmitTool', () => {
-  const hypothesis = { title: 'h', category: 'authz', target_paths: ['src/routes/orders.ts'], rationale: 'r' }
-  const model = (count: number) => ({
+  const unit = {
+    title: 'u',
+    focus: ['authz'],
+    target_paths: ['src/routes/orders.ts'],
+    rationale: 'r',
+  }
+  const model = (units: readonly Record<string, unknown>[]) => ({
     summary: 's',
     assets: [],
     actors: [],
     trust_boundaries: [],
-    priorities: [],
-    hypotheses: Array.from({ length: count }, () => hypothesis),
+    units,
   })
+  const files = new Set(['src/routes/orders.ts', 'src/guard.ts'])
+  const target = (raw: string): TargetResolution => {
+    const path = raw.replace(/^\.\//, '')
+    return files.has(path)
+      ? { paths: [path], suggestions: [] }
+      : { paths: [], suggestions: path === 'src/gaurd.ts' ? ['src/guard.ts'] : [] }
+  }
+  const resolver = (limit: number) => (units: readonly RawUnit[]) =>
+    resolveUnits(units, { resolve: target, inScope: () => true, limit, origin: 'recon' })
 
-  it('resolves target paths, and sends back once a hypothesis none of whose targets exists', () => {
-    const resolve = (target: string) =>
-      target.endsWith('orders.ts')
-        ? { paths: ['src/routes/orders.ts'], suggestions: [] }
-        : { paths: [], suggestions: target === 'src/gaurd.ts' ? ['src/guard.ts'] : [] }
-    const tool = plannerSubmitTool(4, resolve)
-    const args = {
-      ...model(0),
-      hypotheses: [
-        { ...hypothesis, title: 'ok', target_paths: ['./src/routes/orders.ts', 'nope.ts'] },
-        { ...hypothesis, title: 'lost', target_paths: ['src/gaurd.ts', 'UserThing'] },
-      ],
-    }
+  it('resolves units, and sends back once a unit none of whose targets exists', () => {
+    const tool = plannerSubmitTool(4, resolver(4))
+    const args = model([
+      { ...unit, title: 'ok', target_paths: ['./src/routes/orders.ts', 'nope.ts'] },
+      { ...unit, title: 'lost', target_paths: ['src/gaurd.ts', 'UserThing'] },
+    ])
     const first = validate(tool, args)
     expect(first.error).toContain(
-      '- hypothesis 2 ("lost"): "src/gaurd.ts" is not a file in this repository; did you mean src/guard.ts?',
+      '- unit 2 ("lost"): "src/gaurd.ts" is not a file in this repository; did you mean src/guard.ts?',
     )
-    expect(first.error).toContain('- hypothesis 2 ("lost"): "UserThing" is not a file in this repository.')
-    // A hypothesis with at least one resolvable target is not a reason to send everything back.
-    expect(first.error).not.toContain('hypothesis 1')
+    expect(first.error).toContain('- unit 2 ("lost"): "UserThing" is not a file in this repository.')
+    expect(first.error).toContain('submit_review_plan')
+    // A unit with at least one resolvable target is not a reason to send everything back.
+    expect(first.error).not.toContain('unit 1')
     const second = validate(tool, args)
     expect(second.error).toBeUndefined()
-    expect(second.output?.hypotheses.map(h => h.target_paths)).toEqual([['src/routes/orders.ts'], []])
+    // The unit that still names no file is dropped.
+    expect(second.output?.units.map(u => u.targetPaths)).toEqual([['src/routes/orders.ts']])
+    expect(second.output?.dropped).toBe(1)
     // On the last request nothing is sent back.
-    expect(validate(plannerSubmitTool(4, resolve), args, { final: true }).error).toBeUndefined()
+    expect(validate(plannerSubmitTool(4, resolver(4)), args, { final: true }).error).toBeUndefined()
   })
 
-  it('keeps the first hypotheses up to the cap instead of sending the threat model back', () => {
-    const tool = plannerSubmitTool(2)
-    expect(validate(tool, model(2)).output?.hypotheses).toHaveLength(2)
-    const over = validate(tool, model(3))
-    expect(over.error).toBeUndefined()
-    expect(over.output?.hypotheses).toHaveLength(2)
-    expect(validate(plannerSubmitTool(0), model(1)).output?.hypotheses).toEqual([])
-    expect(validate(tool, model(1)).output?.hypotheses[0]?.target_paths).toEqual(['src/routes/orders.ts'])
+  it('keeps the first units up to the cap and repairs loose fields instead of sending the plan back', () => {
+    const units = [
+      { ...unit, title: 'a', target_paths: ['src/routes/orders.ts'] },
+      { ...unit, title: 'b', target_paths: ['src/guard.ts'] },
+      { ...unit, title: 'c', target_paths: ['src/guard.ts'], focus: ['crypto'] },
+    ]
+    const capped = validate(plannerSubmitTool(2, resolver(2)), model(units))
+    expect(capped.error).toBeUndefined()
+    expect(capped.output?.units.map(u => u.title)).toEqual(['a', 'b'])
+    const loose = validate(
+      plannerSubmitTool(4, resolver(4)),
+      model([
+        {
+          ...unit,
+          title: 'x'.repeat(300),
+          focus: ['IDOR', 'nonsense', 'SQLi'],
+          priority: 'P1',
+          rationale: 'y'.repeat(900),
+        },
+        { ...unit, target_paths: ['src/guard.ts'], focus: 'whatever', priority: null },
+      ]),
+    )
+    expect(loose.error).toBeUndefined()
+    expect(loose.output?.units[0]).toMatchObject({ focus: ['authz', 'injection'], priority: 'high' })
+    expect(loose.output?.units[0]?.title.length).toBeLessThanOrEqual(200)
+    expect(loose.output?.units[1]).toMatchObject({ focus: ['other'], priority: 'medium' })
     // Omitted lists default to empty.
-    expect(validate(tool, { summary: 's' }).output).toMatchObject({ assets: [], hypotheses: [], priorities: [] })
+    expect(validate(plannerSubmitTool(2, resolver(2)), { summary: 's' }).output).toMatchObject({
+      assets: [],
+      units: [],
+      components: [],
+      excluded: [],
+    })
+  })
+})
+
+describe('criticSubmitTool', () => {
+  const resolve = (units: readonly RawUnit[]) =>
+    resolveUnits(units, {
+      resolve: raw =>
+        raw === 'src/guard.ts' ? { paths: [raw], suggestions: [] } : { paths: [], suggestions: ['src/guard.ts'] },
+      inScope: () => true,
+      limit: 2,
+      origin: 'critic',
+    })
+  const gap = { title: 'Guard', focus: ['authn'], target_paths: ['src/guard.ts'], rationale: 'nobody read it' }
+
+  it('stops when the critic says done or proposes nothing valid', () => {
+    expect(validate(criticSubmitTool(2, resolve), { done: true }).output).toEqual({ done: true, units: [], dropped: 0 })
+    const valid = validate(criticSubmitTool(2, resolve), { units: [gap] }).output
+    expect(valid?.done).toBe(false)
+    expect(valid?.units).toMatchObject([{ title: 'Guard', origin: 'critic', targetPaths: ['src/guard.ts'] }])
+  })
+
+  it('asks once about units whose files do not exist, then drops them', () => {
+    const tool = criticSubmitTool(2, resolve)
+    const args = { units: [{ ...gap, target_paths: ['src/gard.ts'] }] }
+    expect(validate(tool, args).error).toContain('did you mean src/guard.ts?')
+    expect(validate(tool, args).output).toEqual({ done: true, units: [], dropped: 1 })
+  })
+})
+
+describe('hunter coverage units', () => {
+  it('presents the unit: title, component, surface and what to verify', () => {
+    const task = hunterTask({
+      kind: 'hunt-unit',
+      focus: ['authz'],
+      targetPaths: ['app/Http/Controllers/OrderController.php'],
+      endpoints: [],
+      signals: [],
+      unit: {
+        title: 'Order API: read and update',
+        component: 'orders',
+        surface: 'PUT /orders/{id}',
+        rationale: 'Check that the order belongs to the caller.',
+      },
+      known: [],
+      frameworks: [],
+    })
+    expect(task).toContain('Unit: Order API: read and update')
+    expect(task).toContain('Component: orders')
+    expect(task).toContain('Entry surface: PUT /orders/{id}')
+    expect(task).toContain("What to verify (planner's view): Check that the order belongs to the caller.")
+    expect(task).toContain('- app/Http/Controllers/OrderController.php')
+    expect(task).toContain('Optionally set coverage')
+  })
+
+  it('accepts an optional, loosely spelled coverage verdict and never asks for one', () => {
+    const run = (args: Record<string, unknown>) => validate(hunterSubmitTool(source), { findings: [], ...args })
+    expect(run({}).output?.coverage).toBeUndefined()
+    expect(run({ coverage: 'Needs runtime', coverage_note: 'Depends on the gateway.' }).output?.coverage).toEqual({
+      verdict: 'needs-runtime',
+      note: 'Depends on the gateway.',
+    })
+    expect(run({ coverage: 'PARTIAL' }).output?.coverage).toEqual({ verdict: 'partial' })
+    expect(run({ coverage: 'complete' }).output?.coverage).toEqual({ verdict: 'complete' })
+    // Unknown words are dropped instead of sending the submission back.
+    expect(run({ coverage: 'maybe?' })).toEqual({ output: { findings: [], assessments: [] } })
   })
 })
