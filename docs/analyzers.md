@@ -167,6 +167,13 @@ Endpoint extraction feeds the attack surface: AI task planning, the Planner's an
 *Endpoints reviewed* coverage figure. Each endpoint records method, full route (mount prefixes resolved, up to 8
 levels), declaring file and line, handler range, middleware, **auth hints** and path parameters.
 
+A JavaScript handler passed by name is looked up in the route file, then through relative imports in the module
+that defines it: an exported function (`import { getUser }`, `import * as users` then `users.getUser`), a method or
+function property of an exported object, class or instance (`export default { list }`,
+`const users = new UsersController()`), CommonJS `exports.list = ...`, and `export *` / `export { … } from`
+barrels, through `asyncHandler(fn)`-style wrappers and `.bind(...)`. Endpoint review tasks then target the handler
+file and the route file together. Handlers from packages, or behind dynamic dispatch, stay unresolved.
+
 | Framework | What is recognized |
 | --- | --- |
 | Express | `app.METHOD`, `router.METHOD`, `router.route(path).get(…)` chains (preceding `.all(mw)` applies to subsequent methods, without a phantom ANY route), `app.use(prefix, …mw, router)` mounts across files, ordered `router.use(mw)` (applies only to later routes) |

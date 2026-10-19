@@ -961,6 +961,10 @@ function handlerRef(ctx: RouteFileContext, span: Span): RawRoute['handler'] {
   )
   if (fn) return refOf(model, fn)
   const text = ctx.ex.text(span).trim()
+  // A handler imported from a controller module: `controller.getUser`, `getUser`, `asyncHandler(ctrl.list)`.
+  const chain = handlerChain(text)
+  const imported = chain ? importedHandler(ctx, chain) : undefined
+  if (imported) return imported
   // Named handler in the same file: `getUser`, `controller.getUser`, `wrap(getUser)`.
   const name =
     /^(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)$/.exec(text)?.[1] ?? /\(\s*([A-Za-z_$][\w$]*)\s*\)$/.exec(text)?.[1]
@@ -971,6 +975,189 @@ function handlerRef(ctx: RouteFileContext, span: Span): RawRoute['handler'] {
     if (v) return refOf(model, v)
   }
   return undefined
+}
+
+/** Re-export hops followed from a route file to the module that defines a handler. */
+const MAX_HANDLER_HOPS = 4
+const CHAIN = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/
+
+/**
+ * The member chain naming a handler, looking through `.bind(...)` and one-argument wrappers
+ * (`asyncHandler(controller.list)`, `catchAsync(list)`).
+ */
+function handlerChain(text: string): string | undefined {
+  let t = text.replace(/\s+/g, '')
+  for (let i = 0; i < 3; i++) {
+    t = t.replace(/\.bind\([^()]*\)$/, '')
+    if (CHAIN.test(t)) return t
+    const inner = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\((.+)\)$/.exec(t)?.[1]
+    if (!inner || /[,()]/.test(inner.replace(/\.bind\([^()]*\)$/, ''))) return undefined
+    t = inner
+  }
+  return undefined
+}
+
+/** The import binding of `local` in `model` (ES import or `require`). */
+function importOf(model: FileModel, local: string): { source: string; imported: string } | undefined {
+  for (const imp of model.imports) {
+    if (imp.kind === 'export-from') continue
+    const binding = imp.bindings.find(b => b.local === local)
+    if (binding) return { source: imp.source, imported: binding.imported }
+  }
+  return undefined
+}
+
+/**
+ * A handler bound by an import of a module in the snapshot: an exported function, a method of an exported
+ * object, class or instance (`controller.getUser` with `import * as controller`, `import controller from`,
+ * `const controller = new UserController()`), following re-exports.
+ */
+function importedHandler(ctx: RouteFileContext, chain: string): RawRoute['handler'] {
+  const { model } = ctx
+  const [root, ...members] = chain.split('.')
+  if (!root || members.length > 2) return undefined
+  const binding = importOf(model, root)
+  // `controllers.users.list` only through a namespace or module object.
+  if (binding && (members.length < 2 || binding.imported === '*'))
+    return exportedHandler(ctx, model, binding.source, binding.imported, members, 0)
+  if (members.length > 1) return undefined
+  // `const controller = new UserController()` with the class imported.
+  const v = model.vars.find(x => x.name === root)
+  const ctor = v ? /^new\s+([A-Za-z_$][\w$]*)\s*\(/.exec(ctx.ex.text(v.value).trim())?.[1] : undefined
+  const ctorBinding = ctor && members.length === 1 ? importOf(model, ctor) : undefined
+  return ctorBinding ? exportedHandler(ctx, model, ctorBinding.source, ctorBinding.imported, members, 0) : undefined
+}
+
+function exportedHandler(
+  ctx: RouteFileContext,
+  from: FileModel,
+  source: string,
+  imported: string,
+  members: readonly string[],
+  depth: number,
+): RawRoute['handler'] {
+  if (depth > MAX_HANDLER_HOPS || !(source.startsWith('.') || source.startsWith('/'))) return undefined
+  const path = resolveRelativeImport(from.path, source, ctx.snapshot)
+  const file = path && path !== from.path ? ctx.snapshot.files.get(path) : undefined
+  const target = file && !file.isGenerated ? ctx.modelOf(file) : undefined
+  if (target?.lang !== 'js') return undefined
+  if (imported !== '*') return exportOf(ctx, target, imported, members, depth)
+  // A namespace or CommonJS module object: its first member is the export.
+  const [name, ...rest] = members
+  if (name === undefined) {
+    const fn = defaultExportFn(target)
+    return fn ? refOf(target, fn) : undefined
+  }
+  return exportOf(ctx, target, name, rest, depth) ?? exportOf(ctx, target, 'default', members, depth)
+}
+
+/** Export `name` of `model` (`default` included), or its member `members[0]`. */
+function exportOf(
+  ctx: RouteFileContext,
+  model: FileModel,
+  name: string,
+  members: readonly string[],
+  depth: number,
+): RawRoute['handler'] {
+  const member = members[0]
+  if (members.length > 1) return undefined
+  const ex = new Expr(model)
+  if (name === 'default') {
+    if (member === undefined) {
+      const fn = defaultExportFn(model)
+      return fn ? refOf(model, fn) : undefined
+    }
+    const found = memberFn(model, ex, defaultContainer(model, ex), member)
+    return found ? refOf(model, found) : undefined
+  }
+  if (member === undefined) {
+    const fn = model.fns.find(f => f.name === name && !f.parent && f.className === undefined)
+    if (fn) return refOf(model, fn)
+    const v = model.vars.find(x => x.name === name && x.isFn)
+    if (v) return refOf(model, v)
+  } else {
+    const container = containerOf(model, ex, name)
+    const found = container ? memberFn(model, ex, container, member) : undefined
+    if (found) return refOf(model, found)
+  }
+  // Re-exports: `export { name } from './x'`, `export * from './x'`, or an import exported again.
+  for (const imp of model.imports) {
+    if (imp.kind !== 'export-from') continue
+    const binding = imp.bindings.find(b => b.local === name)
+    if (binding) return exportedHandler(ctx, model, imp.source, binding.imported, members, depth + 1)
+    if (imp.bindings.length === 0 && !/^export\s*\*\s*as\b/.test(model.source.slice(imp.start, imp.start + 40))) {
+      const found = exportedHandler(ctx, model, imp.source, name, members, depth + 1)
+      if (found) return found
+    }
+  }
+  const binding = importOf(model, name)
+  return binding && model.exportedNames.has(name)
+    ? exportedHandler(ctx, model, binding.source, binding.imported, members, depth + 1)
+    : undefined
+}
+
+/** Where the members of a module-level name live: an object literal, a class, or the class of an instance. */
+interface Container {
+  readonly span?: Span
+  readonly className?: string
+}
+
+function containerOf(model: FileModel, ex: Expr, name: string): Container | undefined {
+  if (model.classes.some(c => c.name === name)) return { className: name }
+  const value = model.vars.find(v => v.name === name)?.value
+  return value ? valueContainer(model, ex, value) : undefined
+}
+
+function valueContainer(model: FileModel, ex: Expr, value: Span): Container | undefined {
+  if (ex.isObjectLiteral(value)) return { span: value }
+  const text = ex.text(value).trim()
+  const ctor = /^new\s+([A-Za-z_$][\w$]*)\s*\(/.exec(text)?.[1]
+  if (ctor) return { className: ctor }
+  const cls = model.classes.find(c => c.start === value.start || (c.start >= value.start && c.end <= value.end))
+  if (cls?.name) return { className: cls.name }
+  return /^[A-Za-z_$][\w$]*$/.test(text) && text !== 'undefined' ? containerOf(model, ex, text) : undefined
+}
+
+/** The default export as a container: `export default {…}`, `module.exports = {…}`, a class or an instance. */
+function defaultContainer(model: FileModel, ex: Expr): Container | undefined {
+  const cls = model.classes.find(c => /^export\s+default\b/.test(model.source.slice(c.declStart, c.declStart + 20)))
+  if (cls?.name) return { className: cls.name }
+  const cjs = model.memberAssigns.find(a => a.target === 'module.exports' && a.op === '=' && !a.fn)
+  if (cjs) return valueContainer(model, ex, cjs.value)
+  const m = /(?:^|[;}\n])[ \t]*export\s+default\s+/.exec(model.source)
+  if (!m) return undefined
+  const at = m.index + m[0].length
+  const [first] = ex.range({ start: at, end: at + 1 })
+  const open = model.tokens[first]
+  if (open?.type === 'punct' && open.value === '{') {
+    const close = model.match[first]!
+    if (close > first) return { span: { start: open.start, end: model.tokens[close]!.end } }
+  }
+  const name = /^(?:new\s+)?([A-Za-z_$][\w$]*)/.exec(model.source.slice(at, at + 200))
+  if (!name?.[1] || /^(?:class|function|async)$/.test(name[1])) return undefined
+  return name[0].startsWith('new') ? { className: name[1] } : containerOf(model, ex, name[1])
+}
+
+/** Method or function property `member` of a container (shorthand properties name a module-level function). */
+function memberFn(model: FileModel, ex: Expr, container: Container | undefined, member: string): FnFact | undefined {
+  if (!container) return undefined
+  if (container.className !== undefined)
+    return model.fns.find(f => f.className === container.className && f.name === member)
+  const span = container.span
+  if (!span) return undefined
+  const direct = model.fns.find(
+    f =>
+      f.name === member &&
+      f.start > span.start &&
+      f.end <= span.end &&
+      (f.parent === undefined || f.parent.start < span.start),
+  )
+  if (direct) return direct
+  const value = ex.prop(span, member) ?? ex.objectEntries(span).find(e => e.key === member && !e.spread)?.value
+  const text = value ? ex.text(value).trim() : ''
+  return /^[A-Za-z_$][\w$]*$/.test(text)
+    ? model.fns.find(f => f.name === text && !f.parent && f.className === undefined)
+    : undefined
 }
 
 function guessFramework(model: FileModel): string {

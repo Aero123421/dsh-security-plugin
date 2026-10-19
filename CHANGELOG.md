@@ -105,6 +105,11 @@ changes; they are called out explicitly.
   never fired.
 - Next.js middleware whose auth check sits behind `pathname.startsWith('/prefix')` gives auth hints only to routes
   under that prefix instead of to every route; other reads of the request path give none.
+- Locate route handlers imported from controller modules (`import * as controller` then `controller.getUser`,
+  named and default imports, exported objects, classes and instances, CommonJS exports, `export *` barrels).
+  Layered Express apps had almost no handler located, so endpoint review tasks pointed only at `*.routes.ts`
+  files without logic; they now target the handler file and the route file. Task keys of such endpoint groups
+  change from the route file to the handler file.
 
 ## [0.4.0] - 2026-10-18
 
