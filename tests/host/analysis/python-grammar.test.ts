@@ -16,6 +16,11 @@ import {
   vendoredPythonLibrary,
 } from '../../../src/host/analysis/python-grammar.ts'
 
+/** Absolute path `vendoredPythonLibrary` builds with `path.join` for one shipped target. */
+function shippedParser(target: string): string {
+  return join(pluginPackageRoot()!, 'vendor', 'tree-sitter-python', 'prebuilds', `prebuild-${target}`, 'parser.so')
+}
+
 describe('vendored Python grammar', () => {
   it('ships a native library for every published target', () => {
     const root = pluginPackageRoot()
@@ -33,7 +38,7 @@ describe('vendored Python grammar', () => {
     const name = pythonPrebuildName(process.platform, process.arch)
     const path = vendoredPythonLibrary()
     if (name) {
-      expect(path).toMatch(new RegExp(`prebuild-${name}/parser.so$`))
+      expect(path).toBe(shippedParser(name))
       expect(existsSync(path!)).toBe(true)
     } else {
       expect(path).toBeUndefined()
@@ -58,10 +63,10 @@ describe('vendored Python grammar', () => {
     expect(vendoredPythonLibrary('linux', 'x64', 'musl')).toBeUndefined()
     expect(vendoredPythonLibrary('linux', 'arm64', 'musl')).toBeUndefined()
     expect(pythonPrebuildName('linux', 'x64', 'glibc', '2.39')).toBe('Linux-X64')
-    expect(vendoredPythonLibrary('linux', 'x64', 'glibc', '2.39')).toMatch(/prebuild-Linux-X64\/parser\.so$/)
+    expect(vendoredPythonLibrary('linux', 'x64', 'glibc', '2.39')).toBe(shippedParser('Linux-X64'))
     // macOS and Windows files are not glibc objects. A musl label does not hide them.
     expect(pythonPrebuildName('darwin', 'arm64', 'musl')).toBe('macOS-ARM64')
-    expect(vendoredPythonLibrary('darwin', 'arm64', 'musl')).toMatch(/prebuild-macOS-ARM64\/parser\.so$/)
+    expect(vendoredPythonLibrary('darwin', 'arm64', 'musl')).toBe(shippedParser('macOS-ARM64'))
   })
 
   it('treats this Linux process as glibc when Node reports a glibc runtime', () => {
@@ -103,7 +108,7 @@ describe('vendored Python grammar', () => {
     expect(pythonPrebuildName('linux', 'arm64', 'glibc', '2.16')).toBeUndefined()
     expect(pythonPrebuildName('linux', 'arm64', 'glibc', '2.9')).toBeUndefined()
     expect(vendoredPythonLibrary('linux', 'arm64', 'glibc', '2.16')).toBeUndefined()
-    expect(vendoredPythonLibrary('linux', 'arm64', 'glibc', '2.17')).toMatch(/prebuild-Linux-ARM64\/parser\.so$/)
+    expect(vendoredPythonLibrary('linux', 'arm64', 'glibc', '2.17')).toBe(shippedParser('Linux-ARM64'))
     expect(pythonPrebuildName('linux', 'x64', 'glibc', 'nope')).toBeUndefined()
     expect(pythonPrebuildName('linux', 'x64', 'glibc', '')).toBeUndefined()
     expect(pythonPrebuildName('win32', 'x64', 'glibc', '2.9')).toBe('Windows-X64')
