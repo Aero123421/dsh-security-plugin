@@ -189,9 +189,18 @@ const WHOLE_BODY_JS =
 const WHOLE_BODY_PY =
   /^(?:self\.)?request\.(?:json|form|data|values|POST|GET|args|get_json\(\)|json\(\)|form\(\)|query_params)$|^(?:self\.)?request\.(?:form|args|POST|GET|data|json|values)\.(?:to_dict|dict|copy)\(\)$/
 
+export interface ExprOptions {
+  /**
+   * Canonical callee for a callee as written, mapping its first segment through the file's imports
+   * (`join` → `path.join` after `import { join } from 'node:path'`). Without it, callees are matched as written.
+   */
+  readonly qualify?: (callee: string) => string
+}
+
 /** Per-file analysis context. */
 export class Expr {
   readonly model: FileModel
+  readonly #qualify: ((callee: string) => string) | undefined
   readonly #sources: readonly SourcePattern[]
   readonly #keywords: ReadonlySet<string>
   readonly #stateByFn = new Map<FnFact | undefined, ScopeCursor>()
@@ -200,8 +209,9 @@ export class Expr {
   #flaskConverters: Map<FnFact, Set<string>> | undefined
   readonly #clientFile: boolean
 
-  constructor(model: FileModel) {
+  constructor(model: FileModel, options: ExprOptions = {}) {
     this.model = model
+    this.#qualify = options.qualify
     this.#clientFile = model.lang === 'js' && /^\s*(?:\/\/[^\n]*\n\s*)*['"]use client['"]/.test(model.source)
     const next = model.lang === 'js' && isNextFile(model.path)
     this.#sources = model.lang === 'py' ? PY_SOURCES : next ? [...JS_SOURCES, ...JS_NEXT_SOURCES] : JS_SOURCES
@@ -437,7 +447,7 @@ export class Expr {
       if (chain.hasCall) {
         const pure = this.model.lang === 'py' ? PY_PURE_CALLEES : JS_PURE_CALLEES
         // A pure helper is constant when its arguments are: keep scanning into them.
-        if (chain.calls.length === 1 && pure.test(chain.calls[0]!.callee)) continue
+        if (chain.calls.length === 1 && this.#matchesCallee(pure, chain.calls[0]!.callee)) continue
       }
       if (chain.parts === 1 && !chain.hasCall && this.#isScalarParam(t.value, at)) continue
       if (chain.parts === 1 && !chain.hasCall && depth < 2) {
@@ -748,11 +758,18 @@ export class Expr {
 
   #isTransparent(callee: string, method: string | undefined): boolean {
     if (this.model.lang === 'py') {
-      if (PY_TRANSPARENT_CALLEES.test(callee)) return true
+      if (this.#matchesCallee(PY_TRANSPARENT_CALLEES, callee)) return true
       return method !== undefined && PY_TRANSPARENT_METHODS.has(method)
     }
-    if (JS_TRANSPARENT_CALLEES.test(callee)) return true
+    if (this.#matchesCallee(JS_TRANSPARENT_CALLEES, callee)) return true
     return method !== undefined && JS_TRANSPARENT_METHODS.has(method)
+  }
+
+  /** The callee as written or as qualified through the file's imports matches `re`. */
+  #matchesCallee(re: RegExp, callee: string): boolean {
+    if (re.test(callee)) return true
+    const qualified = this.#qualify?.(callee)
+    return qualified !== undefined && qualified !== callee && re.test(qualified)
   }
 
   /** Reuse the per-function cursor for increasing offsets; backward queries rebuild exact state.

@@ -119,6 +119,9 @@ changes; they are called out explicitly.
   silent unless request data was visible; they now emit a low-severity `sink` (never a finding) for dynamic
   values, except for fixed hosts, same-site paths, sanitized file names, framework-built URLs, metadata-only file
   calls and requests made from browser code. Findings are unchanged.
+- Follow request data through helpers imported by name, such as `import { join } from 'node:path'` then
+  `readFile(join(dir, req.params.name))`, `import * as p from 'path'`, and Python `from os.path import join`.
+  Taint only passed through these helpers when they were called as `path.join(...)`.
 
 ## [0.4.0] - 2026-10-18
 
