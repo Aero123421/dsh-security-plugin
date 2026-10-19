@@ -17,7 +17,7 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
 
 ## What it does
 
-- **Deterministic analyzers.** A secret scanner with 25 rules (it also does the redaction), 52 pattern rules for
+- **Deterministic analyzers.** A secret scanner with 25 rules (it also does the redaction), 56 pattern rules for
   JavaScript/TypeScript, Python, Dockerfiles, Compose and Kubernetes, and endpoint discovery for Express, Fastify,
   Koa, Hono, NestJS, Next.js, Flask, FastAPI and Django. It also reads lock files for npm, PyPI, Go and Cargo.
   Optional extras: OSV.dev advisory lookups, plus Gitleaks, OSV-Scanner or Semgrep if they are installed.

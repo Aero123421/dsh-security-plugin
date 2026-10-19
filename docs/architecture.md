@@ -92,7 +92,7 @@ flowchart LR
 | `deterministic` | ✓ | ✓ | ✓ | Secret scan (its matches drive redaction), SAST rules, dependency parsing, optional OSV lookup, optional Gitleaks / OSV-Scanner / Semgrep. Reportable signals become findings immediately. |
 | `surface` | ✓ | ✓ | ✓ | HTTP endpoint extraction with handlers, middleware and auth hints. |
 | `threat-model` | – | ✓ | ✓ | One Planner run: assets, actors, trust boundaries, priorities and up to 8 / 16 hypotheses. |
-| `hunt` | ✓ | ✓ | ✓ | Hunter tasks from `planHuntTasks` (Quick: only verifying rule hits of medium or higher). |
+| `hunt` | ✓ | ✓ | ✓ | Hunter tasks from `planHuntTasks` (Quick: verifying rule hits of medium or higher and dangerous sinks, then endpoint groups). |
 | `review` | – | ✓ | ✓ | One Skeptic task per `potential` finding from AI, SAST or external tools at or above the review threshold (Research: Low and above). At most `max(maxTasks, 10)` tasks. |
 | `chain` | – | – | ✓ | One Chain-analyst run over up to 40 non-refuted AI or SAST findings (needs at least 2). |
 | `reconcile`, `report` | ✓ | ✓ | ✓ | New-finding marks, coverage, completion. |
@@ -106,8 +106,13 @@ host-side checks before anything is stored.
 
 **Task planning** (`scan/planning.ts`) is a pure function of the analysis results:
 
-- `hunt-endpoints`: endpoints grouped by handler file, 8 per task; the file's 12 most severe rule hits are attached
-  to its first task. Ranked up for endpoints without auth hints, mutating methods, parameters and nearby rule hits.
+- `hunt-endpoints`: endpoints grouped by handler file, 8 per task. A handler imported from another module (a
+  controller) is resolved to that file, and the task starts from both the handler file and the file that declares
+  the route. The handler file's 12 most severe rule hits are attached to its first task. Every endpoint task looks
+  for broken authorization and authentication, business-logic flaws and untrusted input reaching an interpreter,
+  the shell, the network, the file system or HTML (injection, command execution, SSRF, path traversal, XSS), plus
+  the categories of rule hits in its files. Ranked up for endpoints without auth hints, mutating methods,
+  parameters and nearby rule hits.
 - `hunt-signals`: rule hits (`vulnerability` and `sink`) in files without endpoints, 12 per task. In Deep and
   Research, `vulnerability` hits of an endpoint file beyond those 12 get their own tasks
   (`signals:<file>#<n>`), so every reportable rule hit reaches a hunter.
@@ -117,12 +122,15 @@ host-side checks before anything is stored.
   directory, `./` or `:12` suffixes), or a symbol's defining file; at most 6 files. A hypothesis whose targets do
   not resolve still runs, without starting files. `vulnerability` hits in its target files are attached, so the
   hunter rules on them.
-- `hunt-file`: up to 6 security-sensitive files (auth, session, config, settings, cookie, billing, upload, …) not
-  otherwise targeted. Deep/Research then append lowest-priority sweeps of remaining source files, 4 per task,
+- `hunt-file`: up to 6 security-sensitive files not otherwise targeted, ranked by what their names say they
+  enforce (auth, role, scope, token, crypto, upload first; configuration next; entity-named data-layer files last),
+  then by size. Deep/Research then append lowest-priority sweeps of remaining source files, 4 per task,
   only within spare task capacity and only as many as the hunt budget can pay for (12 requests each). Sweeps
   prefer production files, then sensitive names, then larger files.
-- `triage-signals` (Quick only): medium-or-higher `vulnerability` hits, 12 per task. Quick fills remaining slots
-  with endpoint groups, prioritizing unguarded mutating endpoints, without raising its task or call caps.
+- `triage-signals` (Quick only): medium-or-higher `vulnerability` hits and medium-or-higher `sink`s of high and
+  critical rules (dynamic SQL, shell commands, code evaluation, unsafe deserialization, template injection), 12 per
+  task. Quick fills remaining slots with endpoint groups, prioritizing unguarded mutating endpoints, without raising
+  its task or call caps.
 
 Endpoint, signal and file tasks covering a Planner priority (a file, a directory or a `METHOD /route`) are ranked
 up by 6. Test and fixture files are left out unless `includeTests` is on. Candidates are sorted by priority and cut
