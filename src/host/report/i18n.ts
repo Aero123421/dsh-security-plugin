@@ -98,6 +98,17 @@ export interface ReportLabels {
     }
     readonly unitStatus: Readonly<Record<CoverageUnitStatus, string>>
     readonly unitOrigin: Readonly<Record<CoverageUnit['origin'], string>>
+    /**
+     * Titles of units the Host made itself, by `CoverageUnit.kind`, in the wording of the UI's
+     * `coverage.unit.title.*` messages. Plan and critic units keep the reviewing model's own title.
+     */
+    readonly unitTitles: {
+      readonly endpoints: (file: string) => string
+      readonly signals: (file: string) => string
+      readonly triage: (file: string) => string
+      readonly sweep: (count: string) => string
+      readonly file: (file: string) => string
+    }
     /** Reason texts by `CoverageUnit.reason.code`; unknown codes use the Host's fallback text. */
     readonly unitReasons: Readonly<Record<string, string>>
     readonly unassignedFiles: string
@@ -265,8 +276,15 @@ const EN: ReportLabels = {
     unitsLine: (covered, finding, blocked, notRun) =>
       `${covered} examined without findings · ${finding} with findings · ${blocked} undecided · ${notRun} not examined`,
     unitColumns: { status: 'Status', unit: 'Unit', where: 'Where', note: 'Note' },
-    unitStatus: { covered: 'Examined', finding: 'Findings', blocked: 'Undecided', 'not-run': 'Not examined' },
-    unitOrigin: { recon: 'review plan', critic: 'coverage check', gap: 'added from the analyzers' },
+    unitStatus: { covered: 'Examined', finding: 'With findings', blocked: 'Undecided', 'not-run': 'Not examined' },
+    unitOrigin: { recon: 'review plan', critic: 'added by gap check', gap: 'added by the Host' },
+    unitTitles: {
+      endpoints: file => `Endpoints in ${file}`,
+      signals: file => `Rule hits in ${file}`,
+      triage: () => 'Triage of rule hits',
+      sweep: count => `Files no part covered (${count})`,
+      file: file => `File ${file}`,
+    },
     unitReasons: {
       budget: 'The scan budget ran out.',
       'task-limit': 'Beyond the task limit for this mode.',
@@ -457,10 +475,17 @@ const JA: ReportLabels = {
     missing: 'このスキャンのカバレッジは記録されていません（完了していない可能性があります）。',
     units: '調査対象',
     unitsLine: (covered, finding, blocked, notRun) =>
-      `検出なしで確認 ${covered} · 検出あり ${finding} · 判断保留 ${blocked} · 未確認 ${notRun}`,
+      `指摘なしで確認 ${covered} · 指摘あり ${finding} · 判断保留 ${blocked} · 未確認 ${notRun}`,
     unitColumns: { status: '状態', unit: '調査対象', where: '対象', note: '補足' },
-    unitStatus: { covered: '確認済み', finding: '検出あり', blocked: '判断保留', 'not-run': '未確認' },
-    unitOrigin: { recon: 'レビュー計画', critic: 'カバレッジ確認', gap: 'アナライザーから追加' },
+    unitStatus: { covered: '確認済み', finding: '指摘あり', blocked: '判断保留', 'not-run': '未確認' },
+    unitOrigin: { recon: '調査計画', critic: '抜け漏れの確認で追加', gap: 'ホストが追加' },
+    unitTitles: {
+      endpoints: file => `${file} のエンドポイント`,
+      signals: file => `${file} のルール検出`,
+      triage: () => 'ルール検出の確認',
+      sweep: count => `どの調査対象にも入らなかったファイル（${count} 件）`,
+      file: file => file,
+    },
     unitReasons: {
       budget: 'スキャンの予算を使い切りました。',
       'task-limit': 'このモードのタスク上限を超えました。',
@@ -654,7 +679,14 @@ const ZH: ReportLabels = {
       `已审查且无发现 ${covered} · 有发现 ${finding} · 无法判定 ${blocked} · 未审查 ${notRun}`,
     unitColumns: { status: '状态', unit: '审查单元', where: '位置', note: '说明' },
     unitStatus: { covered: '已审查', finding: '有发现', blocked: '无法判定', 'not-run': '未审查' },
-    unitOrigin: { recon: '审查计划', critic: '覆盖检查', gap: '根据分析器补充' },
+    unitOrigin: { recon: '审查计划', critic: '由缺口检查补充', gap: '由 Host 补充' },
+    unitTitles: {
+      endpoints: file => `${file} 中的接口`,
+      signals: file => `${file} 中的规则命中`,
+      triage: () => '规则命中的核实',
+      sweep: count => `未纳入任何审查部分的文件（${count} 个）`,
+      file: file => `文件 ${file}`,
+    },
     unitReasons: {
       budget: '扫描预算已用完。',
       'task-limit': '超出了此模式的任务上限。',

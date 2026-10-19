@@ -1004,7 +1004,7 @@ const ja = {
   'coverage.plan.finding': '指摘あり {count}',
   'coverage.plan.blocked': '判断保留 {count}',
   'coverage.plan.notRun': '未確認 {count}',
-  'coverage.unassigned': '対象外のファイル',
+  'coverage.unassigned': '未割り当てのファイル',
   'coverage.unassigned.value': 'どの調査対象にも含まれないソースファイルが {count} 件あります',
   'coverage.unassigned.valueOne': 'どの調査対象にも含まれないソースファイルが 1 件あります',
   'coverage.units.label': '調査対象の内訳',

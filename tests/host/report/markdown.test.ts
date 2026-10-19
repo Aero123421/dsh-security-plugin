@@ -408,16 +408,107 @@ describe('renderMarkdown coverage ledger', () => {
     expect(md).toContain('**Review units**')
     expect(md).toContain('0 examined without findings · 1 with findings · 1 undecided · 1 not examined')
     expectInOrder(md, [
-      '| Not examined | Source files in no review unit (3) · added from the analyzers | a.php, b.php, … | The scan budget ran out. |',
-      '| Undecided | Webhooks · coverage check | src/hooks.go, src/client.go, … | Depends on runtime or deployment the source does not show. Depends on the egress proxy. |',
-      '| Findings (2) | Order API · review plan | GET /orders/:id |   |',
+      '| Not examined | Source files in no review unit (3) · added by the Host | a.php, b.php, … | The scan budget ran out. |',
+      '| Undecided | Webhooks · added by gap check | src/hooks.go, src/client.go, … | Depends on runtime or deployment the source does not show. Depends on the egress proxy. |',
+      '| With findings (2) | Order API · review plan | GET /orders/:id |   |',
     ])
   })
 
   it('is localized, and absent without a ledger', () => {
     const md = renderMarkdown(reportInput({ scan: scanDetail({}, { coverage: ledger }), language: 'ja' }))
     expect(md).toContain('**調査対象**')
-    expect(md).toContain('| 未確認 | どの調査対象にも入らなかったソースファイル (3) · アナライザーから追加 |')
+    expect(md).toContain('| 未確認 | どの調査対象にも入らなかったソースファイル (3) · ホストが追加 |')
+    expect(md).toContain('| 指摘あり (2) | Order API · 調査計画 |')
     expect(renderMarkdown(reportInput())).not.toContain('Review units')
+  })
+
+  it('uses the UI wording for statuses and origins in every language', () => {
+    const ja = renderMarkdown(reportInput({ scan: scanDetail({}, { coverage: ledger }), language: 'ja' }))
+    expect(ja).toContain('指摘なしで確認 0 · 指摘あり 1 · 判断保留 1 · 未確認 1')
+    expect(ja).toContain('Webhooks · 抜け漏れの確認で追加')
+    expect(ja).not.toContain('検出あり')
+    expect(ja).not.toContain('アナライザーから追加')
+    const zh = renderMarkdown(reportInput({ scan: scanDetail({}, { coverage: ledger }), language: 'zh' }))
+    expect(zh).toContain('| 有发现 (2) | Order API · 审查计划 |')
+    expect(zh).toContain('Webhooks · 由缺口检查补充')
+    expect(zh).toContain('· 由 Host 补充 |')
+  })
+
+  describe('titles of units the Host made', () => {
+    const hostUnit = (id: string, kind: NonNullable<Coverage['units']>[number]['kind'], paths: string[]) => ({
+      id,
+      title: `Host English title ${id}`,
+      focus: [],
+      paths,
+      status: 'covered' as const,
+      findings: 0,
+      origin: 'gap' as const,
+      kind,
+    })
+    const hosted: Coverage = {
+      ...base,
+      units: [
+        hostUnit('h1', 'endpoints', ['src/a.ts']),
+        hostUnit('h2', 'signals', ['src/b.ts']),
+        hostUnit('h3', 'triage', ['src/c.ts', 'src/d.ts']),
+        hostUnit('h4', 'sweep', ['src/e.ts', 'src/f.ts', 'src/g.ts']),
+        hostUnit('h5', 'file', ['src/h.ts']),
+        hostUnit('h6', 'legacy', ['src/i.ts']),
+        hostUnit('h7', 'endpoints', []),
+        { ...hostUnit('p1', 'plan', ['src/j.ts']), title: 'Billing flow', origin: 'recon' as const },
+        { ...hostUnit('p2', 'endpoints', ['src/k.ts']), title: 'Critic part', origin: 'critic' as const },
+      ],
+    }
+    const render = (language: 'en' | 'ja' | 'zh') =>
+      renderMarkdown(reportInput({ scan: scanDetail({}, { coverage: hosted }), language }))
+
+    it.each([
+      [
+        'en',
+        [
+          'Endpoints in src/a.ts · added by the Host',
+          'Rule hits in src/b.ts · added by the Host',
+          'Triage of rule hits · added by the Host',
+          'Files no part covered (3) · added by the Host',
+          'File src/h.ts · added by the Host',
+        ],
+      ],
+      [
+        'ja',
+        [
+          'src/a.ts のエンドポイント · ホストが追加',
+          'src/b.ts のルール検出 · ホストが追加',
+          'ルール検出の確認 · ホストが追加',
+          'どの調査対象にも入らなかったファイル（3 件） · ホストが追加',
+          'src/h.ts · ホストが追加',
+        ],
+      ],
+      [
+        'zh',
+        [
+          'src/a.ts 中的接口 · 由 Host 补充',
+          'src/b.ts 中的规则命中 · 由 Host 补充',
+          '规则命中的核实 · 由 Host 补充',
+          '未纳入任何审查部分的文件（3 个） · 由 Host 补充',
+          '文件 src/h.ts · 由 Host 补充',
+        ],
+      ],
+    ] as const)('are rebuilt in %s from the unit kind', (language, titles) => {
+      const md = render(language)
+      for (const title of titles) expect(md).toContain(title)
+      expect(md).not.toContain('Host English title h1')
+      expect(md).not.toContain('Host English title h2')
+      expect(md).not.toContain('Host English title h3')
+      expect(md).not.toContain('Host English title h4')
+      expect(md).not.toContain('Host English title h5')
+    })
+
+    it('keeps the stored title for legacy and path-less Host units, and for plan and critic units', () => {
+      const md = render('ja')
+      expect(md).toContain('Host English title h6 · ホストが追加')
+      expect(md).toContain('Host English title h7 · ホストが追加')
+      expect(md).toContain('Billing flow · 調査計画')
+      expect(md).toContain('Critic part · 抜け漏れの確認で追加')
+    })
   })
 })

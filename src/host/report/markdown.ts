@@ -8,6 +8,7 @@
 import type {
   AttackStepView,
   Coverage,
+  CoverageUnit,
   CoverageUnitStatus,
   EvidenceView,
   FindingDetail,
@@ -261,6 +262,33 @@ function coverage(input: ReportInput, labels: ReportLabels): string {
 /** Most coverage units listed in the Markdown report; the JSON report has all of them. */
 const MAX_REPORT_UNITS = 100
 
+/**
+ * The title of a unit: rebuilt in the report language for units the Host made itself (as the UI does with the
+ * `coverage.unit.title.*` messages), the reviewing model's own words for plan and critic units.
+ */
+function unitTitle(
+  unit: CoverageUnit,
+  titles: ReportLabels['coverage']['unitTitles'],
+  language: ReportLanguage,
+): string {
+  const file = unit.paths.find(path => typeof path === 'string' && path !== '')
+  if (unit.origin !== 'gap' || file === undefined) return unit.title
+  switch (unit.kind) {
+    case 'endpoints':
+      return titles.endpoints(file)
+    case 'signals':
+      return titles.signals(file)
+    case 'triage':
+      return titles.triage(file)
+    case 'sweep':
+      return titles.sweep(number(unit.paths.length, language))
+    case 'file':
+      return titles.file(file)
+    default:
+      return unit.title
+  }
+}
+
 /** The coverage ledger: a status line and one row per unit, not-examined and undecided units first. */
 function coverageUnits(c: Coverage, labels: ReportLabels, language: ReportLanguage): string | undefined {
   const units = c.units
@@ -279,7 +307,9 @@ function coverageUnits(c: Coverage, labels: ReportLabels, language: ReportLangua
         ? `${l.unitStatus.finding} (${number(unit.findings, language)})`
         : l.unitStatus[unit.status]
     const title =
-      unit.id === 'unassigned' ? `${l.unassignedFiles} (${number(c.unassignedFiles ?? 0, language)})` : unit.title
+      unit.id === 'unassigned'
+        ? `${l.unassignedFiles} (${number(c.unassignedFiles ?? 0, language)})`
+        : unitTitle(unit, l.unitTitles, language)
     return [
       inline(status),
       `${inline(title)} · ${inline(l.unitOrigin[unit.origin])}`,
