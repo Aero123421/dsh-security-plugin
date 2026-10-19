@@ -147,6 +147,15 @@ describe('budget reserve for the independent review', () => {
     expect(hunts.length).toBeGreaterThan(ROUTERS)
     expect(hunts.every(t => t.status === 'done')).toBe(true)
     expect(h.notices(scan.id)).not.toContain('hunt-budget-reserved')
-    expect(model.calls.hunter).toBe(hunts.length * 15)
+    // Only the coverage critic's reserve is kept: hunters running into the wave ceiling wrap up there and submit.
+    expect(model.wrapUps.hunter).toBeGreaterThan(0)
+    expect(model.calls.hunter).toBeLessThan(hunts.length * 15)
+    expect(
+      h.store
+        .listAgentRuns(scan.id)
+        .filter(run => run.role === 'hunter')
+        .every(run => run.status === 'submitted'),
+    ).toBe(true)
+    expect(tasks.find(t => t.kind === 'critic')?.status).toBe('done')
   })
 })

@@ -611,7 +611,7 @@ export class ScanJob {
     }
     this.criticPassesLeft = 0
     const tasks = store.listTasks(this.scan.id).filter(t => HUNT_TASK_KINDS.has(t.kind))
-    const pool = await this.runPool(tasks, route, this.huntBudget, task => this.runHunter(task, route))
+    const pool = await this.runPool(tasks, route, this.huntBudget, task => this.runHunter(task, route, this.huntBudget))
     if (pool.skipped > 0 && !pool.scanExhausted && this.reviewDemand > 0) {
       this.notice(
         'info',
@@ -622,10 +622,16 @@ export class ScanJob {
     this.finishPhase('hunt')
   }
 
-  /** Runs the pending hunt tasks up to the wave ceiling; tasks that do not start stay pending. */
+  /**
+   * Runs the pending hunt tasks up to the wave ceiling; tasks that do not
+   * start stay pending. Wave hunters work under the wave ceiling too (they
+   * are asked to wrap up there), so the critic reserve holds.
+   */
   private async huntWave(route: ModelRef): Promise<void> {
     const tasks = this.deps.store.listTasks(this.scan.id).filter(t => HUNT_TASK_KINDS.has(t.kind))
-    await this.runPool(tasks, route, this.waveBudget, task => this.runHunter(task, route), { leavePending: true })
+    await this.runPool(tasks, route, this.waveBudget, task => this.runHunter(task, route, this.waveBudget), {
+      leavePending: true,
+    })
   }
 
   /**
@@ -942,7 +948,8 @@ export class ScanJob {
   // Task runners
   // -------------------------------------------------------------------------
 
-  private async runHunter(task: TaskRecord, route: ModelRef): Promise<void> {
+  /** One hunt task under `budget` (the wave or the hunt ceiling). */
+  private async runHunter(task: TaskRecord, route: ModelRef, budget: PhaseBudget): Promise<void> {
     const { privacy } = this.analysis
     const endpointIds = new Set(task.input.endpointIds ?? [])
     const endpoints = this.analysis.endpoints.filter(e => endpointIds.has(e.id) && privacy.endpointVisible(e))
@@ -993,8 +1000,18 @@ export class ScanJob {
       }),
       submit: hunterSubmitTool(this.analysis.quoteSource, { signalIds: [...signalIds.keys()] }),
       maxTurns: this.scan.budget.maxTurnsPerWorker,
-      budget: this.huntBudget,
+      budget,
     })
+    if (
+      result.status === 'budget_exhausted' &&
+      result.usage.llmCalls === 0 &&
+      budget !== this.huntBudget &&
+      !this.huntBudget.exhausted()
+    ) {
+      // Refused its first request at the wave ceiling (another worker took the last call): it waits for a later pool.
+      this.deps.store.updateTask(task.id, { status: 'pending', attempts: task.attempts })
+      return
+    }
     if (result.status !== 'submitted' || !result.output) {
       this.failTask(task, result)
       return

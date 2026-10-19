@@ -273,25 +273,34 @@ describe('coverage critic', () => {
     expect(second.harness.store.listTasks(second.id).filter(t => t.kind === 'critic')).toHaveLength(1)
   })
 
-  it('keeps budget back for the critic: the first wave leaves room, then the rest of the hunt runs', async () => {
-    const units = Array.from({ length: 10 }, (_, i) =>
+  const routerUnits = () =>
+    Array.from({ length: 10 }, (_, i) =>
       unit(`Router ${i}`, 'src/routes/orders.ts', { focus: [['authz', 'injection', 'ssrf', 'xss', 'crypto'][i % 5]] }),
     ).map((u, i) => ({ ...u, target_paths: [['src/routes/orders.ts', 'src/routes/admin.ts'][i % 2]] }))
+  const tightBudget = (parallelWorkers: number): SettingsPatch => ({
+    ...AI_SETTINGS,
+    scan: { parallelWorkers, reviewThreshold: 'critical' },
+    budgets: { deep: { maxLlmCalls: 100 } },
+  })
+
+  it('keeps budget back for the critic: the first wave leaves room, then the rest of the hunt runs', async () => {
+    const units = routerUnits()
     const llm = scriptedModel({
       recon: () => ({ summary: 'A shop.', units }),
       critic: () => ({ units: [unit('Webhooks', 'src/routes/webhooks.ts', { focus: ['ssrf', 'authn'] })] }),
       hunterTurns: 8,
     })
-    const settings: SettingsPatch = {
-      ...AI_SETTINGS,
-      scan: { parallelWorkers: 1, reviewThreshold: 'critical' },
-      budgets: { deep: { maxLlmCalls: 100 } },
-    }
-    const h = harness(llm, settings)
+    const h = harness(llm, tightBudget(1))
     const { id } = await scan(h, 'deep', 'shop')
     const runs = h.store.listAgentRuns(id)
     const criticRun = runs.find(run => run.title.startsWith('Check review coverage'))
     expect(criticRun?.status).toBe('submitted')
+    // Tasks the wave ceiling left for later are shown to the critic as queued, not as failed gaps.
+    const criticPrompt = textOf(llm.calls.find(call => roleOf(call) === 'critic') as LlmGenerateOptions)
+    expect(criticPrompt).toMatch(/Units already queued for the next review wave \((\d+)/)
+    expect(criticPrompt).not.toContain('not-run: failed')
+    expect(criticPrompt).toContain('[queued] Router')
+    expect(h.store.getScan(id)?.coverage?.units?.some(u => u.reason?.code === 'failed')).toBe(false)
     // Hunting went on after the critic: the reserve was for the critic, not taken from the hunt.
     const after = runs.filter(run => run.role === 'hunter' && run.startedAt > (criticRun?.startedAt ?? ''))
     expect(after.length).toBeGreaterThan(0)
@@ -299,6 +308,21 @@ describe('coverage critic', () => {
     // What did not fit is in the ledger as not run for budget.
     const ledger = h.store.getScan(id)?.coverage?.units ?? []
     expect(ledger.some(u => u.status === 'not-run' && u.reason?.code === 'budget')).toBe(true)
+  })
+
+  it('stops wave hunters at the wave ceiling, so long tasks started in parallel cannot use up the critic reserve', async () => {
+    const units = routerUnits()
+    const llm = scriptedModel({
+      recon: () => ({ summary: 'A shop.', units }),
+      critic: () => ({ done: true }),
+      hunterTurns: 20,
+    })
+    const h = harness(llm, tightBudget(3))
+    const { id } = await scan(h, 'deep', 'shop')
+    expect(h.store.listTasks(id).filter(t => t.kind === 'critic')).toMatchObject([{ status: 'done' }])
+    expect(h.store.getScan(id)?.usage.llmCalls).toBeLessThanOrEqual(100)
+    // Wave hunters were asked to wrap up at the wave ceiling.
+    expect(h.events(id).some(e => e.type === 'worker-wrap-up')).toBe(true)
   })
 })
 
