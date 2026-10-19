@@ -32,6 +32,7 @@ import {
 } from '../agents/roles/hunter.ts'
 import { plannerSubmitTool, plannerSystem, plannerTask, type ThreatModelOutput } from '../agents/roles/planner.ts'
 import { type SkepticOutput, skepticSubmitTool, skepticSystem, skepticTask } from '../agents/roles/skeptic.ts'
+import type { BudgetGate } from '../agents/runtime/budget.ts'
 import type { WorkerTool } from '../agents/runtime/tool.ts'
 import { runWorker, type WorkerResult } from '../agents/runtime/worker.ts'
 import { resolveTargetPath, type TargetResolution } from '../agents/tools/paths.ts'
@@ -45,7 +46,7 @@ import type { LlmPort, LoggerPort } from '../dsh/ports.ts'
 import { createPathMasker, type PathMasker } from '../paths.ts'
 import type { SecurityStore } from '../store/types.ts'
 import { type AnalysisContext, type AnalysisStep, analyzeWorkspace } from './analysis.ts'
-import { ScanBudgetGate } from './budget.ts'
+import { affordableHuntTasks, type PhaseBudget, phaseCeilings, ScanBudgetGate } from './budget.ts'
 import {
   applySkepticOutput,
   isReportableSignal,
@@ -141,6 +142,12 @@ export class ScanJob {
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined
   private stopRequest: StopRequest | undefined
   private budget!: ScanBudgetGate
+  /** Phase views of `budget`: each stops ordinary requests at its ceiling, leaving a reserve for later phases. */
+  private huntBudget!: PhaseBudget
+  private reviewBudget!: PhaseBudget
+  private chainBudget!: PhaseBudget
+  /** Reviews the review phase would run now; sizes the reserve hunting leaves for it. */
+  private reviewDemand = 0
   private analysis!: AnalysisContext
   private scan: ScanRecord
   private discarded = 0
@@ -195,6 +202,9 @@ export class ScanJob {
       clearFinishedAt: true,
     })
     this.budget = new ScanBudgetGate(this.scan.budget, this.scan.usage, this.signal, () => this.deps.now().getTime())
+    this.huntBudget = this.budget.phase(() => this.ceilings().hunt)
+    this.reviewBudget = this.budget.phase(() => this.ceilings().review)
+    this.chainBudget = this.budget.phase(() => this.ceilings().chain)
     this.event('info', 'run-start', `Scan ${resumed ? 'resumed' : 'started'}`)
     try {
       this.armDeadline()
@@ -407,7 +417,10 @@ export class ScanJob {
       this.finishPhase('threat-model')
       return
     }
+    // The planner works before hunting and shares its ceiling, so it cannot eat into the review reserve.
+    this.updateReviewDemand()
     const { result } = await this.runAgent<ThreatModelOutput>(task, route, {
+      budget: this.huntBudget,
       system: plannerSystem(this.language()),
       task: plannerTask({
         language: this.language(),
@@ -450,6 +463,7 @@ export class ScanJob {
       this.skipPhases('hunt')
       return
     }
+    this.updateReviewDemand()
     const plan = planHuntTasks({
       mode: this.scan.mode,
       snapshot: this.analysis.snapshot,
@@ -458,6 +472,8 @@ export class ScanJob {
       hypotheses: this.scan.threatModel?.hypotheses ?? [],
       includeTests: this.scan.settings.scan.includeTests,
       maxTasks: this.scan.budget.maxTasks,
+      // Low-priority sweeps only fill what the hunt budget (after the review reserve) can pay for.
+      budgetTasks: affordableHuntTasks(this.ceilings().hunt, this.budget.usage(), this.tokensPerCall()),
       isWithheld: path => this.analysis.privacy.isWithheld(path),
     })
     for (const planned of plan.tasks) this.ensure(planned)
@@ -465,11 +481,18 @@ export class ScanJob {
       this.notice(
         'info',
         'task-limit',
-        `${plan.overflow} lower-priority review areas were not scheduled because of the task limit for this mode.`,
+        `${plan.overflow} lower-priority review areas were not scheduled because of the task or budget limit for this mode.`,
       )
     }
     const tasks = this.deps.store.listTasks(this.scan.id).filter(t => HUNT_KINDS.has(t.kind))
-    await this.runPool(tasks, route, task => this.runHunter(task, route))
+    const pool = await this.runPool(tasks, route, this.huntBudget, task => this.runHunter(task, route))
+    if (pool.skipped > 0 && !pool.scanExhausted && this.reviewDemand > 0) {
+      this.notice(
+        'info',
+        'hunt-budget-reserved',
+        `${pool.skipped} lower-priority review task(s) were skipped to keep part of the budget for the independent review of findings.`,
+      )
+    }
     this.finishPhase('hunt')
   }
 
@@ -494,7 +517,14 @@ export class ScanJob {
     )
     for (const task of planned) this.ensure(task)
     const tasks = this.deps.store.listTasks(this.scan.id).filter(t => t.kind === 'review')
-    await this.runPool(tasks, route, task => this.runSkeptic(task, route))
+    const pool = await this.runPool(tasks, route, this.reviewBudget, task => this.runSkeptic(task, route))
+    if (pool.skipped > 0) {
+      this.notice(
+        'warn',
+        'review-skipped',
+        `${pool.skipped} finding(s) did not get an independent review because the budget ran out.`,
+      )
+    }
     this.finishPhase('review')
   }
 
@@ -516,7 +546,7 @@ export class ScanJob {
           privacy.reviewable(f),
       )
       .slice(0, 40)
-    if (!route || candidates.length < 2 || this.budget.exhausted()) {
+    if (!route || candidates.length < 2 || this.chainBudget.exhausted()) {
       this.skipPhases('chain')
       return
     }
@@ -535,6 +565,7 @@ export class ScanJob {
         task: chainTask([...ids.entries()].map(([id, finding]) => ({ id, finding: privacy.finding(finding) }))),
         submit: chainSubmitTool(this.analysis.quoteSource),
         maxTurns: Math.min(this.scan.budget.maxTurnsPerWorker, MAX_SHORT_ROLE_TURNS),
+        budget: this.chainBudget,
       })
       if (result.status === 'submitted' && result.output) {
         const outcome = recordChains(this.deps.store, result.output, ids, ctx)
@@ -672,6 +703,7 @@ export class ScanJob {
       }),
       submit: hunterSubmitTool(this.analysis.quoteSource, { signalIds: [...signalIds.keys()] }),
       maxTurns: this.scan.budget.maxTurnsPerWorker,
+      budget: this.huntBudget,
     })
     if (result.status !== 'submitted' || !result.output) {
       this.failTask(task, result)
@@ -705,6 +737,8 @@ export class ScanJob {
       assessed: outcome.assessed,
       disputed: outcome.disputed,
     })
+    // New findings need reviews: the hunt ceiling follows the reserve they call for.
+    if (outcome.created > 0) this.updateReviewDemand()
   }
 
   private async runSkeptic(task: TaskRecord, route: ModelRef): Promise<void> {
@@ -730,6 +764,7 @@ export class ScanJob {
       }),
       submit: skepticSubmitTool(this.analysis.quoteSource),
       maxTurns: Math.min(this.scan.budget.maxTurnsPerWorker, MAX_SHORT_ROLE_TURNS),
+      budget: this.reviewBudget,
     })
     if (result.status !== 'submitted' || !result.output) {
       this.failTask(task, result)
@@ -739,25 +774,32 @@ export class ScanJob {
     this.completeTask(task, { verdict: updated.review?.verdict ?? 'inconclusive' })
   }
 
+  /**
+   * Runs `tasks` with up to `parallelWorkers` workers until they are done or
+   * `budget` (the phase's ceiling) stops new ones. Returns how many were
+   * skipped for budget, and whether the scan's own limits (not only the
+   * phase ceiling) had been reached.
+   */
   private async runPool(
     tasks: readonly TaskRecord[],
     route: ModelRef,
+    budget: PhaseBudget,
     run: (task: TaskRecord) => Promise<void>,
-  ): Promise<void> {
+  ): Promise<{ readonly skipped: number; readonly scanExhausted: boolean }> {
     tasks = tasks.map(task => this.refreshTargets(task))
     const queue = tasks.filter(t => t.status === 'pending' || t.status === 'running')
     const total = tasks.length
     let done = tasks.length - queue.length
     let next = 0
     this.progress(done, total)
-    const workers = Math.max(1, Math.min(this.scan.settings.scan.parallelWorkers, this.deps.config.maxParallelWorkers))
+    const workers = this.workers()
     let halted = false
     const loop = async (): Promise<void> => {
       try {
         while (next < queue.length && !halted) {
           this.checkStopped()
           this.checkConsent()
-          if (this.budget.exhausted()) return
+          if (budget.exhausted()) return
           const task = queue[next++]
           if (!task) return
           const broken = this.brokenRoutes.get(routeKey(route))
@@ -789,16 +831,23 @@ export class ScanJob {
     if (failure) throw failure.reason
     this.checkStopped()
     // Budget ran out: what is left will not run in this scan.
+    const scanExhausted = budget.scanExhausted() !== undefined
+    const message = scanExhausted
+      ? 'Skipped because the scan budget was used up.'
+      : 'Skipped to keep the rest of the scan budget for the phases that follow (independent review).'
+    let skipped = 0
     for (const task of queue.slice(next)) {
       const current = this.deps.store.getTask(task.id)
       if (current && (current.status === 'pending' || current.status === 'running')) {
         this.deps.store.updateTask(task.id, {
           status: 'skipped',
           finishedAt: this.iso(),
-          error: { code: 'budget', message: 'Skipped because the scan budget was used up.' },
+          error: { code: 'budget', message },
         })
+        skipped++
       }
     }
+    return { skipped, scanExhausted }
   }
 
   private async runAgent<T>(
@@ -809,6 +858,8 @@ export class ScanJob {
       task: string
       submit: WorkerTool<unknown, T>
       maxTurns: number
+      /** The phase's budget (ceiling plus wrap-up reserve). */
+      budget: BudgetGate
     },
   ): Promise<AgentOutcome<T>> {
     const llm = this.deps.llm()
@@ -879,7 +930,7 @@ export class ScanJob {
       task: this.analysis.privacy.scrub(spec.task),
       tools,
       maxTurns: spec.maxTurns,
-      budget: this.budget,
+      budget: spec.budget,
       signal: this.aiSignal,
       idleTimeoutMs: this.deps.config.llmIdleTimeoutMs,
       onEvent: event => {
@@ -1069,6 +1120,43 @@ export class ScanJob {
 
   private language(): 'en' | 'ja' | 'zh' {
     return this.scan.language ?? 'en'
+  }
+
+  /** Phase ceilings for the current usage and review demand (see `phaseCeilings`). */
+  private ceilings() {
+    return phaseCeilings({
+      limits: this.scan.budget,
+      mode: this.scan.mode,
+      reviews: this.reviewDemand,
+      chain: this.scan.mode === 'research' && this.route('chain') !== undefined,
+      workers: this.workers(),
+      tokensPerCall: this.tokensPerCall(),
+    })
+  }
+
+  /** Average budget tokens per model request so far; 0 until there are a few to average. */
+  private tokensPerCall(): number {
+    const usage = this.budget.usage()
+    return usage.llmCalls >= 5 ? (usage.inputTokens + usage.outputTokens) / usage.llmCalls : 0
+  }
+
+  private workers(): number {
+    return Math.max(1, Math.min(this.scan.settings.scan.parallelWorkers, this.deps.config.maxParallelWorkers))
+  }
+
+  /** Recount the reviews the review phase would run (none without a review phase or reviewer route). */
+  private updateReviewDemand(): void {
+    if (this.scan.mode === 'quick' || this.route('skeptic') === undefined) {
+      this.reviewDemand = 0
+      return
+    }
+    this.reviewDemand = planReviewTasks(
+      this.deps.store.listFindings(this.scan.id),
+      this.scan.mode,
+      this.scan.settings.scan.reviewThreshold,
+      Math.max(this.scan.budget.maxTasks, 10),
+      path => this.analysis.privacy.isWithheld(path),
+    ).length
   }
 
   /**

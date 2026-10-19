@@ -46,6 +46,13 @@ export interface HuntPlanInput {
   readonly includeTests: boolean
   readonly maxTasks: number
   /**
+   * Hunt tasks the budget is expected to pay for. Low-priority sweeps only
+   * fill the plan up to this (and `maxTasks`); other families are planned
+   * up to `maxTasks` and ranked, so the budget runs out on the least
+   * important ones. Default: `maxTasks`.
+   */
+  readonly budgetTasks?: number
+  /**
    * Paths that must never be shown to a model. No task is planned for work
    * whose only material is in such files, and they are left out of target
    * lists (a worker cannot read them anyway).
@@ -114,7 +121,8 @@ export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTa
   let overflow = Math.max(0, ranked.length - input.maxTasks)
   if (input.mode !== 'quick') {
     const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
-    const sweep = planSweep(input.snapshot, targeted, inScope, Math.max(0, input.maxTasks - tasks.length))
+    const room = Math.min(input.maxTasks, Math.max(0, Math.floor(input.budgetTasks ?? input.maxTasks)))
+    const sweep = planSweep(input.snapshot, targeted, inScope, Math.max(0, room - tasks.length))
     // Append only: sweep work must never displace an existing task family.
     tasks.push(...sweep.tasks)
     overflow += sweep.overflow

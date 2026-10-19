@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ScanBudgetGate } from '../../../src/host/scan/budget.ts'
+import { affordableHuntTasks, phaseCeilings, ScanBudgetGate } from '../../../src/host/scan/budget.ts'
 import type { ScanUsage } from '../../../src/shared/contracts.ts'
 import type { ScanBudget } from '../../../src/shared/settings.ts'
 
@@ -137,5 +137,78 @@ describe('ScanBudgetGate', () => {
     expect(budget.pressure()).toBeCloseTo(0.5)
     budget.record({ inputTokens: 5000, outputTokens: 0 })
     expect(budget.pressure()).toBe(1)
+  })
+})
+
+describe('phase budgets', () => {
+  const DEEP: ScanBudget = {
+    maxLlmCalls: 900,
+    maxTokens: 9_000_000,
+    maxMinutes: 180,
+    maxTurnsPerWorker: 72,
+    maxTasks: 120,
+  }
+  const reserve = (overrides: Partial<Parameters<typeof phaseCeilings>[0]> = {}) =>
+    phaseCeilings({ limits: DEEP, mode: 'deep', reviews: 0, chain: false, workers: 2, tokensPerCall: 0, ...overrides })
+
+  it('keeps for review what the pending reviews need, at most the mode share, plus a small wrap-up reserve', () => {
+    // Nothing to review: hunting may use all but the wrap-up reserve (2 requests per worker, 3% of the time).
+    expect(reserve().hunt).toEqual({ llmCalls: 896, tokens: 9_000_000 - 40_000, elapsedMs: 180 * 60_000 - 324_000 })
+    // Ten reviews at six requests each.
+    expect(reserve({ reviews: 10 }).hunt.llmCalls).toBe(900 - 60 - 4)
+    // Many reviews: capped at 30% of the budget in Deep, 35% in Research.
+    expect(reserve({ reviews: 56 }).hunt.llmCalls).toBe(900 - 270 - 4)
+    expect(reserve({ reviews: 500, mode: 'research' }).hunt.llmCalls).toBe(900 - 315 - 4)
+    // Quick has no review phase.
+    expect(reserve({ reviews: 56, mode: 'quick' }).hunt.llmCalls).toBe(896)
+    // The review phase leaves room for the chain run (Research) and wrap-ups.
+    const research = reserve({ reviews: 56, mode: 'research', chain: true })
+    expect(research.hunt.llmCalls).toBe(900 - 315 - 12 - 4)
+    expect(research.review.llmCalls).toBe(900 - 12 - 4)
+    expect(research.chain.llmCalls).toBe(896)
+  })
+
+  it('reserves tokens and time in proportion, from the observed tokens per request', () => {
+    const observed = reserve({ reviews: 10, tokensPerCall: 12_000 })
+    expect(observed.hunt.tokens).toBe(9_000_000 - 64 * 12_000)
+    // 60 of 900 requests reserved for reviews keep 1/15 of the time, plus 3% for wrap-ups.
+    expect(observed.hunt.elapsedMs).toBe(180 * 60_000 - 720_000 - 324_000)
+    // A costly average never reserves more than 1.5 times the calls' share of the tokens.
+    const costly = reserve({ reviews: 56, tokensPerCall: 500_000 })
+    expect(costly.hunt.tokens).toBe(9_000_000 - Math.round(9_000_000 * (274 / 900) * 1.5))
+  })
+
+  it('still lets a tiny budget run: reserves never round up to the whole budget', () => {
+    const tiny = phaseCeilings({ limits: LIMITS, mode: 'deep', reviews: 5, chain: true, workers: 4, tokensPerCall: 0 })
+    expect(tiny.hunt.llmCalls).toBe(3)
+    expect(tiny.review.llmCalls).toBe(3)
+  })
+
+  it('stops ordinary requests at the phase ceiling and lets wrap-up requests through up to the scan limits', () => {
+    const { budget } = gate({ maxLlmCalls: 10, maxTokens: 10_000 })
+    let ceiling = { llmCalls: 2, tokens: 10_000, elapsedMs: 60_000 }
+    const phase = budget.phase(() => ceiling)
+    expect(phase.admit()).toEqual({ ok: true })
+    expect(phase.admit()).toEqual({ ok: true })
+    expect(phase.exhausted()).toBe('calls')
+    expect(phase.scanExhausted()).toBeUndefined()
+    expect(phase.admit()).toEqual({ ok: false, reason: 'calls' })
+    expect(phase.admit({ wrapUp: true })).toEqual({ ok: true })
+    expect(budget.usage().llmCalls).toBe(3)
+    // The ceiling is read on every request, so a growing reserve takes effect at once.
+    ceiling = { llmCalls: 10, tokens: 500, elapsedMs: 60_000 }
+    phase.record({ inputTokens: 600, outputTokens: 0 })
+    expect(phase.admit()).toEqual({ ok: false, reason: 'tokens' })
+    // Nothing is admitted beyond the scan limits, wrap-up or not.
+    budget.record({ inputTokens: 9_400, outputTokens: 0 })
+    expect(phase.admit({ wrapUp: true })).toEqual({ ok: false, reason: 'tokens' })
+    expect(phase.scanExhausted()).toBe('tokens')
+  })
+
+  it('counts the hunt tasks the hunt ceiling can still pay for', () => {
+    const ceiling = { llmCalls: 626, tokens: 6_000_000, elapsedMs: 1 }
+    expect(affordableHuntTasks(ceiling, { ...ZERO, llmCalls: 26 }, 0)).toBe(50)
+    expect(affordableHuntTasks(ceiling, { ...ZERO, llmCalls: 26, inputTokens: 5_400_000 }, 10_000)).toBe(5)
+    expect(affordableHuntTasks(ceiling, { ...ZERO, llmCalls: 700 }, 0)).toBe(0)
   })
 })
