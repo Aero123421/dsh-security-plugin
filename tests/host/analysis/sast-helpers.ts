@@ -22,9 +22,9 @@ export const MODES: Modes = astGrep
   : [['fallback', undefined]]
 
 /**
- * Analysis modes for Python cases: `ast` only when the optional
- * `@ast-grep/lang-python` grammar is installed (otherwise a handle would
- * silently use the indentation fallback for `.py` files).
+ * Analysis modes for Python cases: `ast` only when the shipped grammar
+ * loaded (otherwise a handle would silently use the indentation fallback
+ * for `.py` files).
  */
 export const PY_MODES: Modes = astGrep?.supportsPython
   ? [

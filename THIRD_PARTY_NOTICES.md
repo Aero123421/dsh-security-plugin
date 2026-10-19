@@ -86,12 +86,74 @@ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
 ```
 
+## Shipped in `vendor/tree-sitter-python`
+
+Python ASTs load these prebuilds by path. They are the platform files from
+[@ast-grep/lang-python](https://www.npmjs.com/package/@ast-grep/lang-python) 0.0.6,
+built from [tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python)
+0.25.0 (tag v0.25.0). The plugin does not depend on either npm package.
+Targets: Linux x64, Linux arm64, macOS x64, macOS arm64, Windows x64.
+Other platforms use the built-in Python parser, and Settings and Coverage say so.
+Tested with @ast-grep/napi 0.51.0. The same texts are next to the binaries
+(`LICENSE` and `tree-sitter-python.LICENSE`).
+
+### ast-grep language package — MIT
+
+```
+MIT License
+
+Copyright (c) 2025 ast-grep
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### tree-sitter-python 0.25.0 — MIT
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2016 Max Brunsfeld
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Optional dependency (installed by the package manager, not bundled)
 
 | Package | Version | License | Notes |
 | --- | --- | --- | --- |
 | [@ast-grep/napi](https://github.com/ast-grep/ast-grep) | 0.51.0 | MIT | Native tree-sitter engine with prebuilt binaries. When it is missing or has no binary for the platform, the plugin uses its built-in tokenizer instead. Its license text ships in its own package. |
-| [@ast-grep/lang-python](https://www.npmjs.com/package/@ast-grep/lang-python) | 0.0.6 | ISC (manifest), MIT (shipped LICENSE) | Optional tree-sitter-python grammar (upstream grammar 0.25.0, MIT); includes platform prebuilds and uses @ast-grep/setup-lang 0.0.6 (also ISC in its manifest, MIT in its shipped LICENSE). Tested with @ast-grep/napi 0.51.0. License texts ship in the respective packages. If unavailable, Python uses the built-in tokenizer. |
 
 ## External tools downloaded only at the user's request
 

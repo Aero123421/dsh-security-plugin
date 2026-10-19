@@ -4,14 +4,15 @@
  * The package is an optional dependency with prebuilt binaries for a handful
  * of platforms, so every caller must cope with `undefined`: analyzers fall
  * back to their token/line based extractors with reduced precision. Python
- * support needs the separate `@ast-grep/lang-python` package, which is loaded
- * opportunistically and registered as a dynamic language.
+ * uses the tree-sitter grammar shipped in `vendor/tree-sitter-python` when
+ * this OS and CPU have a prebuild, registered as a dynamic language.
  *
  * Only the small structural surface below is used. The native objects are
  * typed locally so nothing from the optional package leaks into our types.
  */
 
 import { closeSync, openSync, readSync, statSync } from 'node:fs'
+import { PYTHON_DYNAMIC_LANGUAGE, vendoredPythonLibrary } from './python-grammar.ts'
 
 /** 0-based position reported by ast-grep. `index` is a UTF-16 offset into the source string. */
 export interface SgPos {
@@ -53,7 +54,7 @@ export interface AstGrepLangs {
   readonly JavaScript: string
   readonly TypeScript: string
   readonly Tsx: string
-  /** Present only when `@ast-grep/lang-python` was loaded and registered. */
+  /** Present only when the shipped Python grammar was registered. */
   readonly Python?: string
 }
 
@@ -70,7 +71,6 @@ export interface AstGrepHandle {
 export const AST_MAX_SOURCE_BYTES = 512 * 1024
 
 const NAPI_MODULE = '@ast-grep/napi'
-const PYTHON_MODULE = '@ast-grep/lang-python'
 const PYTHON_LANG = 'python'
 
 let loading: Promise<AstGrepHandle | undefined> | undefined
@@ -90,10 +90,10 @@ export async function loadAstGrep(options: { readonly disabled?: boolean } = {})
 
 /**
  * Build a handle from an already imported `@ast-grep/napi` module namespace.
- * `python` is the registration object exported by `@ast-grep/lang-python`
- * (`libraryPath`, `extensions`, `languageSymbol`, `expandoChar`). Exposed for
- * tools and tests that load the modules themselves; returns `undefined` when
- * the module does not have the expected shape.
+ * `python` is the dynamic-language registration (`libraryPath`, `extensions`,
+ * `languageSymbol`, `expandoChar`). Exposed for tools and tests that supply
+ * the grammar themselves; returns `undefined` when `napi` does not have the
+ * expected shape.
  */
 export function createAstGrepHandle(napi: unknown, python?: unknown): AstGrepHandle | undefined {
   const mod = moduleRecord(napi)
@@ -128,7 +128,7 @@ export function createAstGrepHandle(napi: unknown, python?: unknown): AstGrepHan
             {
               [PYTHON_LANG]: {
                 libraryPath,
-                extensions: Array.isArray(reg.extensions) ? reg.extensions : ['py'],
+                extensions: Array.isArray(reg.extensions) ? reg.extensions : [...PYTHON_DYNAMIC_LANGUAGE.extensions],
                 ...(typeof reg.languageSymbol === 'string' ? { languageSymbol: reg.languageSymbol } : {}),
                 ...(typeof reg.expandoChar === 'string' ? { expandoChar: reg.expandoChar } : {}),
               },
@@ -238,12 +238,8 @@ async function importEngine(): Promise<AstGrepHandle | undefined> {
   } catch {
     return undefined
   }
-  let python: unknown
-  try {
-    python = await import(PYTHON_MODULE)
-  } catch {
-    python = undefined
-  }
+  const libraryPath = vendoredPythonLibrary()
+  const python = libraryPath ? { libraryPath, ...PYTHON_DYNAMIC_LANGUAGE } : undefined
   try {
     return createAstGrepHandle(napi, python)
   } catch {

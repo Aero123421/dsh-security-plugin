@@ -35,6 +35,14 @@ const REQUIRED = [
   'THIRD_PARTY_NOTICES.md',
   'SECURITY.md',
   'CHANGELOG.md',
+  'vendor/tree-sitter-python/LICENSE',
+  'vendor/tree-sitter-python/NOTICE.md',
+  'vendor/tree-sitter-python/tree-sitter-python.LICENSE',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Linux-ARM64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Linux-X64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-macOS-ARM64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-macOS-X64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Windows-X64/parser.so',
 ]
 /** License files esbuild writes for `legalComments: 'linked'` when a bundled package has legal comments. */
 const OPTIONAL = [/^lib\/[^/]+\.LEGAL\.txt$/]
@@ -51,7 +59,8 @@ const LEAKS = [
 ]
 
 const CLIENT_PREFIX = 'window.__ModuleLoader__.load('
-const CLIENT_MAX_BYTES = 300 * 1024
+/** en/ja/zh UI copy is inlined in this bundle. */
+const CLIENT_MAX_BYTES = 320 * 1024
 
 const problems = []
 const warnings = []

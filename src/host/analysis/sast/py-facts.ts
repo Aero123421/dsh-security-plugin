@@ -1,7 +1,7 @@
 /**
- * Builds the code model for Python, from the native AST when
- * `@ast-grep/lang-python` is available, otherwise from tokens plus
- * indentation (block ends are found by dedent, like the interpreter does).
+ * Builds the code model for Python, from the native AST when the shipped
+ * tree-sitter grammar loaded, otherwise from tokens plus indentation
+ * (block ends are found by dedent, like the interpreter does).
  */
 
 import { findAllKinds, type SgNode } from '../astgrep.ts'
@@ -733,7 +733,7 @@ function tokenSpan(ctx: PyCtx, span: Span): [number, number] {
 }
 
 // ---------------------------------------------------------------------------
-// AST mode (tree-sitter-python via @ast-grep/lang-python)
+// AST mode (shipped tree-sitter-python grammar)
 // ---------------------------------------------------------------------------
 
 const AST_KINDS = [

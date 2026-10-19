@@ -31,7 +31,15 @@ import {
   text,
 } from '../format.ts'
 import { useNow, useWatchScan, useWorkspaceScans } from '../hooks.ts'
-import { activityText, analyzerReasonText, diagnosticText, errorText, noticeText, type Translator } from '../i18n.ts'
+import {
+  activityText,
+  analyzerHasVisibleLimitation,
+  analyzerReasonText,
+  diagnosticText,
+  errorText,
+  noticeText,
+  type Translator,
+} from '../i18n.ts'
 import { workerTitle } from '../localized.ts'
 import { IconPause, IconPlay, IconRefresh, IconStop } from '../icons.tsx'
 import { overviewFocus } from '../selectors.ts'
@@ -858,7 +866,7 @@ function CoverageCard(props: { readonly coverage: Coverage | undefined; readonly
       </section>
     )
   }
-  const unavailable = asArray(coverage.analyzers).filter(a => a && !a.available)
+  const unavailable = asArray(coverage.analyzers).filter(a => a && analyzerHasVisibleLimitation(a))
   const gaps = asArray(coverage.gaps).filter(g => typeof g === 'string' && g.trim())
   // Primary copy only carries diagnostics with a localized sentence; raw
   // Host text is collected once under a single technical-details disclosure.

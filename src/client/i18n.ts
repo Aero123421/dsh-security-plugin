@@ -2103,6 +2103,18 @@ export function analyzerReasonText(tr: Translator, status: AnalyzerStatus): stri
   )
 }
 
+/**
+ * A limitation Settings and Coverage must show. `python-fallback` stays
+ * visible when the JavaScript engine loaded: Python still uses the built-in
+ * parser, and hiding the reason would look like a full AST scan.
+ */
+export function analyzerHasVisibleLimitation(status: {
+  readonly available: boolean
+  readonly reasonCode?: string
+}): boolean {
+  return !status.available || status.reasonCode === 'python-fallback'
+}
+
 export function activityText(tr: Translator, event: ScanEvent): string {
   // The wire event has no structured phase field; phase events carry it in
   // the Host message ("Phase: hunt"), whose suffix maps to a phase label.

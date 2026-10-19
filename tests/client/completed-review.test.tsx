@@ -252,6 +252,63 @@ describe('review completion is separate from process completion', () => {
     expect(disclosures[0]!.textContent).toContain('legacy gap two')
   })
 
+  it('shows the Python parser fallback even when the JavaScript engine is available', async () => {
+    const value = coverage(1, 1)
+    const detail = makeDetail(
+      {},
+      {
+        models,
+        coverage: {
+          ...value,
+          analyzers: [
+            {
+              id: 'ast-grep',
+              available: true,
+              source: 'builtin',
+              reasonCode: 'python-fallback',
+              reason: 'Python AST unavailable; Python uses the built-in parser',
+            },
+          ],
+        },
+      },
+    )
+    const { container } = await render(detail, 'ja')
+    const coverageEl = container.querySelector('.dshsec-coverage')!
+    expect(coverageEl.textContent).toContain('実行できなかったチェック')
+    expect(coverageEl.textContent).toContain('PythonのAST解析を利用できないため、組み込みパーサーを使います。')
+    expect(coverageEl.textContent).not.toContain('python-fallback')
+    const primary = coverageEl.cloneNode(true) as HTMLElement
+    primary.querySelector('details')?.remove()
+    expect(primary.textContent).not.toContain('Python AST unavailable')
+  })
+
+  it('does not list Python as skipped when the shipped grammar loaded', async () => {
+    const value = coverage(1, 1)
+    const { container } = await render(
+      makeDetail(
+        {},
+        {
+          models,
+          coverage: {
+            ...value,
+            analyzers: [
+              {
+                id: 'ast-grep',
+                available: true,
+                source: 'builtin',
+                reasonCode: 'python-available',
+                reason: 'Python AST available',
+              },
+            ],
+          },
+        },
+      ),
+    )
+    const coverageEl = container.querySelector('.dshsec-coverage')!
+    expect(coverageEl.textContent).not.toContain('Checks that didn’t run')
+    expect(coverageEl.textContent).not.toContain('Python AST is unavailable')
+  })
+
   it('keeps unknown and legacy diagnostic text out of localized primary copy', () => {
     const tr = getTranslator('ja')
     expect(diagnosticText(tr, { code: 'future-code', fallback: 'raw english' })).not.toContain('raw english')

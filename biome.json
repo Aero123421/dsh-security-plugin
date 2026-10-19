@@ -2,7 +2,15 @@
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
-    "includes": ["**", "!lib", "!coverage", "!tests/fixtures/apps", "!bench/results", "!**/*.snap"]
+    "includes": [
+      "**",
+      "!lib",
+      "!coverage",
+      "!tests/fixtures/apps",
+      "!bench/results",
+      "!**/*.snap",
+      "!vendor/tree-sitter-python/prebuilds"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -175,8 +175,9 @@ in [docs/configuration.md](docs/configuration.md).
 - **Node.js** `^22.19.0 || >=24.0.0` (the store uses the built-in `node:sqlite`).
 - At least one model provider connected in DSH whose models support tool calling.
 - Linux, macOS or Windows. `@ast-grep/napi` is an optional dependency with prebuilt binaries for common platforms.
-  Without it the plugin falls back to a built-in tokenizer with somewhat lower precision. Python ASTs also need
-  `@ast-grep/lang-python`, which is not installed automatically.
+  Without it the plugin falls back to a built-in tokenizer with somewhat lower precision. Python ASTs use the
+  grammar shipped in this package (Linux and macOS x64/arm64, Windows x64). On any other platform, Settings and
+  Coverage say that Python AST is unavailable and the built-in parser is used.
 - Optional external tools: Gitleaks 8.19 or later (older versions use the legacy `detect` command), OSV-Scanner v2
   (v1 also works), Semgrep with a local rules file.
 
@@ -190,6 +191,7 @@ in [docs/configuration.md](docs/configuration.md).
 | "Another scan is already running" (`security/busy`) | A project can have only one queued or running scan, so the new scan was not created. Wait for the current one, or pause or cancel it on Overview, then start again. |
 | Scan stays *Queued* | `maxConcurrentScans` (default 1) scans run at once across all projects; the rest wait in order. |
 | Coverage → *Checks that didn't run* lists "ast-grep rules — native module unavailable on this platform" | `@ast-grep/napi` has no binary for this OS/CPU/libc, or optional dependencies were skipped during install. Scans still work with the built-in parser. Reinstall with optional dependencies to restore it. If `disableAstGrep: true` is set, this is expected. |
+| Settings or Coverage says Python AST is unavailable and the built-in parser is used | This OS/CPU is outside the shipped tree-sitter-python grammars (Linux and macOS x64/arm64, Windows x64). JavaScript and TypeScript still use ast-grep when `@ast-grep/napi` loaded. Python rules use the built-in parser. |
 | `ExperimentalWarning: SQLite is an experimental feature` in the DSH log | Printed by Node 22 for `node:sqlite`. It is harmless. To hide it, start DSH with `NODE_OPTIONS=--disable-warning=ExperimentalWarning`. |
 | Host log: "this DSH build has no exact-route support; the Security page is unavailable" | DSH is too old. Use a DSH version in the supported range. |
 | Many findings "dropped because the code they cited couldn't be found" | The model is quoting code that does not exist. Use a stronger model for the Hunter role. |

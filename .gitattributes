@@ -9,6 +9,10 @@ tests/fixtures/** -text
 tests/fixtures/** linguist-vendored
 pnpm-lock.yaml linguist-generated
 
+# Native parsers. Git must not rewrite them as text.
+vendor/tree-sitter-python/** linguist-vendored
+vendor/tree-sitter-python/prebuilds/** binary
+
 # Binary assets.
 *.png binary
 *.jpg binary

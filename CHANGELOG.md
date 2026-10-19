@@ -16,6 +16,7 @@ changes; they are called out explicitly.
 - Secret findings and the built-in "Review … in <path>" task titles are translated in the UI from stored arguments. English, JSON, and SARIF report text is unchanged, and a 0.4.1 database is read without a migration. A 0.4.1 secret finding is translated when its rule id and English sentences can be recovered; otherwise the stored English is shown.
 - The sidebar and settings section titles follow the plugin language after it loads, including Japanese.
 - Compact token estimates keep each number and its unit on one line at a narrow width.
+- Installing the plugin no longer depends on `@ast-grep/lang-python` or its install script. tree-sitter-python prebuilds for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64) ship in the package, so `dsh plugin add` does not need extra pnpm options on pnpm 10, 11 or 12. On a platform without a prebuild, Settings and Coverage say that Python AST is unavailable and the built-in parser is used. JSON and SARIF text stays English.
 
 ## [0.4.1] - 2026-10-20
 

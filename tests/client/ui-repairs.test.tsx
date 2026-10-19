@@ -271,6 +271,41 @@ it('shows a localized unavailable reason and retains legacy analyzer text only a
   expect(mainText.textContent).toContain('技術情報')
 })
 
+it('shows the Python parser fallback on an available ast-grep row', async () => {
+  const settings = { ...SETTINGS, ui: { language: 'ja' as const } }
+  const { c } = await setup({
+    getBootstrap: () =>
+      ok(
+        makeBootstrap({
+          settings,
+          capabilities: {
+            llm: true,
+            workspaces: true,
+            analyzers: [
+              {
+                id: 'ast-grep',
+                available: true,
+                source: 'builtin',
+                reasonCode: 'python-fallback',
+                reason: 'Python AST unavailable; Python uses the built-in parser',
+              },
+            ],
+          },
+        }),
+      ),
+  })
+  mounted = mount(<SettingsSection controller={c} />)
+  await flush(10)
+  const row = mounted.container.querySelector<HTMLElement>('.dshsec-analyzers li')!
+  const primary = row.cloneNode(true) as HTMLElement
+  primary.querySelector('details')?.remove()
+  expect(primary.textContent).toContain('利用可能')
+  expect(primary.textContent).toContain('PythonのAST解析を利用できないため、組み込みパーサーを使います。')
+  expect(primary.textContent).not.toContain('python-fallback')
+  expect(primary.textContent).not.toContain('Python AST unavailable')
+  expect(row.querySelector('details')?.textContent).toContain('Python AST unavailable')
+})
+
 it('describes fix-in-chat as a request, not confirmed navigation', async () => {
   const startSession = vi.fn()
   const { c } = await setup(

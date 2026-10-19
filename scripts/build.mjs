@@ -4,7 +4,8 @@
  *
  * - `lib/index.js`: the Host plugin (ESM, Node). Runtime libraries are bundled
  *   so the installed package has no runtime dependencies except the optional
- *   native `@ast-grep/napi`.
+ *   native `@ast-grep/napi`. Python grammars are files under
+ *   `vendor/tree-sitter-python`, loaded by path, not imported.
  * - `lib/client.js`: the browser plugin in DSH's lazy-CJS factory format:
  *   `window.__ModuleLoader__.load({ id, factory: (require) => { ... } })`.
  *   Externals resolve through the module table DSH seeds for every dynamic
@@ -26,7 +27,7 @@ const production = !watch
 const CLIENT_EXTERNALS = ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis']
 
 /** Native or peer modules the Host bundle must not inline. */
-const HOST_EXTERNALS = ['@ast-grep/napi', '@ast-grep/lang-python', '@deepseek-ai/*']
+const HOST_EXTERNALS = ['@ast-grep/napi', '@deepseek-ai/*']
 
 const define = {
   __PLUGIN_VERSION__: JSON.stringify(pkg.version),
