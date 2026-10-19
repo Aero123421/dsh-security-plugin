@@ -1,3 +1,4 @@
+// addLanguage
 /**
  * Domain vocabulary shared by the Host and the browser. Everything here is
  * plain data and pure functions so both builds can import it.
