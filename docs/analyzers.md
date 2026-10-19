@@ -182,14 +182,20 @@ levels), declaring file and line, handler range, middleware, **auth hints** and 
 Auth hints are middleware, guard, decorator or dependency names that match
 `auth|login|session|jwt|token|passport|guard|protect|require(User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin|role|current_user|signed_in|logged_in|api_key|passes_test|staff|superuser`.
 Names that also say rate limiting, throttling or logging (`limit`, `throttl`, `slowdown`, `logger`, `logging`, as in
-`loginLimiter` or `authRateLimit`) are never auth hints.
+`loginLimiter` or `authRateLimit`) are never auth hints. Neither is middleware that only loads state and never
+rejects a request: session stores (`session(...)`, `cookieSession(...)`, `require('express-session')(...)`),
+`passport.initialize()`, `passport.session()` and database-session dependencies such as `Depends(get_session)`.
+Enforcing names such as `requireSession`, `verifySession` and `passport.authenticate(...)` still count.
 They are hints for ranking and for the model, not proof of protection. Mounts or includes that cannot be resolved
 in the snapshot produce warnings, and a scan that finds no endpoints records a coverage gap.
 
 Next.js middleware must contain an auth-ish check, not just exist. An exported literal `config.matcher` string
 or array grants a hint only to covered paths; simple literal segments and named parameters (including a final
 `:path*`) are supported. Dynamic, object and regex matchers, spread configs and unreadable middleware do not grant
-a blanket hint. Without a matcher, an auth-ish middleware check can cover all routes in that Next.js project.
+a blanket hint. Without a matcher, an auth-ish middleware check can cover all routes in that Next.js project,
+unless the middleware reads the request path: then only routes under the literal prefixes of
+`pathname.startsWith('/prefix')` conditions get the hint, and any other use of the path (a negated prefix, an
+equality test, a list lookup) grants no hint at all.
 DRF router endpoints inherit cheaply resolved ViewSet permission/authentication class names as hints; known
 read-only bases, CRUD mixins and explicit action methods constrain the emitted CRUD methods. Unresolved router
 includes produce the existing unresolved-mount warning. Custom DRF actions and runtime router generation are not

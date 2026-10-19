@@ -821,6 +821,9 @@ function nextMiddlewareGuards(ctx: RouteFileContext, path: string, route: string
         /^\s*export\s+default\s*$/.test(model.source.slice(Math.max(0, c.start - 30), c.start)),
     )
   if (!authCheck) return false
+  // A check guarded by the request path covers only what that condition selects.
+  const scope = middlewarePathScope(model, ex, handlers)
+  if (scope === 'unknown' || (scope && !scope.some(prefix => route.startsWith(prefix)))) return false
   const config = model.vars.find(v => v.name === 'config' && (v.exported || model.exportedNames.has('config')))
   if (!config) return !model.exportedNames.has('config') && !/\bexport\s*\{[^}]*\bconfig\b/.test(model.source)
   if (
@@ -836,6 +839,46 @@ function nextMiddlewareGuards(ctx: RouteFileContext, path: string, route: string
   const literals = spans.map(s => ex.literal(s))
   if (literals.length === 0 || literals.some(s => s === undefined)) return false
   return literals.some(pattern => nextMatcherCovers(pattern!, route))
+}
+
+/**
+ * The request paths a middleware's own code restricts it to. `undefined`: the handlers never read the path,
+ * so the check runs for every matched request. Literal prefixes: every path read is a non-negated
+ * `pathname.startsWith('/prefix')` (an in-code matcher). `'unknown'`: the path is read some other way
+ * (negated, compared, tested against a list), so no route can be said to be covered.
+ */
+function middlewarePathScope(
+  model: FileModel,
+  ex: Expr,
+  handlers: readonly FnFact[],
+): readonly string[] | 'unknown' | undefined {
+  const prefixes: string[] = []
+  let reads = false
+  for (const fn of handlers) {
+    const declarations = model.assigns.filter(a => a.fn === fn && a.targets.some(t => t.name === 'pathname'))
+    const [start, end] = ex.range(fn.body)
+    for (let i = start; i < end; i++) {
+      const t = model.tokens[i]!
+      if (t.type !== 'ident' || t.value !== 'pathname') continue
+      reads = true
+      if (declarations.some(a => a.start <= t.start && t.start < a.end)) continue // `const { pathname } = req.nextUrl`
+      const dot = model.tokens[i + 1]
+      const name = model.tokens[i + 2]
+      const call = dot?.value === '.' && name?.value === 'startsWith' && model.tokens[i + 3]?.value === '('
+      if (!call) return 'unknown'
+      const close = model.match[i + 3]!
+      const literal =
+        close === i + 5 ? ex.literal({ start: model.tokens[i + 4]!.start, end: model.tokens[i + 4]!.end }) : undefined
+      // `!pathname.startsWith('/app')` and `!req.nextUrl.pathname.startsWith(...)` exclude a prefix instead.
+      let head = i
+      while (model.tokens[head - 1]?.value === '.' && model.tokens[head - 2]?.type === 'ident') head -= 2
+      const negated = model.tokens[head - 1]?.type === 'punct' && model.tokens[head - 1]!.value === '!'
+      if (literal === undefined || !literal.startsWith('/') || negated) return 'unknown'
+      prefixes.push(literal)
+    }
+  }
+  if (!reads) return undefined
+  return prefixes.length > 0 ? prefixes : 'unknown'
 }
 
 /** Literal segments and named parameters only; regex/object/dynamic matchers never imply blanket coverage. */

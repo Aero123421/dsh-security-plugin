@@ -99,6 +99,12 @@ changes; they are called out explicitly.
   `httpOnly: false` next to `secure: false`, an AWS secret key next to its key ID, or a Slack token next to a
   database URL lost a finding (sometimes the more severe one). Now only a built-in and an external result for
   the same issue are merged, and the merged signal keeps the higher severity.
+- Stop treating `session()`, `cookieSession()`, `passport.initialize()`, `passport.session()` and database-session
+  dependencies (`Depends(get_session)`) as auth hints. They load state but never reject a request, so an app
+  that installs them globally had every route presented as guarded, and the unguarded-route steering signal
+  never fired.
+- Next.js middleware whose auth check sits behind `pathname.startsWith('/prefix')` gives auth hints only to routes
+  under that prefix instead of to every route; other reads of the request path give none.
 
 ## [0.4.0] - 2026-10-18
 
