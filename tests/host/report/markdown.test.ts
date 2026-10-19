@@ -416,8 +416,8 @@ describe('renderMarkdown coverage ledger', () => {
 
   it('is localized, and absent without a ledger', () => {
     const md = renderMarkdown(reportInput({ scan: scanDetail({}, { coverage: ledger }), language: 'ja' }))
-    expect(md).toContain('**レビュー単位**')
-    expect(md).toContain('| 未確認 | どのレビュー単位にも入らなかったソースファイル (3) · アナライザーから追加 |')
+    expect(md).toContain('**調査対象**')
+    expect(md).toContain('| 未確認 | どの調査対象にも入らなかったソースファイル (3) · アナライザーから追加 |')
     expect(renderMarkdown(reportInput())).not.toContain('Review units')
   })
 })

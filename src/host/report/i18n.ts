@@ -455,10 +455,10 @@ const JA: ReportLabels = {
     noGaps: '記録された抜け漏れはありません。',
     notices: 'スキャン中の通知',
     missing: 'このスキャンのカバレッジは記録されていません（完了していない可能性があります）。',
-    units: 'レビュー単位',
+    units: '調査対象',
     unitsLine: (covered, finding, blocked, notRun) =>
       `検出なしで確認 ${covered} · 検出あり ${finding} · 判断保留 ${blocked} · 未確認 ${notRun}`,
-    unitColumns: { status: '状態', unit: 'レビュー単位', where: '対象', note: '補足' },
+    unitColumns: { status: '状態', unit: '調査対象', where: '対象', note: '補足' },
     unitStatus: { covered: '確認済み', finding: '検出あり', blocked: '判断保留', 'not-run': '未確認' },
     unitOrigin: { recon: 'レビュー計画', critic: 'カバレッジ確認', gap: 'アナライザーから追加' },
     unitReasons: {
@@ -472,8 +472,8 @@ const JA: ReportLabels = {
       'needs-runtime': 'ソースからは分からない実行環境やデプロイ設定に依存します。',
       partial: 'レビュー担当がこの部分を最後まで確認できませんでした。',
     },
-    unassignedFiles: 'どのレビュー単位にも入らなかったソースファイル',
-    unitsMore: count => `ほか ${count} 件のレビュー単位は JSON レポートにあります。`,
+    unassignedFiles: 'どの調査対象にも入らなかったソースファイル',
+    unitsMore: count => `ほか ${count} 件の調査対象は JSON レポートにあります。`,
   },
 
   threatModel: {
