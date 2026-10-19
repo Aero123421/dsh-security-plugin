@@ -36,9 +36,10 @@ jobs:
       - name: Committed lib/ matches a fresh build
         run: node scripts/check-lib.mjs
       # ja is defined by dsh-japanese. This plugin ships dictionaries only.
-      # tests/ is not part of the distribution.
+      # tests/ is not part of the distribution. ubuntu-latest has no rg;
+      # a missing command is exit 127, and `!` would turn that into success.
       - name: Distribution does not call addLanguage
-        run: '! rg -n "addLanguage" src lib'
+        run: rc=0; grep -rnF addLanguage src lib || rc=$?; test "$rc" -eq 1
       - run: node scripts/verify-package.mjs
 
   dsh-alpha:
