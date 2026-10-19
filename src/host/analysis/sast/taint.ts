@@ -250,12 +250,15 @@ export interface ExprOptions {
    * (`join` → `path.join` after `import { join } from 'node:path'`). Without it, callees are matched as written.
    */
   readonly qualify?: (callee: string) => string
+  /** Function name → parameters that hold numbers or UUIDs because every route fills them through a converter. */
+  readonly scalarParams?: ReadonlyMap<string, ReadonlySet<string>>
 }
 
 /** Per-file analysis context. */
 export class Expr {
   readonly model: FileModel
   readonly #qualify: ((callee: string) => string) | undefined
+  readonly #scalarParams: ReadonlyMap<string, ReadonlySet<string>> | undefined
   readonly #sources: readonly SourcePattern[]
   readonly #keywords: ReadonlySet<string>
   readonly #stateByFn = new Map<FnFact | undefined, ScopeCursor>()
@@ -268,6 +271,7 @@ export class Expr {
   constructor(model: FileModel, options: ExprOptions = {}) {
     this.model = model
     this.#qualify = options.qualify
+    this.#scalarParams = options.scalarParams
     this.#clientFile = model.lang === 'js' && /^\s*(?:\/\/[^\n]*\n\s*)*['"]use client['"]/.test(model.source)
     const next = model.lang === 'js' && isNextFile(model.path)
     this.#sources = model.lang === 'py' ? PY_SOURCES : next ? [...JS_SOURCES, ...JS_NEXT_SOURCES] : JS_SOURCES
@@ -288,6 +292,7 @@ export class Expr {
       const param = fn.params.find(p => p.names.includes(name))
       if (!param) continue
       if (this.model.lang === 'py' && this.#flaskSafeParams(fn).has(name)) return true
+      if (fn.name !== undefined && this.#scalarParams?.get(fn.name)?.has(name)) return true
       const ann = (param.annotation ?? '').replace(/\s+/g, '')
       return /^(?:int|float|bool|number|boolean|bigint|Decimal|UUID|uuid\.UUID|Optional\[(?:int|float|bool)\]|(?:int|float|bool|number|boolean)\|None|(?:number|boolean)\|(?:undefined|null))$/.test(
         ann,
@@ -1262,6 +1267,7 @@ export class Expr {
         const baseType = ann.replace(/^Annotated\[\s*([^,\]]+).*$/s, '$1').trim()
         if (SAFE_PY_PARAM_TYPES.test(baseType)) continue
         if (converters.has(param.name)) continue
+        if (fn.name !== undefined && this.#scalarParams?.get(fn.name)?.has(param.name)) continue
         out.set(param.name, {
           source: djangoView ? `URL parameter '${param.name}'` : `route parameter '${param.name}'`,
           direct: false,

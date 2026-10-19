@@ -37,7 +37,10 @@ export class Checker {
   constructor(model: FileModel, ctx: FileContext) {
     this.model = model
     // Taint follows calls by their imported names too (`join` from `node:path` is `path.join`).
-    this.ex = new Expr(model, { qualify: callee => this.qualify(callee) })
+    this.ex = new Expr(model, {
+      qualify: callee => this.qualify(callee),
+      ...(ctx.scalarParams ? { scalarParams: ctx.scalarParams } : {}),
+    })
     this.#ctx = ctx
     this.#buildAliases()
   }

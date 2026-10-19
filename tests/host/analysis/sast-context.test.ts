@@ -48,11 +48,41 @@ describe.each(MODES)('JavaScript rules that read their context (%s mode)', (_mod
   })
 })
 
-const PY_CASES: readonly Case[] = []
-
-describe.each(PY_MODES)('Python rules that read their context (%s mode)', (_mode, handle) => {
-  it.skipIf(PY_CASES.length === 0).each(PY_CASES)('$rule: $name', async ({ rule, path, code }) => {
-    const signals = await sast({ [path ?? 'app/services.py']: code }, handle)
-    expect(hits(signals, rule)).toEqual(expectedHits(code))
+describe.each(PY_MODES)('Django URL converters (%s mode)', (_mode, handle) => {
+  it('does not treat a view parameter every route fills with <int:…> or <uuid:…> as text', async () => {
+    const views = `from .models import Product
+def product_detail(request, product_id):
+    return Product.objects.raw(f"SELECT * FROM shop_product WHERE id = {product_id}")
+def safe_detail(request, product_id):
+    return Product.objects.raw(f"SELECT * FROM shop_product WHERE id = {product_id}")  # VULN
+def order_detail(request, order_id):
+    return Product.objects.raw(f"SELECT * FROM shop_order WHERE id = '{order_id}'")
+def by_slug(request, tag):
+    return Product.objects.raw(f"SELECT * FROM shop_product WHERE tag = '{tag}'")  # VULN
+def legacy_item(request, item_id):
+    return Product.objects.raw(f"SELECT * FROM shop_item WHERE id = {item_id}")
+def mixed(request, pk):
+    return Product.objects.raw(f"SELECT * FROM shop_item WHERE id = {pk}")  # VULN
+def unrouted(request, pk):
+    return Product.objects.raw(f"SELECT * FROM shop_item WHERE id = {pk}")  # VULN
+`
+    const urls = `from django.urls import path, re_path
+from . import views
+from .views import by_slug
+urlpatterns = [
+    path("products/<int:product_id>/", views.product_detail),
+    path("products/<str:product_id>/safe/", views.safe_detail),
+    path("orders/<uuid:order_id>/", views.order_detail),
+    path("tags/<slug:tag>/", by_slug),
+    re_path(r"^legacy/(?P<item_id>\\d+)/$", views.legacy_item),
+    path("mixed/<int:pk>/", views.mixed),
+    path("mixed/<pk>/raw/", views.mixed),
+]
+`
+    const signals = await sast({ 'shop/urls.py': urls, 'shop/views.py': views }, handle)
+    expect(hits(signals, 'py.sql-injection')).toEqual(expectedHits(views))
+    // Without the URLconf the converters are unknown, so every view parameter stays request data.
+    const alone = await sast({ 'shop/views.py': views }, handle)
+    expect(hits(alone, 'py.sql-injection').filter(h => h.endsWith('vulnerability'))).toHaveLength(7)
   })
 })

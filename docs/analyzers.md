@@ -83,7 +83,9 @@ fingerprint is retained for matching across scans. Different credentials, even o
 52 rules. JS/TS and Python files are modeled with the native tree-sitter engine (`@ast-grep/napi`) when it is
 available, and with a built-in tokenizer otherwise. Both modes run the same rules and are tested side by side.
 Template and config rules match text. "Sink severity" is the severity of the `sink` variant; rules without one only
-report when request data reaches them.
+report when request data reaches them. Rules marked "review hint only" never produce a finding: their matches are
+always `sink`s, because whether they are exploitable depends on facts the rule cannot see (the library version for
+js-yaml and deep-merge helpers, where a template variable's value comes from).
 
 ### JavaScript / TypeScript (`js.ts`)
 
@@ -100,9 +102,9 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 | `js.ssrf` | Server-side request forgery | CWE-918 | high | low |
 | `js.open-redirect` | Open redirect | CWE-601 | medium | low |
 | `js.xss` | Reflected / DOM cross-site scripting, including Markdown rendered as raw HTML (`marked`, `showdown`, `markdown-it` with `html: true`, remark/rehype with raw HTML) without a sanitizer | CWE-79 | high | – |
-| `js.template-unescaped-output` | Unescaped template output | CWE-79 | medium | low |
+| `js.template-unescaped-output` | Unescaped template output | CWE-79 | – (review hint only) | low |
 | `js.insecure-deserialization` | Insecure deserialization (node-serialize) | CWE-502 | critical | medium |
-| `js.unsafe-yaml-load` | js-yaml `load()` on dynamic data | CWE-502 | medium | low |
+| `js.unsafe-yaml-load` | js-yaml `load()` on dynamic data | CWE-502 | – (review hint only) | low |
 | `js.weak-password-hash` | Weak hash used for passwords | CWE-328 | medium | – |
 | `js.weak-cipher` | Weak or deprecated encryption | CWE-327 | medium | – |
 | `js.insecure-random` | Predictable random value used as a secret | CWE-330 | medium | low |
@@ -115,7 +117,7 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 | `js.cookie-without-httponly` | Cookie readable by JavaScript | CWE-1004 | low | – |
 | `js.hardcoded-session-secret` | Hard-coded session secret | CWE-798 | medium | – |
 | `js.mass-assignment` | Mass assignment from the request body | CWE-915 | medium | – |
-| `js.prototype-pollution` | Deep merge of user input | CWE-1321 | medium | medium |
+| `js.prototype-pollution` | Deep merge of user input | CWE-1321 | – (review hint only) | medium |
 | `js.regex-injection` | Regular expression built from user input (ReDoS) | CWE-1333 | medium | – |
 | `js.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
 
@@ -141,7 +143,11 @@ imports) unless the scheme and host are fixed; redirects unless the target is a 
 ### Python (`python.ts`)
 
 Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .tmpl .tpl` (`|safe`,
-`{% autoescape off %}`).
+`{% autoescape off %}`); those template matches are review `sink`s only. `py.xss` reports a vulnerability only when
+request data reaches `Markup`/`mark_safe` (or another listed HTML sink) in Python code.
+
+Django view parameters count as request data, except those that every URLconf route in the snapshot fills through
+an `<int:…>` or `<uuid:…>` converter (or a digits-only `re_path` group): those are numbers or UUIDs.
 
 | Rule id | Title | CWE | Severity | Sink severity |
 | --- | --- | --- | --- | --- |

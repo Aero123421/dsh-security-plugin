@@ -136,6 +136,10 @@ changes; they are called out explicitly.
   and repository instances, Knex builders, records loaded through them). `teamService.create(req.body)` and
   other service or controller calls were reported, and in a layered app one controller pattern produced most of
   the rule hits that Quick mode triages.
+- Stop reporting SQL injection for a Django view parameter that every URLconf route fills through `<int:…>` or
+  `<uuid:…>` (or a digits-only `re_path` group); the URLconf in another file is now read before the views.
+- Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
+  and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
 
 ## [0.4.0] - 2026-10-18
 

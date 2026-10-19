@@ -56,6 +56,11 @@ export interface Hit {
 export interface FileContext {
   readonly file: SnapshotFile
   readonly report: (hit: Hit) => void
+  /**
+   * Function name → parameters every route fills through a numeric or UUID converter (Django
+   * `<int:id>` in a URLconf of another file), so they never hold attacker-chosen text.
+   */
+  readonly scalarParams?: ReadonlyMap<string, ReadonlySet<string>>
 }
 
 /** Common reference URLs. */

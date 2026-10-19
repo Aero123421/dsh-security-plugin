@@ -18,6 +18,7 @@ import type { AstGrepHandle } from '../astgrep.ts'
 import { redactText } from '../secrets.ts'
 import { type AnalyzerRun, type Signal, type Snapshot, type SnapshotFile, yieldToEventLoop } from '../types.ts'
 import { CONFIG_RULES, configRules, isConfigFile } from './config.ts'
+import { djangoScalarParams } from './django.ts'
 import { JS_RULES, jsRules, templateRules } from './js.ts'
 import { lineOf, lineStarts } from './lexer.ts'
 import type { FileModel, Span } from './model.ts'
@@ -57,6 +58,7 @@ export async function runSast(
   const byKey = new Map<string, Signal>()
   let index = 0
   signal?.throwIfAborted()
+  const scalarParams = djangoScalarParams(snapshot, astGrep)
   for (const file of snapshot.files.values()) {
     if (++index % YIELD_EVERY === 0) {
       await yieldToEventLoop()
@@ -64,7 +66,7 @@ export async function runSast(
     }
     if (file.isGenerated || file.content.length > TEXT_SCAN_MAX_CHARS) continue
     try {
-      for (const sig of scanFile(file, astGrep)) {
+      for (const sig of scanFile(file, astGrep, scalarParams.get(file.path))) {
         const key = `${sig.ruleId}\0${sig.location.path}\0${sig.location.startLine}`
         const prev = byKey.get(key)
         if (!prev || isStronger(sig, prev)) byKey.set(key, sig)
@@ -118,10 +120,17 @@ function distinguishOccurrences(signals: readonly Signal[]): Signal[] {
   return signals.map(signal => discriminated.get(signal) ?? signal)
 }
 
-/** Scan one file and return its (not yet deduplicated) signals. */
-export function scanFile(file: SnapshotFile, astGrep: AstGrepHandle | undefined): Signal[] {
+/**
+ * Scan one file and return its (not yet deduplicated) signals. `scalarParams` lists view parameters other
+ * files constrain to numbers (see `djangoScalarParams`).
+ */
+export function scanFile(
+  file: SnapshotFile,
+  astGrep: AstGrepHandle | undefined,
+  scalarParams?: FileContext['scalarParams'],
+): Signal[] {
   const hits: Hit[] = []
-  const ctx: FileContext = { file, report: hit => hits.push(hit) }
+  const ctx: FileContext = { file, report: hit => hits.push(hit), ...(scalarParams ? { scalarParams } : {}) }
   let model: FileModel | undefined
   const kind = modelKind(file)
   if (kind) {
