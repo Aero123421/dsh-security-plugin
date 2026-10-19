@@ -12,6 +12,33 @@ whole loop:
 
 Everything below uses a scratch `DSH_HOME`, so your real DSH profiles and data are not touched.
 
+## Automated run: several projects in one DSH
+
+`pnpm e2e` runs the whole loop for every fixture app at once and prints one result row per project:
+
+```sh
+pnpm e2e                          # installs the DSH `alpha` dist-tag into a scratch directory (needs npm)
+pnpm e2e --dsh /tmp/dsh-e2e       # reuse a directory where `npm i @deepseek-ai/dsh` was run
+pnpm e2e --app express-shop --mode quick --keep
+```
+
+It builds `lib/`, links this checkout into a scratch `web` profile, starts DSH with the scripted model (section 3),
+copies each app under `tests/fixtures/apps` without its answer key, registers it as a DSH project through DSH's own
+API, and starts one scan per project at the same moment. Checks:
+
+| Check | Per | Fails when |
+| --- | --- | --- |
+| Status | project | the scan did not complete |
+| AI tasks | project | a scheduled AI task failed or was skipped |
+| In-scope recall | project | a planted finding is missing (the oracle knows the answers, so a miss is lost plumbing) |
+| FP | project | a negative control was reported |
+| Discarded | project | the fabricated claim of a hunter run was not dropped |
+| Foreign paths | project | a finding cites a file of another project |
+| Queue | run | more scans ran at once than `maxConcurrentScans`, or none waited in the queue |
+
+The command exits 1 when a check fails and 2 on usage errors; `--json` prints the result for scripts. It does not
+open a browser. Use the manual pass below to look at the Security page.
+
 ## 1. Scratch DSH install
 
 ```sh
@@ -58,6 +85,9 @@ The dump should show:
 3. In every hunter run it also submits one **fabricated** finding (`Fabricated finding that must be discarded`),
    which the host must drop.
 
+When `fixturesDir` holds several apps, the oracle first lists the scanned project's files and answers only from the
+app whose paths match them. Several fixture projects can therefore share one DSH and one scripted model.
+
 It tests plumbing, not detection quality. Load it with a `--patch` overlay so it never ends up in a real profile:
 
 ```yaml
@@ -102,9 +132,9 @@ Expected results:
 
 - Overview shows the phases running in order, with live workers (Planner, then Hunters, then Skeptics) and token
   usage.
-- When the scan is done, Coverage reports dropped claims ("N possible problems were dropped because the code they
-  cited couldn't be found"). That is the fabricated findings being discarded.
-- Findings lists the planted issues with *Quote verified* steps. Negative controls flagged by a rule appear as
+- When the scan is done, Coverage reports dropped claims ("N AI claims cited code that is not in the project").
+  That is the fabricated findings being discarded.
+- Findings lists the planted issues with *Verified* quotes. Negative controls flagged by a rule appear as
   *Ruled out*, with the defending code as evidence against.
 - *Export* → Markdown / JSON / SARIF each download a file with no absolute paths in it.
 - Pause while hunters run, then resume. Completed tasks are not repeated, which you can check in the activity log
@@ -136,9 +166,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'content-type: application/json' \
   "$BASE/api/dsh-security/getBootstrap"                      # 401 without the cookie
 ```
 
-## 6. Automating it (Playwright smoke test idea)
+## 6. Automating the browser pass (Playwright smoke test idea)
 
-The plugin does not ship a browser test yet. A minimal smoke test would:
+`pnpm e2e` covers the Host side. The plugin does not ship a browser test yet. A minimal smoke test would:
 
 1. In `globalSetup`: build, create the scratch `DSH_HOME`, run `dsh plugin --profile web add <checkout>`, start
    `dsh --profile web --patch overlay.yml --no-open --port 0`, parse the printed URL, and copy a fixture app
@@ -147,7 +177,7 @@ The plugin does not ship a browser test yet. A minimal smoke test would:
    `updateSettings` RPC shown above, so the test does not depend on the Settings form.
 3. In the test: open the token URL → click **Security** in the sidebar → *New scan* → *Quick* → consent →
    *Start scan*. Wait for "Completed", assert at least one finding and a "dropped" count ≥ 1, open a finding and
-   check that a *Quote verified* badge is visible, then export SARIF and validate it against the SARIF 2.1.0 schema.
+   check that a *Verified* quote label is visible, then export SARIF and validate it against the SARIF 2.1.0 schema.
 4. In `globalTeardown`: stop DSH and delete the scratch directory.
 
 Keep it to one Quick scan of one fixture, so it runs in well under a minute with `delayMs: 0`.
