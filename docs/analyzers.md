@@ -133,6 +133,12 @@ delegate (`prisma.user`), a model or repository instance (`this.userRepository`,
 `js.cookie-without-httponly` leaves out `res.cookie('<name>', …)` (and `setCookie`/`serialize`) when the literal
 name does not suggest a session, credential or CSRF token (`theme`, `locale`): page scripts are meant to read those.
 
+`js.jwt-decode-without-verify` reports `jwt.decode()` in a function that never calls a `verify` function when
+the function reads the `Authorization` header or the decoded token comes from a cookie or request header: directly
+(`req.cookies.session`, `req.get('x-access-token')`), through Next.js `cookies()`, or from a helper in the same file
+that reads one without verifying it (`jwt.decode(getBearer(req))`). A token passed in as a parameter or taken from
+the body is not reported, since decoding it may be for display or logging.
+
 `js.weak-password-hash` and `py.weak-password-hash` need a password word (`password`, `passwd`, `pwd`, `pw`,
 `passphrase`) in the statement that computes the MD5/SHA-1 digest (with chained calls on the following lines), in
 a later line of the same function that uses the variable holding the digest or hash object (`h.update(pw)`,

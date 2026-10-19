@@ -110,6 +110,74 @@ export function pickColor() {
   return COLORS.map(() => COLORS[Math.floor(Math.random() * COLORS.length)])
 }`,
   },
+  {
+    rule: 'js.jwt-decode-without-verify',
+    name: 'tokens read from cookies or by a helper are credentials; a token passed in may be for display',
+    path: 'src/middleware/auth.js',
+    code: `const jwt = require('jsonwebtoken')
+function requireAdmin(req, res, next) {
+  const token = req.cookies.admin_token
+  const claims = token && jwt.decode(token) // VULN
+  if (!claims || claims.role !== 'admin') return res.status(403).end()
+  next()
+}
+function requireRole(role) {
+  return (req, res, next) => {
+    const claims = jwt.decode(req.cookies?.role_token ?? '') // VULN
+    if (claims?.role !== role) return res.status(403).end()
+    return next()
+  }
+}
+function sessionUser(req) {
+  const { session } = req.signedCookies
+  return jwt.decode(session) // VULN
+}
+function bearer(req) {
+  return String(req.headers.authorization).slice(7)
+}
+function currentUser(req) {
+  const user = jwt.decode(bearer(req)) // VULN
+  if (!user) throw new Error('401')
+  return user
+}
+function apiClient(req) {
+  const token = req.get('x-access-token')
+  return jwt.decode(token).sub // VULN
+}
+function verifiedToken(req) {
+  jwt.verify(req.cookies.session, KEY)
+  return req.cookies.session
+}
+function claimsOf(req) {
+  return jwt.decode(verifiedToken(req))
+}
+function tokenExpiry(token) {
+  return jwt.decode(token)?.exp
+}
+function inspect(req, res) {
+  res.json(jwt.decode(req.body.token))
+}
+function profile(req, res) {
+  const user = jwt.verify(req.cookies.session, KEY)
+  const { exp } = jwt.decode(req.cookies.session)
+  res.json({ user, exp })
+}
+module.exports = { requireAdmin, requireRole, sessionUser, currentUser, apiClient, claimsOf, tokenExpiry, inspect, profile }`,
+  },
+  {
+    rule: 'js.jwt-decode-without-verify',
+    name: 'Next.js cookies() hold credentials',
+    path: 'src/lib/session.ts',
+    code: `import { cookies } from 'next/headers'
+import jwt from 'jsonwebtoken'
+export async function getSession() {
+  const token = (await cookies()).get('session')?.value
+  return token ? jwt.decode(token) : null // VULN
+}
+export function preview(raw: string) {
+  return jwt.decode(raw, { complete: true })
+}`,
+  },
 ]
 
 describe.each(MODES)('JavaScript rules that read their context (%s mode)', (_mode, handle) => {

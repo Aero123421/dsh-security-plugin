@@ -307,7 +307,7 @@ const JWT_DECODE: RuleMeta = {
   cwe: 'CWE-347',
   severity: 'medium',
   message:
-    'This function reads the `Authorization` header and calls `jwt.decode()`, which only base64-decodes the token and does not check its signature. If the decoded claims are used for authentication, anyone can forge a token.',
+    'This function passes a token from the `Authorization` header, another request header or a cookie to `jwt.decode()`, which only base64-decodes the token and does not check its signature. If the decoded claims are used for authentication, anyone can forge a token.',
   recommendation:
     'Use `jwt.verify(token, key, { algorithms: [...] })` and trust only its result. Use `decode()` only for non-security purposes such as logging.',
   references: [REF.authn, cweUrl('CWE-347')],
@@ -570,6 +570,13 @@ const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd?\b|passphrase/i
 const AUTH_HEADER_READ =
   /headers\s*(?:\.\s*authorization|\[\s*['"`]authorization['"`]\s*\])|\.(?:get|header)\s*\(\s*['"`]authorization['"`]\s*\)/i
 const SAFE_SENTINEL_OBJECT = /^\{\s*\}$/
+/** Request parts that carry credentials, as taint sources: cookies and headers (`req.get('authorization')`). */
+const CREDENTIAL_SOURCE =
+  /^(?:(?:req|request|ctx|ctx\.request|c\.req|event)\.(?:cookies|signedCookies|headers|multiValueHeaders|get\(\)|header\(\))|@(?:Headers|Cookies)\(\))/
+/** Reads of request cookies, including Next.js `cookies().get('token')` and the raw `Cookie` header. */
+const COOKIE_READ =
+  /\.(?:cookies|signedCookies)\b|\bcookies\(\s*\)|headers\s*(?:\.\s*cookie\b|\[\s*['"`]cookie['"`]\s*\])|\.(?:get|header)\s*\(\s*['"`]cookie['"`]\s*\)/i
+const VERIFY_CALL = /\b(?:verify|jwtVerify|verifyToken|verifyJwt)\s*\(/
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -1109,10 +1116,35 @@ function jwtDecode(chk: Checker, call: CallFact, q: string): void {
   if (call.name !== 'decode') return
   if (!/^jsonwebtoken\.decode$/.test(q) && !/^(?:jwt|JWT|jsonwebtoken)$/.test(call.receiver)) return
   const fn = chk.fnAt(call.start)
-  if (!fn) return
+  const token = chk.positional(call, 0)
+  if (!fn || !token) return
   const body = chk.text(fn)
-  if (!AUTH_HEADER_READ.test(body) || /\b(?:verify|jwtVerify|verifyToken|verifyJwt)\s*\(/.test(body)) return
-  chk.certain(JWT_DECODE, call, 'medium')
+  if (VERIFY_CALL.test(body)) return
+  if (AUTH_HEADER_READ.test(body) || credentialToken(chk, token)) chk.certain(JWT_DECODE, call, 'medium')
+}
+
+/**
+ * The decoded token comes from a cookie or a request header: directly (`req.cookies.session`,
+ * `const { session } = req.cookies`), through Next.js `cookies()`, or from a helper in this file that reads one
+ * without verifying it (`jwt.decode(getBearer(req))`). A token passed in as a plain parameter is not enough:
+ * decoding it may be for display or logging.
+ */
+function credentialToken(chk: Checker, token: Span): boolean {
+  const taint = chk.ex.taintResolved(token)
+  if (taint && CREDENTIAL_SOURCE.test(taint.source)) return true
+  const values = [token, ...chk.ex.resolve(token).filter(v => v.start !== token.start)]
+  for (const value of values) {
+    if (/\bcookies\(\s*\)/.test(chk.text(value))) return true
+    for (const helper of chk.model.calls) {
+      if (helper.start < value.start || helper.end > value.end) continue
+      if (helper.receiver !== '' && helper.receiver !== 'this') continue
+      const fn = chk.model.fns.find(f => f.name === helper.name && !(f.start <= helper.start && helper.end <= f.end))
+      if (!fn) continue
+      const text = chk.text(fn)
+      if ((AUTH_HEADER_READ.test(text) || COOKIE_READ.test(text)) && !VERIFY_CALL.test(text)) return true
+    }
+  }
+  return false
 }
 
 function corsReflection(chk: Checker, call: CallFact): void {

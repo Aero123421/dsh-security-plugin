@@ -151,6 +151,10 @@ changes; they are called out explicitly.
   Math.random()...) }`). Only the statement computing the digest or the random value was read before. Random
   numbers that are compared or subtracted (`Math.random() < 0.1`, `sort(() => Math.random() - 0.5)`) are no
   longer reported in functions named after tokens.
+- Report `jwt.decode()` without verification also when the token comes from a cookie or a request header, from
+  Next.js `cookies()`, or from a same-file helper that reads the `Authorization` header or a cookie
+  (`jwt.decode(getBearer(req))`). Only functions that read the `Authorization` header themselves were checked,
+  so admin checks on a decoded cookie token were missed.
 - Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
   and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
 
