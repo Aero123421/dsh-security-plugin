@@ -13,12 +13,12 @@ it ships, copied here, is MIT. This plugin follows the shipped MIT text.
 with `languageSymbol` `tree_sitter_python` and `expandoChar` U+00B5.
 
 Shipped targets: Linux x64, Linux arm64, macOS x64, macOS arm64, Windows x64.
-The Linux files are glibc binaries (`NEEDED` `libc.so.6`). `objdump -T` shows
-GLIBC_2.2.5 for Linux x64 and GLIBC_2.17 for Linux arm64. On Linux where
-Node's `process.report.getReport().header.glibcVersionRuntime` is absent,
-including musl (Alpine), or where that version is older than the file, the
-plugin does not load them. Any other OS, CPU, musl, or that older glibc
-uses the built-in Python parser. Settings and Coverage say so.
+On musl, the plugin does not read `parser.so` and uses `python-fallback`.
+This is a fail-safe change. A crash on musl was not reproduced on hardware.
+Not yet checked: an old-glibc machine, an arm64 machine, macOS, Windows, and
+whether `lib/` rebuilt from source matches the committed output.
+`objdump -T` on the shipped Linux files shows `GLIBC_2.2.5` for x64 and
+`GLIBC_2.17` for arm64. NEEDED is `libc.so.6` for both.
 
 Licenses:
 

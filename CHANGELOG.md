@@ -20,7 +20,16 @@ changes; they are called out explicitly.
 - Secret findings and the built-in "Review … in <path>" task titles are translated in the UI from stored arguments. English, JSON, and SARIF report text is unchanged, and a 0.4.1 database is read without a migration. A 0.4.1 secret finding is translated when its rule id and English sentences can be recovered; otherwise the stored English is shown.
 - The sidebar and settings section titles follow the plugin language after it loads, including Japanese.
 - Compact token estimates keep each number and its unit on one line at a narrow width.
-- Installing the plugin no longer depends on `@ast-grep/lang-python` or its install script. tree-sitter-python prebuilds for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64) ship in the package, so `dsh plugin add` does not need extra pnpm options on pnpm 10, 11 or 12. The Linux files need glibc. They are not loaded when Node reports no `glibcVersionRuntime` (musl, including Alpine), or when that version is older than the file (`objdump -T`: Linux x64 needs GLIBC 2.2.5, Linux arm64 needs GLIBC 2.17; 2.17 is newer than 2.9). Python then uses the built-in parser, and Settings and Coverage say so. JSON and SARIF text stays English.
+- Installing the plugin no longer depends on `@ast-grep/lang-python` or its install script. tree-sitter-python prebuilds for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64) ship in the package, so `dsh plugin add` does not need extra pnpm options on pnpm 10, 11 or 12. JSON and SARIF text stays English.
+- On musl, the plugin does not read `parser.so` and uses `python-fallback`. This is a fail-safe change. A crash on musl was not reproduced on hardware.
+
+### Not yet checked
+
+- An old-glibc machine, an arm64 machine, macOS, Windows, and whether `lib/` rebuilt from source matches the committed output.
+
+### Known
+
+- P3: at 360px or narrower, the page heading is truncated.
 
 ## [0.4.1] - 2026-10-20
 
