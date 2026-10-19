@@ -108,7 +108,7 @@ export function DirectoryBrowser(props: {
         {props.error ? <Callout tone="error">{tr.t(props.error)}</Callout> : null}
         {listing && !failed ? (
           <>
-            <nav className="dshsec-actions dshsec-directory-crumbs" aria-label={tr.t('project.folderPath')}>
+            <nav className="dshsec-actions dshsec-directory-crumbs" aria-label={tr.t('project.location')}>
               {listing.crumbs.map(crumb => (
                 <Button
                   key={crumb.path}

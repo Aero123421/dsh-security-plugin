@@ -68,6 +68,14 @@ async function render(detail: ScanDetail, lang: 'en' | 'ja' = 'en') {
   return { api, container: mounted.container }
 }
 
+function diagnosticsOf(root: ParentNode): HTMLDetailsElement {
+  const found = [...root.querySelectorAll('details')].find(
+    e => e.querySelector(':scope > summary')?.textContent === 'Usage and activity',
+  )
+  if (!found) throw new Error('no usage and activity disclosure')
+  return found
+}
+
 describe('review completion is separate from process completion', () => {
   it.each([
     ['not-run', coverage(0, 0)],
@@ -82,15 +90,26 @@ describe('review completion is separate from process completion', () => {
     })
   })
 
+  it('does not count tasks whose targets no longer exist as missing review', () => {
+    const stale: Coverage = {
+      ...coverage(4, 6, 0, 2),
+      gapDetails: [{ code: 'stale-tasks', params: { count: 2 }, fallback: '2 obsolete review task(s) were skipped' }],
+    }
+    expect(reviewOutcome({ models, coverage: stale })).toEqual({ state: 'complete', completed: 4, planned: 4 })
+    // Work skipped for other reasons (budget, task limits) still leaves the review incomplete.
+    const mixed: Coverage = { ...stale, tasks: { completed: 4, planned: 7, failed: 0, skipped: 3 } }
+    expect(reviewOutcome({ models, coverage: mixed })).toEqual({ state: 'partial', completed: 4, planned: 5 })
+  })
+
   it('distinguishes built-in only from legacy unknown AI coverage', () => {
     expect(reviewOutcome({ models: {} }).state).toBe('builtin')
     expect(reviewOutcome({ models }).state).toBe('unknown')
   })
 
   it.each([
-    ['not-run', coverage(0, 0), 'AI review was not performed'],
-    ['failed', coverage(0, 5, 5), 'AI review failed'],
-    ['partial', coverage(2, 15, 1, 12), 'AI review is incomplete'],
+    ['not-run', coverage(0, 0), 'No AI review tasks were scheduled'],
+    ['failed', coverage(0, 5, 5), 'AI review failed: 0 of 5 tasks completed'],
+    ['partial', coverage(2, 15, 1, 12), 'AI review incomplete: 2 of 15 tasks completed'],
   ] as const)('puts %s coverage and retained diagnostics on completed results', async (_state, value, label) => {
     const detail = makeDetail(
       {},
@@ -102,25 +121,22 @@ describe('review completion is separate from process completion', () => {
     )
     const { container, api } = await render(detail)
     const card = container.querySelector('.dshsec-results')!
-    expect(card.querySelector('[aria-label="Review coverage"]')?.textContent).toContain(label)
+    const reviewLine = card.querySelector('.dshsec-review-line')!
+    expect(reviewLine.textContent).toContain(label)
     expect(card.textContent).toContain('token budget ran out')
-    expect(card.textContent).toContain(
-      'Some findings that were due an independent review have no recorded verification',
-    )
-    const diagnostics = [...card.querySelectorAll('details')].find(
-      e => e.querySelector(':scope > summary')?.textContent === 'Usage and execution diagnostics',
-    )!
-    expect(diagnostics).toBeTruthy()
+    expect(card.textContent).toContain('Some findings due a second opinion were not reviewed')
+    const diagnostics = diagnosticsOf(card)
     await click(diagnostics.querySelector('summary')!)
     expect(diagnostics.textContent).toContain('AI requests')
     expect(diagnostics.textContent).toContain('Reviewers')
-    expect(diagnostics.textContent).toContain('An AI worker ended')
-    expect(diagnostics.textContent).toContain('Provider refused this request.')
+    // The Host's sentence names what ended and why.
+    expect(diagnostics.querySelector('.dshsec-feed-msg')?.textContent).toBe('Provider refused this request.')
     expect(api.callsOf('listEvents')).toHaveLength(1)
-    // Coverage comes before the findings summary panel (which carries the caveat).
+    // How complete the review was is read before the findings; what was covered comes after them.
+    const list = card.querySelector('.dshsec-flist')!
     const coverageEl = card.querySelector('.dshsec-coverage')!
-    const caveatEl = card.querySelector('.dshsec-notsafe')!
-    expect(coverageEl.compareDocumentPosition(caveatEl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(reviewLine.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(list.compareDocumentPosition(coverageEl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('does not infer all findings reviewed from one completed skeptic', async () => {
@@ -144,17 +160,13 @@ describe('review completion is separate from process completion', () => {
       },
     )
     const { api, container } = await render(detail)
-    expect(container.textContent).toContain(
-      'Some findings that were due an independent review have no recorded verification',
-    )
+    expect(container.textContent).toContain('Some findings due a second opinion were not reviewed')
     api.handlers.listFindings = () => ok([makeFinding({ independentlyReviewed: true })])
     await act(async () => {
       await controller!.loadFindings('scan-1', true)
     })
     await flush()
-    expect(container.textContent).not.toContain(
-      'Some findings that were due an independent review have no recorded verification',
-    )
+    expect(container.textContent).not.toContain('Some findings due a second opinion were not reviewed')
   })
 
   it('localizes structured diagnostics and preserves technical details in Japanese', async () => {
@@ -180,11 +192,14 @@ describe('review completion is separate from process completion', () => {
       },
     )
     const { container } = await render(detail, 'ja')
-    expect(container.textContent).toContain('AIレビュー失敗')
+    expect(container.querySelector('.dshsec-review-line')?.textContent).toContain('AI レビューが失敗しました')
     expect(container.textContent).toContain('3件の作業が失敗しました')
     expect(container.textContent).toContain('この環境ではネイティブモジュールを利用できません')
     expect(container.querySelector('.dshsec-coverage details')?.textContent).toContain('native unavailable')
-    expect(container.querySelector('.dshsec-feed-msg > span')?.textContent).toContain('AIの作業が終了しました')
+    // A localized label leads; the Host's English sentence follows as detail.
+    const line = container.querySelector('.dshsec-feed-msg')!
+    expect(line.firstChild?.textContent).toBe('AI の作業が終了しました。')
+    expect(line.querySelector('.dshsec-feed-detail')?.textContent).toBe('Provider refused this request.')
   })
 
   it('offers a retry for failed completed-event retrieval without hiding results', async () => {
@@ -194,11 +209,9 @@ describe('review completion is separate from process completion', () => {
       await controller!.loadScanEvents('scan-1', true)
     })
     await flush()
-    const diagnostics = [...container.querySelectorAll('details')].find(
-      e => e.querySelector(':scope > summary')?.textContent === 'Usage and execution diagnostics',
-    )!
+    const diagnostics = diagnosticsOf(container)
     expect(diagnostics.textContent).toContain('Couldn’t reach DSH')
-    expect(container.textContent).toContain('Scheduled AI tasks completed')
+    expect(container.querySelector('.dshsec-review-line')?.textContent).toBe('AI review completed (1 tasks).')
     api.handlers.listEvents = () => ok([])
     await click(byText(diagnostics, 'button', 'Retry'))
     await flush()
@@ -212,32 +225,60 @@ describe('review completion is separate from process completion', () => {
         models,
         coverage: coverage(2, 15, 1, 12),
         usage: { llmCalls: 10, inputTokens: 2_900_000, outputTokens: 50_000, toolCalls: 20, elapsedMs: 60_000 },
+        notices: [{ key: 'budget-tokens', level: 'warn', text: 'Token budget exhausted.', at: '2026-10-01T10:00:00Z' }],
       },
     )
     const { api, container } = await render(detail)
-    expect(container.textContent).toContain('Continue with more budget')
+    expect(container.textContent).toContain('Add budget')
     api.handlers.extendScanBudget = () => ok({ ...detail.summary, status: 'queued' as const, phase: 'hunt' as const })
-    await click(byText(container, 'button', 'Add +100%'))
+    await click(byText(container, 'button', '+100%'))
     await flush()
     // Tokens are the binding dimension (98% used); calls and minutes stay untouched.
     expect(api.callsOf('extendScanBudget')).toEqual([{ scanId: 'scan-1', addTokens: 3_000_000 }])
   })
 
+  it.each(['hunt-budget-reserved', 'review-skipped'])(
+    'offers a top-up after %s and grows tokens and AI requests when no limit was reached',
+    async key => {
+      const detail = makeDetail(
+        {},
+        {
+          models,
+          coverage: coverage(4, 9, 0, 5),
+          usage: { llmCalls: 100, inputTokens: 900_000, outputTokens: 20_000, toolCalls: 50, elapsedMs: 60_000 },
+          notices: [{ key, level: 'info', text: 'Host text', at: '2026-10-01T10:00:00Z' }],
+        },
+      )
+      const { api, container } = await render(detail)
+      expect(container.querySelector('.dshsec-budget-stop')?.textContent).toContain('Add budget')
+      api.handlers.extendScanBudget = () => ok({ ...detail.summary, status: 'queued' as const })
+      await click(byText(container, 'button', '+50%'))
+      await flush()
+      // Work was skipped to keep a phase reserve: either tokens or AI requests can bound the next phase.
+      expect(api.callsOf('extendScanBudget')).toEqual([{ scanId: 'scan-1', addTokens: 1_500_000, addLlmCalls: 150 }])
+    },
+  )
+
   it('does not offer a budget top-up when the scheduled review completed', async () => {
     const { container } = await render(makeDetail({}, { models, coverage: coverage(4, 4) }))
-    expect(container.textContent).not.toContain('Continue with more budget')
+    expect(container.textContent).not.toContain('Add budget')
+  })
+
+  it('does not offer a budget top-up when no budget limit stopped the scan', async () => {
+    // Skipped tasks can be obsolete targets or a failed provider; more budget would not run them.
+    const { container } = await render(makeDetail({}, { models, coverage: coverage(2, 15, 1, 12) }))
+    expect(container.querySelector('.dshsec-review-line')?.textContent).toContain('AI review incomplete')
+    expect(container.textContent).not.toContain('Add budget')
   })
 
   it('shows findings counts as plain report rows, not dashboard widgets', async () => {
     const { container } = await render(makeDetail({}, { models, coverage: coverage(4, 4) }))
-    const rows = [...container.querySelectorAll('.dshsec-sevrow')]
-    expect(rows).toHaveLength(5)
-    expect(rows.map(r => r.textContent?.trim()).join(' ')).toContain('High')
-    expect(rows.find(r => r.textContent?.includes('High'))?.textContent).toContain('1')
-    // Certainty is one kv line (label + counts), not four explanation columns.
-    const certRow = [...container.querySelectorAll('.dshsec-kv-row')].find(r => r.textContent?.includes('Needs proof'))
-    expect(certRow).toBeTruthy()
-    expect(container.querySelector('.dshsec-summary-panel, .dshsec-distbar, .dshsec-ledger')).toBeNull()
+    const items = [...container.querySelectorAll('.dshsec-sevsum-item')]
+    expect(items).toHaveLength(5)
+    expect(items.find(r => r.textContent?.includes('High'))?.textContent).toContain('1')
+    // Certainty is one line of counts under the severities, not explanation columns.
+    expect(container.querySelector('.dshsec-sevsum .dshsec-meta')?.textContent).toContain('need proof')
+    expect(container.querySelector('.dshsec-summary-panel, .dshsec-distbar, .dshsec-ledger, .dshsec-tile')).toBeNull()
   })
 
   it('groups legacy gap text under a single disclosure', async () => {

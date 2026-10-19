@@ -149,6 +149,101 @@ describe('secret rules', () => {
     expect(weak[0]!.confidence).toBe('low')
   })
 
+  it.each([
+    ['asyncpg', `DATABASE_URL = "${j('postgresql+asyncpg', '://', 'app:R4nd0mP4ss@prod-db.internal.io:5432/app')}"`],
+    ['PyMySQL', `url = "${j('mysql+pymysql', '://', 'svc:Xk29dLm4Qp7@mysql.prod.internal/app')}"`],
+  ])('reads database URLs with a %s driver scheme', (_label, text) => {
+    expect(scanOne(text, 'app/config.py').map(m => m.ruleId)).toEqual(['database-url'])
+  })
+
+  it('reads a `pass` key (nodemailer `auth: { user, pass }`, `smtpPass`) but not `passport`-like words', () => {
+    const pass = j('Mg-Smtp-', '9xK2mL4pN6')
+    expect(scanOne(`auth: { user: 'postmaster@mg.acme.dev', pass: '${pass}' }`).map(m => m.ruleId)).toEqual([
+      'generic-secret',
+    ])
+    expect(scanOne(`const smtpPass = '${pass}'`).map(m => m.ruleId)).toEqual(['generic-secret'])
+    expect(scanOne(`passThrough: '${pass}'`)).toEqual([])
+    expect(scanOne(`passenger: '${pass}'`)).toEqual([])
+  })
+
+  it.each([
+    ['a Mailgun key', `apiKey: '${j('key-', '7d2c9f4a1e8b3d6f0a5c2e9b4d7f1a3c')}'`],
+    ['a secret that names itself and carries a number', "secretOrKey: 'nest-app-jwt-secret-2024'"],
+    ['a webhook-secret prefix', `webhookSecret: '${j('whsec', '-billing-prod-signing-key')}'`],
+  ])('keeps lower-case values that are secrets, not names: %s', (_label, text) => {
+    expect(scanOne(text).map(m => m.ruleId)).toEqual(['generic-secret'])
+  })
+
+  it.each([
+    ['kebab-case name', "jwtSecret: 'billing-service-signing'"],
+    ['name with a version', "tokenAudience: 'billing-api-v2-internal'"],
+    ['self-described name with a one-digit number', "jwtSecret: 'app-secret-rotation-2'"],
+    ['Helm reference to a stored secret', "existingSecret: 'release-postgres-secret-15'"],
+    ['webhook name', "webhookSecretName: 'whsec-billing-prod'"],
+  ])('still ignores identifier values: %s', (_label, text) => {
+    expect(scanOne(text)).toEqual([])
+  })
+
+  it('reads unquoted environment settings in YAML', () => {
+    const lines = [
+      'services:',
+      '  api:',
+      '    environment:',
+      '      - NODE_ENV=production',
+      `      - JWT_SECRET=${j('9f8e7d6c5b4a', '3f2e1d0c9b8a')}`,
+      `      - "SESSION_SECRET=${j('Qm7xL2pV9', 'rT4kW8nZ3')}"`,
+      '      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password',
+      `      - "API_TOKEN=${'$'}{API_TOKEN}"`,
+      '  db:',
+      '    environment:',
+      `      POSTGRES_PASSWORD: ${j('Pg-Pr0d-', 'S3cret-2024')}`,
+      '      MYSQL_ROOT_PASSWORD: postgres',
+      '      POSTGRES_PASSWORD: mysecretpassword',
+      '      MYSQL_PASSWORD: changeme-in-production',
+      '      API_TOKEN_HEADER: X-Api-Token',
+      '      SECRET_KEY: !vault |',
+      '      ADMIN_PASSWORD: *default_password',
+      `      GITHUB_TOKEN: ${'$'}{{ secrets.GITHUB_TOKEN }}`,
+      '      DB_PASSWORD: ENC[AES256_GCM,data:Tr7oQ9=,iv:1x=,tag:k2=,type:str]',
+      '      AWS_SECRET_ARN: arn:aws:secretsmanager:eu-west-1:123456789012:secret:prod/db',
+      '      JWT_SECRET_LOCATION: prod/billing/jwt-signing-key',
+      '      CSRF_TOKEN_COOKIE: XSRF-TOKEN',
+      '      OPENAI_MAX_TOKENS: 4096',
+      '      EXISTING_SECRET: release-postgres-credentials',
+      '      TOKEN_AUDIENCE: billing.api.internal',
+      '      TOKEN_EXPIRED: Your session token has expired',
+      '      password: Xk29dLm4Qp7Zr8Wv',
+      `      REDIS_PASSWORD: ${j('Pg-Acme-', '2024-x9')}`,
+    ]
+    const matches = scanFileContent('docker-compose.yml', lines.join('\n'), { language: 'yaml' })
+    expect(matches.map(m => [m.ruleId, m.line])).toEqual([
+      ['env-secret', 5],
+      ['env-secret', 6],
+      ['env-secret', 11],
+      ['env-secret', 28],
+    ])
+    // Windows line endings, and only in YAML.
+    const crlf = lines.slice(0, 6).join('\r\n')
+    expect(scanFileContent('docker-compose.yml', crlf, { language: 'yaml' }).map(m => m.line)).toEqual([5, 6])
+    expect(scanFileContent('notes.txt', lines.join('\n'), { language: 'other' })).toEqual([])
+  })
+
+  it('reads Kubernetes Secret data, quoted or not', () => {
+    const manifest = [
+      'apiVersion: v1',
+      'kind: Secret',
+      'data:',
+      `  DB_PASSWORD: ${j('UGctUHIwZC1TM2Ny', 'ZXQtMjAyNA==')}`,
+      'stringData:',
+      `  JWT_SECRET: "${j('4e7b9c2d8f1a6e3b', '5c0d9a8f7e6b5c4d')}"`,
+    ].join('\n')
+    const matches = scanFileContent('k8s/secret.yaml', manifest, { language: 'yaml' })
+    expect(matches.map(m => [m.ruleId, m.line])).toEqual([
+      ['env-secret', 4],
+      ['generic-secret', 6],
+    ])
+  })
+
   it('scans .env files with the env rule', () => {
     const text = `# local config\nSTRIPE_WEBHOOK_SECRET=whsec_${'Q7m'}Lp2Xr9Tz4Kb8Nv\nAPP_NAME=demo\nPUBLIC_URL=https://x.io\n`
     const matches = scanFileContent('.env', text, { language: 'env' })

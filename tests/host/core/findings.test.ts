@@ -4,10 +4,12 @@ import type { VerifiedCitation } from '../../../src/host/agents/roles/common.ts'
 import type { HunterFinding, HunterOutput } from '../../../src/host/agents/roles/hunter.ts'
 import type { SkepticOutput } from '../../../src/host/agents/roles/skeptic.ts'
 import { runSast } from '../../../src/host/analysis/sast/engine.ts'
-import { scanSecrets, secretSignals } from '../../../src/host/analysis/secrets.ts'
+import { Redactor, scanSecrets, secretSignals } from '../../../src/host/analysis/secrets.ts'
 import type { FindingRecord } from '../../../src/host/core/model.ts'
+import { snapshotQuoteSource } from '../../../src/host/evidence/quote.ts'
 import {
   applySkepticOutput,
+  applyUnreviewedDismissals,
   type HunterRecordContext,
   markNewFindings,
   recordChains,
@@ -53,7 +55,6 @@ function hunterFinding(overrides: Partial<HunterFinding> = {}): HunterFinding {
     category: 'authz',
     cwe: 'CWE-639',
     severity: 'high',
-    confidence: 'high',
     summary: 'Orders are loaded by id only.',
     impact: 'Customers read other customers orders.',
     preconditions: ['attacker has an account'],
@@ -69,7 +70,7 @@ function hunterFinding(overrides: Partial<HunterFinding> = {}): HunterFinding {
 }
 
 function hunterOutput(findings: HunterFinding[], assessments: HunterOutput['assessments'] = []): HunterOutput {
-  return { findings, assessments, reviewedPaths: [] }
+  return { findings, assessments }
 }
 
 function hunterCtx(overrides: Partial<HunterRecordContext> = {}): HunterRecordContext {
@@ -513,6 +514,65 @@ describe('recordHunterOutput', () => {
       expect(finding?.supportEvidenceIds).toHaveLength(2)
       expect(store.getEvidence(SCAN, finding?.supportEvidenceIds ?? [])[1]?.kind).toBe('source_span')
       expect(assess('false_positive', defense, () => false, 'S7')).toMatchObject({ assessed: 0 })
+    })
+
+    describe('when the planned review did not complete', () => {
+      const files = {
+        'src/db.ts':
+          "import { pool } from './pool'\nexport const sql = pool\nexport const one = 1\ndb.query('SELECT 1 WHERE id = ?', [id])\n",
+        'src/other.ts': 'export const a = 1\n// input sanitized upstream\n',
+      }
+      const sourceOf = (content: Record<string, string> = files, withheld: string[] = []) =>
+        snapshotQuoteSource(snapshotOf(content), new Redactor([]), withheld)
+      const note =
+        'An AI hunter assessed this rule hit as a false positive (Parameterized. — step at src/db.ts:4), but no independent review confirmed the cited defense, so it stays open.'
+
+      it('applies a verified code dismissal as inconclusive, once', () => {
+        assess('false_positive', defense, () => true)
+        expect(applyUnreviewedDismissals(store, SCAN, sourceOf(), new Set())).toBe(1)
+        const finding = store.findFindingByFingerprint(SCAN, fingerprint)
+        expect(finding?.verification).toBe('inconclusive')
+        expect(finding?.limitations).toContain(note)
+        expect(applyUnreviewedDismissals(store, SCAN, sourceOf(), new Set())).toBe(0)
+      })
+
+      it('leaves a finding whose review completed to that review', () => {
+        assess('false_positive', defense, () => true)
+        const id = store.findFindingByFingerprint(SCAN, fingerprint)?.id ?? ''
+        expect(applyUnreviewedDismissals(store, SCAN, sourceOf(), new Set([id]))).toBe(0)
+        expect(store.findFindingByFingerprint(SCAN, fingerprint)?.verification).toBe('potential')
+      })
+
+      it('re-checks the stored defense: comments, changed code and withheld files do not count', () => {
+        const comment = { ...cite('src/other.ts', 2, '// input sanitized upstream'), commentOnly: true }
+        assess('false_positive', comment, () => true)
+        // The stored record keeps only quoteCheck "match"; the host re-verifies and sees a comment.
+        expect(applyUnreviewedDismissals(store, SCAN, sourceOf(), new Set())).toBe(0)
+        assess('false_positive', defense, () => true)
+        const changed = { ...files, 'src/db.ts': 'export const db = {}\n' }
+        expect(applyUnreviewedDismissals(store, SCAN, sourceOf(changed), new Set())).toBe(0)
+        expect(applyUnreviewedDismissals(store, SCAN, sourceOf(files, ['src/db.ts']), new Set())).toBe(0)
+        expect(store.findFindingByFingerprint(SCAN, fingerprint)?.verification).toBe('potential')
+      })
+
+      it('ignores counter-evidence a reviewer recorded and findings with no counter-evidence', () => {
+        const target = store.findFindingByFingerprint(SCAN, fingerprint)
+        if (!target) throw new Error('missing rule hit')
+        applySkepticOutput(
+          store,
+          target,
+          {
+            verdict: 'inconclusive',
+            reasoning: 'Depends on deployment.',
+            counterevidence: [defense],
+            supporting: [],
+            missingInformation: ['deployment'],
+          },
+          roleCtx,
+        )
+        store.updateFinding(target.id, { verification: 'potential' })
+        expect(applyUnreviewedDismissals(store, SCAN, sourceOf(), new Set())).toBe(0)
+      })
     })
   })
 })

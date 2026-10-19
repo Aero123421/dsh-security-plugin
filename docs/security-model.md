@@ -49,14 +49,27 @@ Everything read from the repository is data. The controls:
 - **Regex from the model is hostile.** `search_code` limits patterns to 200 characters, matches one line at a time,
   caps scanned bytes per call (50 MB), and runs each batch in a `node:vm` script with a time budget (2 s per call),
   so catastrophic backtracking is interrupted. A search cut short returns the matches found so far with a "search
-  stopped early" note.
+  stopped early" note. A literal search that finds nothing for a pattern that looks like a regular expression is run
+  once more as one (with a note saying so); the retry shares the call's 50 MB byte cap and has its 2 s time budget.
 - **Tool use is bounded per reply.** At most 48 tool calls run per model reply; further calls get an error result
   asking the model to batch fewer. The worker yields to the event loop after every tool execution, so one worker's
-  synchronous search cannot starve the Host's other work.
+  synchronous search cannot starve the Host's other work. Tool calls of a reply cut off at the output limit are
+  never run or sent back to the provider, so partial arguments cannot be completed into a different call.
+  Arguments are repaired only for representational mistakes (a `null`, a JSON-encoded string, enum case, a numeric
+  string) and are then validated by the tool's schema like any other.
 - **Prompting.** The shared system preamble tells every role that repository content (code, comments, strings,
-  docs, configuration) is untrusted. It says instructions found there must not be followed, and that manipulation
-  attempts should be reported in the notes. Text taken from the repository and placed in task messages (route
-  names, middleware names, rule-hit snippets, finding titles) is clipped and kept on a single line.
+  docs, configuration) is untrusted. It says instructions found there must not be followed: they are data, and the
+  review continues. Text taken from the repository and placed in task messages (route names, middleware names,
+  rule-hit snippets, finding titles) is clipped and kept on a single line. The Planner's threat model, which a
+  hostile repository can steer, reaches hunters only as context labelled as the Planner's reading of the code, not
+  as verified facts; the coverage units it proposes (including their rationale and hypothesis) are validated by the
+  Host, and their target paths and priorities only rank and seed tasks within the snapshot. The plan's exclusions
+  (paths left out of the sweep) are checked the same way: a path is excluded only when the Planner's reason claims
+  vendored, generated, documentation or fixture code and every visible file under it carries a marker the Host
+  sees itself (a vendor, generated, documentation or fixture path, or generated content). A path with a detected
+  endpoint or rule hit is never excluded, and the check is repeated on every run, so an injected plan cannot take
+  hand-written code out of the AI review. Refused entries stay in the review and are counted in the info event
+  `plan-exclusions-refused`.
 - **Prompt injection is mitigated, not solved.** No prompt reliably stops a determined injection. The real controls
   are structural: what a manipulated worker *can do* is limited (next section), and what it *claims* is checked
   against code (Evidence integrity, below).
@@ -89,10 +102,15 @@ the provider the user chose. The next section covers how that content is reduced
   skipped (`consent-revoked`), and the scan completes with its deterministic results and a `consent-revoked` notice.
 - **Withheld files follow the current settings too.** A scan withholds the union of its frozen `withheldGlobs` and
   the current ones, recomputed on every start and resume.
-- **Stalled and overlong requests end.** A model request that sends no stream chunk for `llmIdleTimeoutMs` (default
-  2 minutes) is abandoned and retried as a transient `TIMEOUT`. A provider that ignores the abort signal no longer
+- **Stalled and overlong requests end.** A model request that sends no first chunk within
+  `llmFirstChunkTimeoutMs` (default 10 minutes), or that then sends no chunk for `llmIdleTimeoutMs` (default
+  2 minutes), is abandoned and retried as a transient `TIMEOUT`. A provider that ignores the abort signal no longer
   holds the worker. When a scan's time budget (`maxMinutes`) runs out, its in-flight model requests are aborted and
   the scan completes with the time-budget notice.
+- **Phase ceilings bound each AI phase.** Hunting stops below the scan budget to keep a reserve for the independent
+  review. A worker the budget stops mid-run gets one wrap-up request in which only its submit tool runs. That
+  request is admitted by the same gate: it can pass the phase ceiling (by one request per running worker) but never
+  the scan's own call limit.
 
 ## Redaction and withheld files
 
@@ -139,8 +157,16 @@ the provider the user chose. The next section covers how that content is reduced
   finding with no verified **code** step is discarded; its key step must also be code. The count of discarded findings
   is shown under Coverage, so a model that invents code is visible.
 - **"Verified" means the location holds the quote.** The stored location and snippet are the lines the quote
-  occupies, not the cited range. A citation much wider than its quote is rejected, and a quote that occurs more than
-  once in a loose cited range is ambiguous, so citing "the whole file" cannot verify anything.
+  occupies, not the cited range. A citation much wider than its quote names no place: it verifies only when the
+  quote occurs exactly once in the file. A quote that occurs more than once on the cited lines, or that is a few
+  lines off while it repeats in the file, is ambiguous, so neither citing "the whole file" nor citing near an
+  identical line binds a quote to a place it was not meant for.
+- **Tolerance never stores model text.** Harmless copy mistakes (line-number prefixes, code fences, escaped or
+  typographic quotes, HTML entities, a trailing `;`, `...` for skipped lines) are undone before matching, and a
+  `...` gap verifies only when every fragment that holds a letter or digit occurs, in order, within the cited
+  window, and at least one of them has 12 or more normalized characters; a short invented fragment such as
+  `exec(cmd)` makes the quote a mismatch. What is stored as the quote and snippet is always the file's own contiguous, redacted span, never
+  the model's text, and withheld files stay unquotable.
 - **Suppression needs proof.** A Skeptic `refuted` verdict needs at least one verified counter-evidence quote of
   code, or the host downgrades it to `inconclusive`. Comments, documentation, literal-only prose (including assigned
   strings), and punctuation alone never count as code. For mixed citations, an identifier or number must remain
@@ -150,8 +176,9 @@ the provider the user chose. The next section covers how that content is reduced
   is accepted. This is a lexical gate, not proof that the cited code actually defends the path; the independent
   reviewer must still assess that. Nested block comments are tracked in Rust, Swift, Kotlin, Scala, and Haskell.
   The optional stored `commentOnly` flag denotes all these non-code cases; old steps without it remain readable.
-  A Hunter cannot rule out a rule hit on its own: without a following review, its verified defense makes the hit
-  `inconclusive` at most. A manipulated model can make a finding look
+  A Hunter cannot rule out a rule hit on its own: without a completed review, its verified defense (re-verified as
+  code against the snapshot when a planned review did not run) makes the hit `inconclusive` at most. A manipulated
+  model can make a finding look
   *less* certain, but it cannot make a rule hit disappear without an independent reviewer quoting real code.
 - **Confirmation needs proof too.** `confirmed` without any verified code on the attack path or in reviewer support
   becomes `inconclusive`. A severity change needs a confirmed verdict with verified supporting code and lowers a

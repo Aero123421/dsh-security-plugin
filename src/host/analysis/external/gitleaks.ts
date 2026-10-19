@@ -184,6 +184,11 @@ function toSignal(finding: GitleaksFinding, path: string): Signal {
       'instead, and purge it from git history because deleting the line does not remove earlier commits.',
     fingerprintParts: ['gitleaks', finding.RuleID, path, normalizeForFingerprint(snippet)],
     metadata: {
+      // Match columns (1-based, end inclusive) let a scan merge this with a built-in match of the same span only.
+      ...(finding.StartColumn !== undefined && finding.StartColumn > 0 ? { column: finding.StartColumn } : {}),
+      ...(finding.EndColumn !== undefined && finding.EndColumn > 0 && endLine === startLine
+        ? { endColumn: finding.EndColumn + 1 }
+        : {}),
       ...(finding.Entropy !== undefined ? { entropy: Math.round(finding.Entropy * 100) / 100 } : {}),
       ...(finding.Tags && finding.Tags.length > 0 ? { tags: finding.Tags.join(', ') } : {}),
     },

@@ -162,28 +162,61 @@ describe('deep scan with the oracle model', () => {
     expect(phases).toMatchObject({ 'threat-model': 'done', hunt: 'done', review: 'done', chain: 'skipped' })
     const route = { provider: ORACLE_PROVIDER, model: ORACLE_MODEL }
     expect(scan?.models).toEqual({ planner: route, hunter: route, skeptic: route, chain: route })
-    expect(new Set(llm.calls.map(roleOf))).toEqual(new Set(['planner', 'hunter', 'skeptic']))
+    expect(new Set(llm.calls.map(roleOf))).toEqual(new Set(['planner', 'critic', 'hunter', 'skeptic']))
     const runs = h.store.listAgentRuns(id)
     expect(runs.every(r => r.status === 'submitted')).toBe(true)
-    expect(runs.filter(r => r.role === 'planner')).toHaveLength(1)
+    // Reconnaissance and one coverage-critic pass, both on the planner route.
+    expect(runs.filter(r => r.role === 'planner').map(r => r.title)).toEqual([
+      'Map the repository and plan the review',
+      'Check review coverage (pass 1)',
+    ])
     expect(runs.filter(r => r.role === 'hunter').length).toBeGreaterThan(5)
     expect(runs.filter(r => r.role === 'skeptic').length).toBeGreaterThan(3)
     expect(h.store.loadTranscript(runs[0]?.id ?? '')).toBeDefined()
     expect(new Set(llm.calls.map(call => call.sessionId))).toEqual(new Set(runs.map(run => run.taskId)))
   })
 
-  it('stores the planner threat model and turns its hypotheses into tasks', () => {
+  it('stores the review plan and turns its units into tasks, then lets the critic stop', () => {
     const scan = h.store.getScan(id)
     expect(scan?.threatModel?.summary).toContain('scripted test model')
-    expect(scan?.threatModel?.hypotheses.map(x => x.targetPaths[0])).toEqual([
-      'src/routes/orders.ts',
-      'src/routes/products.ts',
-      'src/routes/admin.ts',
-      'src/routes/webhooks.ts',
-    ])
+    const units = scan?.threatModel?.units ?? []
+    expect(units.map(unit => unit.targetPaths[0])).toEqual(
+      expect.arrayContaining(['src/routes/orders.ts', 'src/routes/products.ts', 'src/routes/admin.ts']),
+    )
+    expect(units.every(unit => unit.origin === 'recon' && unit.id.startsWith('unit:'))).toBe(true)
+    expect(scan?.threatModel?.components?.[0]?.paths.length).toBeGreaterThan(0)
     const tasks = h.store.listTasks(id)
-    expect(tasks.filter(t => t.kind === 'hunt-hypothesis')).toHaveLength(4)
-    expect(tasks.find(t => t.kind === 'threat-model')).toMatchObject({ status: 'done', outcome: { hypotheses: 4 } })
+    expect(
+      tasks
+        .filter(t => t.kind === 'hunt-unit')
+        .map(t => t.key)
+        .sort(),
+    ).toEqual(units.map(u => u.id).sort())
+    expect(tasks.some(t => t.kind === 'hunt-hypothesis' || t.key.startsWith('file:'))).toBe(false)
+    expect(tasks.find(t => t.kind === 'threat-model')).toMatchObject({
+      status: 'done',
+      outcome: { units: units.length, dropped: 0 },
+    })
+    expect(tasks.find(t => t.kind === 'critic')).toMatchObject({
+      key: 'critic:1',
+      status: 'done',
+      outcome: { units: 0, done: true },
+    })
+  })
+
+  it('reports a coverage ledger: every unit and gap task, with status and findings', () => {
+    const coverage = h.store.getScan(id)?.coverage
+    const units = coverage?.units ?? []
+    const hunts = h.store.listTasks(id).filter(t => t.role === 'hunter')
+    expect(units).toHaveLength(hunts.length)
+    expect(new Set(units.map(u => u.origin))).toEqual(new Set(['recon', 'gap']))
+    expect(units.every(u => u.status === 'covered' || u.status === 'finding')).toBe(true)
+    const orders = units.find(u => u.paths[0] === 'src/routes/orders.ts')
+    expect(orders).toMatchObject({ origin: 'recon', status: 'finding' })
+    expect(orders?.findings).toBeGreaterThan(0)
+    expect(orders?.surface).toContain('GET /api/orders/:id')
+    expect(coverage?.unassignedFiles).toBe(0)
+    expect(coverage?.endpoints.reviewed).toBe(coverage?.endpoints.total)
   })
 
   it('finds and confirms the IDOR and the missing authentication', () => {
@@ -338,10 +371,12 @@ describe('quick scan', () => {
       const id = await runScan(h, { mode: 'quick' })
       const scan = h.store.getScan(id)
       expect(scan?.status).toBe('completed')
-      const tasks = h.store.listTasks(id)
+      const tasks = h.store.listTasks(id).filter(t => t.role === 'hunter')
       expect(tasks.length).toBeGreaterThan(0)
       expect(tasks.length).toBeLessThanOrEqual(scan?.budget.maxTasks ?? 0)
-      expect(tasks.every(t => t.kind === 'hunt-endpoints' && t.status === 'done')).toBe(true)
+      expect(tasks.some(t => t.kind === 'hunt-unit')).toBe(true)
+      expect(tasks.every(t => t.status === 'done')).toBe(true)
+      expect(scan?.coverage?.endpoints.reviewed).toBe(scan?.coverage?.endpoints.total)
       const prompts = JSON.stringify(llm.calls)
       expect(prompts).toContain('routes.unguarded')
       expect(prompts).toContain('Review steering observations (not findings;')
@@ -351,22 +386,31 @@ describe('quick scan', () => {
     }
   })
 
-  it('triages rule hits and fills spare slots with endpoints: no planner and no reviewer', async () => {
+  it('runs a light reconnaissance, triages rule hits first, then units: no critic and no reviewer', async () => {
     const llm = await oracleLlm()
     const h = createHarness({ llm, workspaces: [workspace()], settings: AI_SETTINGS })
     const id = await runScan(h, { mode: 'quick' })
     const scan = h.store.getScan(id)
     expect(scan?.status).toBe('completed')
-    expect(new Set(llm.calls.map(roleOf))).toEqual(new Set(['hunter']))
+    expect(new Set(llm.calls.map(roleOf))).toEqual(new Set(['planner', 'hunter']))
     const phases = Object.fromEntries((scan?.phases ?? []).map(p => [p.phase, p.state]))
-    expect(phases).toMatchObject({ 'threat-model': 'skipped', hunt: 'done', review: 'skipped', chain: 'skipped' })
-    expect(scan?.threatModel).toBeUndefined()
-    const tasks = h.store.listTasks(id)
+    expect(phases).toMatchObject({ 'threat-model': 'done', hunt: 'done', review: 'skipped', chain: 'skipped' })
+    expect(scan?.threatModel?.units?.length).toBeGreaterThan(0)
+    expect(scan?.threatModel?.units?.length).toBeLessThanOrEqual(8)
+    // Reconnaissance ran with few replies.
+    const recon = h.store.listAgentRuns(id).find(run => run.role === 'planner')
+    expect(llm.calls.find(call => call.sessionId === recon?.taskId)?.messages[0]).toBeDefined()
+    expect(JSON.stringify(llm.calls.find(call => call.sessionId === recon?.taskId)?.messages[0])).toContain(
+      'You have up to 10 replies',
+    )
+    const tasks = h.store.listTasks(id).filter(t => t.role === 'hunter')
     expect(tasks.length).toBeGreaterThan(0)
     expect(tasks.length).toBeLessThanOrEqual(scan?.budget.maxTasks ?? 0)
-    expect(tasks.every(t => ['triage-signals', 'hunt-endpoints'].includes(t.kind) && t.status === 'done')).toBe(true)
     expect(tasks.some(t => t.kind === 'triage-signals')).toBe(true)
-    expect(tasks.some(t => t.kind === 'hunt-endpoints')).toBe(true)
+    expect(tasks.some(t => t.kind === 'hunt-unit')).toBe(true)
+    // Rule-hit triage ranks first.
+    expect(tasks[0]?.kind).toBe('triage-signals')
+    expect(h.store.listTasks(id).some(t => t.kind === 'critic' || t.kind === 'review')).toBe(false)
     expect(scan?.usage.llmCalls).toBeLessThanOrEqual(scan?.budget.maxLlmCalls ?? 0)
     const sql = byLocation(h.store.listFindings(id), 'src/routes/products.ts', 27)
     // Enriched by the hunter but not independently reviewed.
@@ -386,7 +430,14 @@ describe('research scan', () => {
     const scan = h.store.getScan(id)
     expect(scan?.status).toBe('completed')
     expect(scan?.phases.find(p => p.phase === 'chain')?.state).toBe('done')
-    expect(new Set(llm.calls.map(roleOf))).toEqual(new Set(['planner', 'hunter', 'skeptic', 'chain']))
+    expect(new Set(llm.calls.map(roleOf))).toEqual(new Set(['planner', 'critic', 'hunter', 'skeptic', 'chain']))
+    // Up to two critic passes; the first one found no gap, so there is no second.
+    expect(
+      h.store
+        .listTasks(id)
+        .filter(t => t.kind === 'critic')
+        .map(t => t.key),
+    ).toEqual(['critic:1'])
     const chain = h.store.listTasks(id).find(t => t.kind === 'chain')
     expect(chain).toMatchObject({ status: 'done', outcome: { created: 0, discarded: 0 } })
     expect(chain?.input.findingIds?.length).toBeGreaterThan(1)
@@ -741,13 +792,26 @@ describe('budgets and provider failures', () => {
     expect(hunters.every(r => r.status === 'blocked_by_provider' && r.llmCalls === 1)).toBe(true)
     expect(hunterCalls).toHaveLength(hunters.length)
     const huntTasks = h.store.listTasks(id).filter(t => t.role === 'hunter')
-    expect(huntTasks.every(t => t.status === 'failed' && t.error?.code === 'INVALID_REQUEST')).toBe(true)
+    // The task keeps a dedicated code (the provider's code stays in the message), so the ledger can say why.
+    expect(
+      huntTasks.every(
+        t =>
+          t.status === 'failed' &&
+          t.error?.code === 'blocked_by_provider' &&
+          t.error.message.startsWith('INVALID_REQUEST: '),
+      ),
+    ).toBe(true)
+    const notRun = (h.store.getScan(id)?.coverage?.units ?? []).filter(
+      u => u.status === 'not-run' && u.id !== 'unassigned',
+    )
+    expect(notRun.length).toBeGreaterThan(0)
+    expect(notRun.every(u => u.reason?.code === 'provider-rejected')).toBe(true)
     expect(h.store.listFindings(id).some(f => f.source === 'ai')).toBe(false)
     // Other roles keep their own model and still work.
     expect(h.store.getScan(id)?.threatModel).toBeDefined()
     expect(h.store.listAgentRuns(id).some(r => r.role === 'skeptic' && r.status === 'submitted')).toBe(true)
     expect(h.store.getScan(id)?.coverage?.gaps).toContain(
-      `${huntTasks.length} review task(s) failed (first: INVALID_REQUEST: The request was rejected by the content policy.); see the activity log.`,
+      `${huntTasks.length} review task(s) failed (first: blocked_by_provider: INVALID_REQUEST: The request was rejected by the content policy.); see the activity log.`,
     )
   })
 })
@@ -888,13 +952,24 @@ describe('provider route rejection circuit breaker', () => {
       release = resolve
     })
     let started = 0
-    const llm = scriptedLlm(async function* () {
+    const llm = scriptedLlm(async function* (options) {
+      // Reconnaissance plans nothing, so the hunters below get only the Host's gap-filling tasks.
+      if (roleOf(options) === 'planner') {
+        yield* callReply('plan', 'submit_review_plan', { summary: 'A shop.', units: [] })
+        return
+      }
       if (++started === 1) {
         yield* failingStream('INVALID_REQUEST', rejection)
-      } else {
-        await held
-        yield* callReply('submit', 'submit_findings', { findings: [], reviewed_paths: [] })
+        return
       }
+      if (started === 2) await held
+      // Read something first and give the rule-hit verdict: an empty submission made without reading anything,
+      // or one missing verdicts, is sent back once.
+      const read = options.messages.some(message => message.role === 'tool')
+      const verdicts = [{ id: 'S1', verdict: 'uncertain', reason: 'Not checked in this test.' }]
+      yield* read
+        ? callReply('submit', 'submit_findings', { findings: [], signal_assessments: verdicts })
+        : callReply('ls', 'list_files', {})
     })
     const h = createHarness({
       llm,
@@ -906,8 +981,8 @@ describe('provider route rejection circuit breaker', () => {
     expect(h.store.listTasks(scan.id, ['running'])).toHaveLength(1)
     release()
     expect(await h.settle(scan.id)).toBe('completed')
-    expect(llm.calls).toHaveLength(2)
-    expect(h.store.listTasks(scan.id, ['done'])).toHaveLength(1)
+    expect(llm.calls.filter(call => roleOf(call) === 'hunter')).toHaveLength(3)
+    expect(h.store.listTasks(scan.id, ['done']).filter(t => t.role === 'hunter')).toHaveLength(1)
   })
 
   it('scrubs provider-echoed secrets and Host paths before clipping every new diagnostic', async () => {
@@ -1048,7 +1123,8 @@ describe('initialPhases', () => {
       initialPhases(mode, ai)
         .filter(p => p.state === 'skipped')
         .map(p => p.phase)
-    expect(skipped('quick', true)).toEqual(['threat-model', 'review', 'chain'])
+    // Quick runs a light reconnaissance too.
+    expect(skipped('quick', true)).toEqual(['review', 'chain'])
     expect(skipped('deep', true)).toEqual(['chain'])
     expect(skipped('research', true)).toEqual([])
     expect(skipped('research', false)).toEqual(['threat-model', 'hunt', 'review', 'chain'])

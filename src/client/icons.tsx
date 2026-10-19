@@ -156,6 +156,13 @@ export const IconFolder = (p: IconProps) => (
   </Svg>
 )
 
+export const IconFolderPlus = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M20.5 12V9.7a2 2 0 0 0-2-2h-7.4l-2-2.2H5.5a2 2 0 0 0-2 2v9.8a2 2 0 0 0 2 2h7" />
+    <path d="M18 15v6M15 18h6" />
+  </Svg>
+)
+
 export const IconSpark = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 3.5 13.9 10l6.6 2-6.6 2L12 20.5 10.1 14l-6.6-2 6.6-2L12 3.5Z" />

@@ -2,8 +2,7 @@
 
 import { type KeyboardEvent, memo, type ReactNode, useState } from 'react'
 import type { FindingSummary, ReportFormat, ScanSummary } from '../../shared/contracts.ts'
-import type { ScanMode } from '../../shared/domain.ts'
-import { Badge, SeverityBadge, TriageBadge, VerificationBadge } from '../components/Badge.tsx'
+import { Badge, SeverityLabel, TriageBadge, VerificationLabel } from '../components/Badge.tsx'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
 import { MenuButton } from '../components/Menu.tsx'
@@ -12,8 +11,8 @@ import { useController, useSecurity, useT } from '../context.tsx'
 import { DASH, formatDateTime } from '../format.ts'
 import { useScanAvailability } from '../hooks.ts'
 import { errorText } from '../i18n.ts'
-import { IconDownload, IconRefresh } from '../icons.tsx'
-import { ModeCards } from './NewScanDialog.tsx'
+import { IconDownload, IconPlus, IconRefresh, IconShield } from '../icons.tsx'
+import { AddProjectFolder } from './AddProjectFolder.tsx'
 
 export const REPORT_FORMATS: readonly ReportFormat[] = ['markdown', 'json', 'sarif']
 
@@ -40,35 +39,37 @@ export function ViewingBanner(props: { readonly scan: ScanSummary | undefined })
 
 /** Explains why scanning is impossible, or renders children when it is possible. */
 export function AvailabilityGate(props: { readonly children: ReactNode }) {
+  const controller = useController()
   const tr = useT()
   const availability = useScanAvailability()
   if (availability === 'unsupported') {
-    return (
-      <EmptyState title={tr.t('state.noWorkspacesTitle')}>
-        <p>{tr.t('state.noWorkspaceSupport')}</p>
-      </EmptyState>
-    )
+    return <EmptyState title={tr.t('state.noWorkspacesTitle')} body={tr.t('state.noWorkspaceSupport')} />
   }
   if (availability === 'no-workspaces') {
     return (
-      <EmptyState title={tr.t('state.noWorkspacesTitle')}>
-        <p>{tr.t('state.noWorkspacesBody')}</p>
-      </EmptyState>
+      <EmptyState
+        title={tr.t('state.noWorkspacesTitle')}
+        body={tr.t('state.noWorkspacesBody')}
+        action={<AddProjectFolder variant="button" onAdded={controller.selectWorkspace} />}
+      />
     )
   }
   if (availability === 'loading') return <Loading />
   return <>{props.children}</>
 }
 
+/** Centered placeholder in DSH's style: a glyph, one line, at most one sentence and one action. */
 export function EmptyState(props: {
   readonly title: string
-  readonly children?: ReactNode
+  readonly body?: ReactNode
   readonly action?: ReactNode
+  readonly icon?: ReactNode
 }) {
   return (
     <div className="dshsec-empty">
-      <h2 className="dshsec-h2">{props.title}</h2>
-      <div className="dshsec-empty-body">{props.children}</div>
+      <span className="dshsec-empty-icon">{props.icon ?? <IconShield size={24} />}</span>
+      <h2 className="dshsec-empty-title">{props.title}</h2>
+      {props.body ? <p className="dshsec-empty-body">{props.body}</p> : null}
       {props.action ? <div className="dshsec-empty-action">{props.action}</div> : null}
     </div>
   )
@@ -105,45 +106,29 @@ export function LoadError(props: {
   )
 }
 
-/** First-run explanation with the three depth choices and a Start button. */
+/** A project that has never been scanned. */
 export function FirstRun(props: { readonly workspaceId: string | undefined }) {
   const controller = useController()
   const tr = useT()
-  const defaultMode = useSecurity(s => s.bootstrap.value?.settings?.scan?.defaultMode) ?? 'deep'
-  const [mode, setMode] = useState<ScanMode>(defaultMode)
+  const title = useSecurity(s => s.workspaces.value?.find(w => w.id === props.workspaceId)?.title)
   return (
-    <section className="dshsec-intro" aria-labelledby="dshsec-intro-title">
-      <h2 className="dshsec-intro-title" id="dshsec-intro-title">
-        {tr.t('intro.title')}
-      </h2>
-      <p className="dshsec-intro-body">{tr.t('intro.body')}</p>
-      <div className="dshsec-leaves">
-        <h3 className="dshsec-h3">{tr.t('intro.leavesTitle')}</h3>
-        <ul className="dshsec-list">
-          <li>{tr.t('intro.leaves1')}</li>
-          <li>{tr.t('intro.leaves2')}</li>
-          <li>{tr.t('intro.leaves3')}</li>
-        </ul>
-      </div>
-      <fieldset className="dshsec-fieldset">
-        <legend className="dshsec-h3">{tr.t('intro.modesTitle')}</legend>
-        <ModeCards value={mode} onChange={setMode} name="dshsec-intro-mode" />
-      </fieldset>
-      <div>
+    <EmptyState
+      title={tr.t('intro.title')}
+      body={tr.t('intro.body', { project: title || tr.t('intro.thisProject') })}
+      action={
         <Button
           variant="primary"
-          onClick={() =>
-            controller.openNewScan({ ...(props.workspaceId ? { workspaceId: props.workspaceId } : {}), mode })
-          }
+          icon={<IconPlus size={16} />}
+          onClick={() => controller.openNewScan({ ...(props.workspaceId ? { workspaceId: props.workspaceId } : {}) })}
         >
-          {tr.t('intro.start')}
+          {tr.t('page.newScan')}
         </Button>
-      </div>
-    </section>
+      }
+    />
   )
 }
 
-/** One finding in a list: severity, title, certainty, location, tags. */
+/** One finding in a list: severity, title, then certainty, location and tags on one quiet line. */
 export const FindingRow = memo(function FindingRow(props: {
   readonly finding: FindingSummary
   readonly selected?: boolean
@@ -166,26 +151,26 @@ export const FindingRow = memo(function FindingRow(props: {
       onKeyDown={event => props.onKeyDown?.(event, f)}
     >
       <span className="dshsec-frow-sev">
-        <SeverityBadge severity={f.severity} />
+        <SeverityLabel severity={f.severity} />
       </span>
       <span className="dshsec-frow-main">
         <span className="dshsec-frow-title" title={typeof f.title === 'string' ? f.title : undefined}>
           {typeof f.title === 'string' && f.title ? f.title : DASH}
         </span>
         <span className="dshsec-frow-meta">
-          <VerificationBadge verification={f.verification} withTitle={false} />
-          {f.isNew ? <Badge tone="brand">{tr.t('findings.new')}</Badge> : null}
-          <TriageBadge triage={f.triage} />
+          <VerificationLabel verification={f.verification} withTitle={false} />
           <span className="dshsec-frow-loc" title={location}>
             <bdi>{location}</bdi>
           </span>
+          {f.isNew ? <Badge tone="brand">{tr.t('findings.new')}</Badge> : null}
+          <TriageBadge triage={f.triage} />
         </span>
       </span>
     </button>
   )
 })
 
-/** Export menu (History rows) — downloads through the controller. */
+/** Export menu: one button, three formats. Downloads through the controller. */
 export function ExportMenu(props: { readonly scanId: string; readonly size?: 'sm' | 'md' }) {
   const controller = useController()
   const tr = useT()
@@ -200,6 +185,7 @@ export function ExportMenu(props: { readonly scanId: string; readonly size?: 'sm
     <MenuButton
       size={props.size ?? 'sm'}
       label={tr.t('export.menu')}
+      ariaLabel={tr.t('export.title')}
       icon={<IconDownload size={14} />}
       busy={busy}
       items={REPORT_FORMATS.map(format => ({
@@ -208,45 +194,6 @@ export function ExportMenu(props: { readonly scanId: string; readonly size?: 'sm
         onSelect: () => void run(format),
       }))}
     />
-  )
-}
-
-/** Inline export buttons (Overview summary). */
-export function ExportButtons(props: { readonly scanId: string }) {
-  const controller = useController()
-  const tr = useT()
-  const [busy, setBusy] = useState<ReportFormat | undefined>()
-  const [error, setError] = useState<{ code: string; message: string } | undefined>()
-  const run = async (format: ReportFormat) => {
-    setBusy(format)
-    setError(undefined)
-    const result = await controller.exportReport(props.scanId, format)
-    setBusy(undefined)
-    if (!result.ok) setError(result.error)
-  }
-  return (
-    <div className="dshsec-export">
-      {/* biome-ignore lint/a11y/useSemanticElements: a labelled button group, not a form fieldset */}
-      <div className="dshsec-btn-group" role="group" aria-label={tr.t('export.title')}>
-        {REPORT_FORMATS.map(format => (
-          <Button
-            key={format}
-            size="sm"
-            icon={<IconDownload size={14} />}
-            busy={busy === format}
-            disabled={busy !== undefined && busy !== format}
-            onClick={() => void run(format)}
-          >
-            {tr.t(`export.${format}`)}
-          </Button>
-        ))}
-      </div>
-      {error ? (
-        <Callout tone="error">
-          {tr.t('export.failed')} {errorText(tr, error)}
-        </Callout>
-      ) : null}
-    </div>
   )
 }
 

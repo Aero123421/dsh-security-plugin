@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { ScanSummary } from '../../shared/contracts.ts'
 import { SEVERITIES } from '../../shared/domain.ts'
-import { severityTone, StatusBadge } from '../components/Badge.tsx'
+import { StatusLabel } from '../components/Badge.tsx'
 import { Button } from '../components/Button.tsx'
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
 import { useController, useSecurity, useT } from '../context.tsx'
@@ -81,7 +81,7 @@ function HistoryBody() {
                     <div className="dshsec-hint">{scan.subpath ?? tr.t('scan.wholeProject')}</div>
                   </td>
                   <td data-label={tr.t('history.status')}>
-                    <StatusBadge status={scan.status} />
+                    <StatusLabel status={scan.status} />
                     {scan.status === 'completed' && scan.review ? (
                       <div className="dshsec-hint">{tr.t(`review.${scan.review.state}`)}</div>
                     ) : null}
@@ -155,14 +155,9 @@ function OpenCounts(props: { readonly scan: ScanSummary }) {
   return (
     <span className="dshsec-counts">
       {parts.map(p => (
-        <span
-          key={p.severity}
-          className={`dshsec-count-pill dshsec-count-pill--${severityTone(p.severity)}`}
-          title={tr.t(`severity.${p.severity}`)}
-        >
-          <span className="dshsec-visually-hidden">{tr.t(`severity.${p.severity}`)}: </span>
-          <span aria-hidden="true">{tr.t(`severity.${p.severity}`).slice(0, tr.lang === 'en' ? 1 : 2)}</span>
-          {p.count}
+        <span key={p.severity} className={`dshsec-count dshsec-sev--${p.severity}`}>
+          <span className="dshsec-sev-dot" aria-hidden="true" />
+          {tr.t('project.count', { count: p.count, severity: tr.t(`severity.${p.severity}`) })}
         </span>
       ))}
     </span>

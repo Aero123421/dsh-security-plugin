@@ -10,7 +10,7 @@
 import { resolveRelativeImport } from '../outline.ts'
 import type { CallFact, ClassFact, DecoratorFact, FileModel, FnFact, Span } from '../sast/model.ts'
 import { callAt } from '../sast/taint.ts'
-import { ANY_RECEIVER, AUTH_HINT, joinRoute, type RouteFileContext, refOf, refString } from './common.ts'
+import { ANY_RECEIVER, isAuthHint, joinRoute, type RouteFileContext, refOf, refString } from './common.ts'
 import { joinModule } from './link.ts'
 
 const FLASK_VERBS: Readonly<Record<string, string>> = {
@@ -97,7 +97,7 @@ function beforeRequestHooks(ctx: RouteFileContext): void {
   const { model, ex } = ctx
   const add = (receiver: string, name: string, body: string, offset: number): void => {
     const label = `before_request:${name}`
-    const hint = AUTH_HINT.test(name) || BEFORE_REQUEST_AUTH.test(body)
+    const hint = isAuthHint(name) || BEFORE_REQUEST_AUTH.test(body)
     ctx.sink.scoped.push({
       file: model.path,
       receiver,

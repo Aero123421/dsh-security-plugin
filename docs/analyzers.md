@@ -13,6 +13,19 @@ sink in the same function or expression. Confidence is high when the source is w
 medium when it arrives through a local alias or a route parameter. Otherwise the match is a lower-severity `sink`,
 or nothing.
 
+Request data stops counting as attacker-chosen text when the code visibly constrains it:
+
+- only the branches of a conditional reach its value (`req.query.debug ? 'on' : 'off'` is constant), and a branch
+  the condition restricts to an allow-list is clean (`LIST.includes(x) ? x : 'en'`, `SET.has(x)`, `x in OBJ`,
+  `x === 'a' || x === 'b'`, Python `x if x in ("en", "ja") else "en"`);
+- numbers and booleans derived from it are not text: `.length`, `.includes(…)`, comparisons, arithmetic,
+  `.map(Number)`/`.map(x => parseInt(x, 10))`, and Python comprehensions whose elements go through `int()`;
+- an anchored allow-list pattern checked before the sink with an early exit (`if (!/^[\w.-]+$/.test(x)) return …`,
+  `if not re.fullmatch(r"[\w.-]+", x): abort(400)`, `if not x.isdigit(): return …`), or wrapping the sink in the
+  positive form, turns command-injection and path-traversal hits into review `sink`s when its characters keep out
+  shell syntax (command) or `..` and separators (path). A pattern that admits `.` but no separator leaves a path
+  hit as a `sink`. Other rules keep the taint: an allow-listed host name is still an SSRF target.
+
 Files that look generated (`@generated`, `DO NOT EDIT`, minified) are skipped. Test, fixture and example files
 are scanned with severity capped at **Low**. SAST confidence becomes **low**; secret confidence drops one level
 (high → medium, medium → low). Findings remain visible.
@@ -30,7 +43,10 @@ are scanned with severity capped at **Low**. SAST confidence becomes **low**; se
 
 25 rules. The same rules drive redaction of everything shown to models. Generic rules (`generic-secret`,
 `env-secret`) are scan-only and use entropy, placeholder and key-name filters. `generic-secret` also excludes prose
-values dominated by non-ASCII letters, which can have high entropy without being tokens. Known example values (AWS
+values dominated by non-ASCII letters, which can have high entropy without being tokens, and values that read as
+names (`dotted.or-kebab_identifiers`, `ENV_VAR_NAMES`) unless one part looks random (Mailgun `key-…`), the value
+starts with `whsec`, or it calls itself a secret and carries a number (`app-jwt-secret-2024`). Keys that point at a
+stored secret (Helm `existingSecret`) are ignored. Known example values (AWS
 docs keys, the jwt.io sample, the Azurite key) and template values are ignored. Every secret finding is CWE-798.
 
 When a specific secret rule or a CWE-798 SAST rule covers the same sensitive span as `generic-secret`, they produce
@@ -61,16 +77,18 @@ fingerprint is retained for matching across scans. Different credentials, even o
 | `pypi-token` | PyPI upload token | high | high |
 | `azure-storage-key` | Azure storage or service-bus key | critical | high |
 | `jwt` | JSON Web Token | medium | medium |
-| `database-url` | DB / broker URL with inline password (placeholder and default passwords dropped or downgraded) | high | high |
-| `generic-secret` | Hard-coded password / token / API key assignment | medium | low |
-| `env-secret` | Secret value in an `.env`-style file | medium | medium |
+| `database-url` | DB / broker URL with inline password, including driver schemes such as `postgresql+asyncpg://` (placeholder and default passwords dropped or downgraded) | high | high |
+| `generic-secret` | Hard-coded password / token / API key assignment (keys with `password`, `pass`, `pwd`, `secret`, `api_key`, `token`, `private_key` or `credentials`) | medium | low |
+| `env-secret` | Secret value in an `.env`-style file, or an unquoted upper-case environment setting in YAML (compose `environment:`, CI `env:`, Kubernetes Secret data) | medium | medium |
 
 ## Pattern rules (SAST, `src/host/analysis/sast/`)
 
-52 rules. JS/TS and Python files are modeled with the native tree-sitter engine (`@ast-grep/napi`) when it is
+56 rules. JS/TS and Python files are modeled with the native tree-sitter engine (`@ast-grep/napi`) when it is
 available, and with a built-in tokenizer otherwise. Both modes run the same rules and are tested side by side.
 Template and config rules match text. "Sink severity" is the severity of the `sink` variant; rules without one only
-report when request data reaches them.
+report when request data reaches them. Rules marked "review hint only" never produce a finding: their matches are
+always `sink`s, because whether they are exploitable depends on facts the rule cannot see (the library version for
+js-yaml and deep-merge helpers, where a template variable's value comes from).
 
 ### JavaScript / TypeScript (`js.ts`)
 
@@ -87,9 +105,9 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 | `js.ssrf` | Server-side request forgery | CWE-918 | high | low |
 | `js.open-redirect` | Open redirect | CWE-601 | medium | low |
 | `js.xss` | Reflected / DOM cross-site scripting, including Markdown rendered as raw HTML (`marked`, `showdown`, `markdown-it` with `html: true`, remark/rehype with raw HTML) without a sanitizer | CWE-79 | high | – |
-| `js.template-unescaped-output` | Unescaped template output | CWE-79 | medium | low |
+| `js.template-unescaped-output` | Unescaped template output | CWE-79 | – (review hint only) | low |
 | `js.insecure-deserialization` | Insecure deserialization (node-serialize) | CWE-502 | critical | medium |
-| `js.unsafe-yaml-load` | js-yaml `load()` on dynamic data | CWE-502 | medium | low |
+| `js.unsafe-yaml-load` | js-yaml `load()` on dynamic data | CWE-502 | – (review hint only) | low |
 | `js.weak-password-hash` | Weak hash used for passwords | CWE-328 | medium | – |
 | `js.weak-cipher` | Weak or deprecated encryption | CWE-327 | medium | – |
 | `js.insecure-random` | Predictable random value used as a secret | CWE-330 | medium | low |
@@ -102,18 +120,64 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 | `js.cookie-without-httponly` | Cookie readable by JavaScript | CWE-1004 | low | – |
 | `js.hardcoded-session-secret` | Hard-coded session secret | CWE-798 | medium | – |
 | `js.mass-assignment` | Mass assignment from the request body | CWE-915 | medium | – |
-| `js.prototype-pollution` | Deep merge of user input | CWE-1321 | medium | medium |
+| `js.prototype-pollution` | Deep merge of user input | CWE-1321 | – (review hint only) | medium |
 | `js.regex-injection` | Regular expression built from user input (ReDoS) | CWE-1333 | medium | – |
 | `js.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
+| `js.xxe` | XML external entity (XXE) processing: libxmljs `parseXml`/`parseXmlString` with `noent: true` | CWE-611 | high | low |
 
-SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string construction and Sequelize
-`literal(...)` (including named imports). Static placeholder predicates with separate parameter objects and
-object filters are not SQL text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
+SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string construction, Sequelize
+`literal(...)` (including named imports) and postgres.js `sql.unsafe(...)` (its tagged template is parameterized
+and not a sink). Static placeholder predicates with separate parameter objects and object filters are not SQL
+text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
+
+Besides Express-style request objects, Next.js `params`/`searchParams` and NestJS parameter decorators, request data
+includes GraphQL resolver arguments (functions in a `Query`/`Mutation`/`Subscription` map, NestJS and type-graphql
+`@Args()`/`@Arg()`) and a tRPC procedure's `input` when its `.input()` schema admits strings. `js.ssrf` also covers
+NestJS `HttpService` (`this.http.get(url)`, `this.http.axiosRef.post(url)`), and `js.xss` covers a Koa `ctx.body`
+string that starts with markup or is sent with `ctx.type = 'html'`.
+
+`js.mass-assignment` needs a receiver that writes records: a model class (`User.create`, `db.User.update`), a Prisma
+delegate (`prisma.user`), a model or repository instance (`this.userRepository`, `userModel`, `em`), a Knex builder
+(`knex('users')`) or a record loaded through one of those. A service, controller or API client method
+(`teamService.create(req.body)`) chooses its own fields and is not reported.
+
+`js.cookie-without-httponly` leaves out `res.cookie('<name>', …)` (and `setCookie`/`serialize`) when the literal
+name does not suggest a session, credential or CSRF token (`theme`, `locale`): page scripts are meant to read those.
+
+`js.jwt-decode-without-verify` reports `jwt.decode()` in a function that never calls a `verify` function when
+the function reads the `Authorization` header or the decoded token comes from a cookie or request header: directly
+(`req.cookies.session`, `req.get('x-access-token')`), through Next.js `cookies()`, or from a helper in the same file
+that reads one without verifying it (`jwt.decode(getBearer(req))`). A token passed in as a parameter or taken from
+the body is not reported, since decoding it may be for display or logging.
+
+`js.weak-password-hash` and `py.weak-password-hash` need a password word (`password`, `passwd`, `pwd`, `pw`,
+`passphrase`) in the statement that computes the MD5/SHA-1 digest (with chained calls on the following lines), in
+a later line of the same function that uses the variable holding the digest or hash object (`h.update(pw)`,
+`return digest == user.password_hash`), or in the name of the function that returns the digest when that name
+says it hashes or checks (`hashPassword`, `verify_password`). `js.insecure-random` and `py.insecure-random` read
+the names the value is assigned to and the enclosing function's name; inside anonymous callbacks
+(`.map(() => …)`) they use the nearest named function when each callback returns the value and the outermost one
+is in that function's `return`. A random number that is compared or subtracted (`Math.random() < 0.1`,
+`sort(() => Math.random() - 0.5)`) is not reported.
+
+`js.path-traversal`, `js.ssrf` and `js.open-redirect` also emit a low `sink` when the value is dynamic but its
+origin is not visible (a parameter, a stored record, another module): file reads, writes, deletes and downloads
+(not `stat`, `mkdir`, `exists`-style calls) unless `root` is set or every dynamic part goes through
+`path.basename()`; outgoing requests outside browser code (`'use client'`, JSX/TSX/Vue/Svelte files, UI-library
+imports) unless the scheme and host are fixed; redirects unless the target is a same-site path or
+`new URL('/path', req.url)`. These steer AI review only and never become findings.
 
 ### Python (`python.ts`)
 
 Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .tmpl .tpl` (`|safe`,
-`{% autoescape off %}`).
+`{% autoescape off %}`); those template matches are review `sink`s only. `py.xss` reports a vulnerability only when
+request data reaches `Markup`/`mark_safe` (or another listed HTML sink) in Python code. `py.reflected-xss` reports
+request data in an HTML string (a literal with markup) that a Flask view returns (in files that import Flask and not
+FastAPI) or that `make_response`, Django `HttpResponse` or `HTMLResponse` sends; a plain-text or JSON content type
+and values built by `Markup(…)`, `format_html()` or `escape()` are left out.
+
+Django view parameters count as request data, except those that every URLconf route in the snapshot fills through
+an `<int:…>` or `<uuid:…>` converter (or a digits-only `re_path` group): those are numbers or UUIDs.
 
 | Rule id | Title | CWE | Severity | Sink severity |
 | --- | --- | --- | --- | --- |
@@ -137,10 +201,26 @@ Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .
 | `py.insecure-random` | Predictable random value used as a secret | CWE-330 | medium | low |
 | `py.mass-assignment` | Mass assignment from request data | CWE-915 | medium | – |
 | `py.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
+| `py.reflected-xss` | Reflected cross-site scripting (XSS) | CWE-79 | high | – |
+| `py.cors-misconfiguration` | Permissive CORS with credentials (`CORSMiddleware` with `"*"` or a catch-all regex, Flask-CORS without an origin list, django-cors-headers allow-all) | CWE-942 | medium | – |
+| `py.xxe` | XML external entity (XXE) processing: lxml parser with `resolve_entities=True` | CWE-611 | high | low |
 
 SQLAlchemy `text(...)` is also checked inside `filter(...)`, `where(...)` and `having(...)`. Request data
 interpolated or concatenated into a predicate is a SQL injection sink; constant text with bound parameters is not.
-Standalone text construction, without a recognized execution/query-builder context, is not reported.
+Standalone text construction, without a recognized execution/query-builder context, is not reported. asyncpg and
+`databases` fetch methods (`fetch`, `fetchrow`, `fetchval`, `fetch_all`, `fetch_one`, `fetch_val`, `iterate`) are
+sinks when their text contains SQL.
+
+`py.path-traversal` also covers werkzeug `FileStorage.save()` of an upload whose destination is built from request
+data such as the upload's own `filename`, and `tarfile` `extractall()`/`extract()` of an archive opened from request
+data without `filter=` (tar slip; with `members=` it is a review hint). `zipfile` extraction strips `..` and is not
+reported. `py.template-injection` also covers Jinja2 `Environment().from_string()` and Flask
+`app.jinja_env.from_string()`; a `SandboxedEnvironment` is not reported.
+
+`py.path-traversal`, `py.ssrf` and `py.open-redirect` also emit a low `sink` for a dynamic value whose origin is
+not visible: file operations other than listing and `stat`/`mkdir`/`chmod`-style calls unless every dynamic part
+goes through `secure_filename()`/`os.path.basename()`, outgoing requests unless the scheme and host are fixed, and
+redirects unless the target is a same-site path or built by `url_for()`/`reverse()`. They steer AI review only.
 
 Cookie rules cover top-level/class assignments, member or dict-style assignments (such as
 `app.config['SESSION_COOKIE_SECURE'] = False`), and keyword arguments to `app.config.update(...)`. Only the explicit
@@ -167,6 +247,13 @@ Endpoint extraction feeds the attack surface: AI task planning, the Planner's an
 *Endpoints reviewed* coverage figure. Each endpoint records method, full route (mount prefixes resolved, up to 8
 levels), declaring file and line, handler range, middleware, **auth hints** and path parameters.
 
+A JavaScript handler passed by name is looked up in the route file, then through relative imports in the module
+that defines it: an exported function (`import { getUser }`, `import * as users` then `users.getUser`), a method or
+function property of an exported object, class or instance (`export default { list }`,
+`const users = new UsersController()`), CommonJS `exports.list = ...`, and `export *` / `export { … } from`
+barrels, through `asyncHandler(fn)`-style wrappers and `.bind(...)`. Endpoint review tasks then target the handler
+file and the route file together. Handlers from packages, or behind dynamic dispatch, stay unresolved.
+
 | Framework | What is recognized |
 | --- | --- |
 | Express | `app.METHOD`, `router.METHOD`, `router.route(path).get(…)` chains (preceding `.all(mw)` applies to subsequent methods, without a phantom ANY route), `app.use(prefix, …mw, router)` mounts across files, ordered `router.use(mw)` (applies only to later routes) |
@@ -182,14 +269,20 @@ levels), declaring file and line, handler range, middleware, **auth hints** and 
 Auth hints are middleware, guard, decorator or dependency names that match
 `auth|login|session|jwt|token|passport|guard|protect|require(User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin|role|current_user|signed_in|logged_in|api_key|passes_test|staff|superuser`.
 Names that also say rate limiting, throttling or logging (`limit`, `throttl`, `slowdown`, `logger`, `logging`, as in
-`loginLimiter` or `authRateLimit`) are never auth hints.
+`loginLimiter` or `authRateLimit`) are never auth hints. Neither is middleware that only loads state and never
+rejects a request: session stores (`session(...)`, `cookieSession(...)`, `require('express-session')(...)`),
+`passport.initialize()`, `passport.session()` and database-session dependencies such as `Depends(get_session)`.
+Enforcing names such as `requireSession`, `verifySession` and `passport.authenticate(...)` still count.
 They are hints for ranking and for the model, not proof of protection. Mounts or includes that cannot be resolved
 in the snapshot produce warnings, and a scan that finds no endpoints records a coverage gap.
 
 Next.js middleware must contain an auth-ish check, not just exist. An exported literal `config.matcher` string
 or array grants a hint only to covered paths; simple literal segments and named parameters (including a final
 `:path*`) are supported. Dynamic, object and regex matchers, spread configs and unreadable middleware do not grant
-a blanket hint. Without a matcher, an auth-ish middleware check can cover all routes in that Next.js project.
+a blanket hint. Without a matcher, an auth-ish middleware check can cover all routes in that Next.js project,
+unless the middleware reads the request path: then only routes under the literal prefixes of
+`pathname.startsWith('/prefix')` conditions get the hint, and any other use of the path (a negated prefix, an
+equality test, a list lookup) grants no hint at all.
 DRF router endpoints inherit cheaply resolved ViewSet permission/authentication class names as hints; known
 read-only bases, CRUD mixins and explicit action methods constrain the emitted CRUD methods. Unresolved router
 includes produce the existing unresolved-mount warning. Custom DRF actions and runtime router generation are not
@@ -252,7 +345,10 @@ staged target contains no repository Git configuration; disabled package-manager
 remain defense in depth in both runner versions. Report polling bounds ongoing growth, but
 writes between polls can exceed the threshold briefly; the oversized report is never parsed.
 
-Builtin and external results for the same location and category are de-duplicated (the first one wins).
+A built-in and an external result for the same issue (same file, start line, kind and category; for secrets
+also overlapping columns when both report them) become one signal: the built-in one, preferring a hit with the
+same CWE, with the higher of the two severities. Different rules on one line, such as a JWT `none` algorithm next
+to `ignoreExpiration: true`, and different credentials on one line stay separate.
 
 ### Installing external tools
 

@@ -15,8 +15,17 @@ import {
   rootName,
   secretContext,
 } from './helpers.ts'
-import type { ArgFact, CallFact, FileModel, Span } from './model.ts'
-import { type Classification, cweUrl, type FileContext, REF, type RuleMeta } from './rule.ts'
+import type { ArgFact, CallFact, FileModel, MemberAssignFact, Span } from './model.ts'
+import {
+  type Classification,
+  cweUrl,
+  type FileContext,
+  DOT_SEGMENT_NOTE,
+  GUARDED_NOTE,
+  REF,
+  type RuleMeta,
+  sanitizedBy,
+} from './rule.ts'
 import { callAt, type Taint } from './taint.ts'
 
 // ---------------------------------------------------------------------------
@@ -96,7 +105,7 @@ const CODEI: RuleMeta = {
 const PATH: RuleMeta = {
   id: 'js.path-traversal',
   title: 'Path traversal',
-  sinkTitle: 'File path from user input (check the containment logic)',
+  sinkTitle: 'File operation on a dynamic path (check where it comes from)',
   category: 'path-traversal',
   cwe: 'CWE-22',
   severity: 'high',
@@ -104,7 +113,7 @@ const PATH: RuleMeta = {
   message:
     'A file path is built from request data and then read, written, deleted or sent back. Sequences like `../` (or an absolute path) let an attacker reach files outside the intended folder, such as source code, `.env` files or system files.',
   sinkMessage:
-    'A file path built from request data reaches a file operation, but some containment logic (a `root` option or a prefix check) is nearby. Make sure the check runs on the final, normalized path.',
+    'A file operation receives a path that is not a fixed value. If any part of it can come from users (a request, an upload name, a stored record), `../` or an absolute path can reach files outside the intended folder.',
   recommendation:
     'Strip directories with `path.basename()`, or resolve the full path with `path.resolve(baseDir, input)` and reject it unless it starts with `baseDir + path.sep`. For downloads prefer `res.sendFile(name, { root: baseDir })`, or map IDs to file names on the server.',
   references: [REF.accessControl, cweUrl('CWE-22')],
@@ -113,7 +122,7 @@ const PATH: RuleMeta = {
 const SSRF: RuleMeta = {
   id: 'js.ssrf',
   title: 'Server-side request forgery (SSRF)',
-  sinkTitle: 'Outgoing request to a partly user-controlled URL',
+  sinkTitle: 'Outgoing request to a dynamic URL (check where it comes from)',
   category: 'ssrf',
   cwe: 'CWE-918',
   severity: 'high',
@@ -121,7 +130,7 @@ const SSRF: RuleMeta = {
   message:
     'The server makes an HTTP request to a URL taken from the incoming request. An attacker can point it at internal services, cloud metadata endpoints (such as `http://169.254.169.254/`) or `localhost` admin panels that are not reachable from the internet.',
   sinkMessage:
-    'An outgoing request URL contains user-controlled parts. The host appears to be fixed, so the main risk is reaching unexpected paths on that host; check that input cannot change the host (for example via `@`, `//` or encoded characters).',
+    'The server sends a request to a URL that is not a fixed value. If users can influence it (a request parameter, a webhook or callback URL they registered, a stored record), they can make the server call internal services or cloud metadata endpoints.',
   recommendation:
     'Do not fetch arbitrary URLs. Map user choices to known URLs, or parse the URL with `new URL()` and allow only expected schemes and host names. Block private and link-local IP ranges after DNS resolution, and disable redirects or re-check every redirect target.',
   references: [REF.ssrf, cweUrl('CWE-918')],
@@ -130,7 +139,7 @@ const SSRF: RuleMeta = {
 const REDIRECT: RuleMeta = {
   id: 'js.open-redirect',
   title: 'Open redirect',
-  sinkTitle: 'Redirect to a user-controlled URL (check the validation)',
+  sinkTitle: 'Redirect to a dynamic URL (check where it comes from and how it is validated)',
   category: 'business-logic',
   cwe: 'CWE-601',
   severity: 'medium',
@@ -138,7 +147,7 @@ const REDIRECT: RuleMeta = {
   message:
     'The response redirects the browser to a URL taken from the request. Attackers can craft links on your trusted domain that bounce victims to a phishing site, or leak tokens in OAuth-style flows.',
   sinkMessage:
-    'The response redirects to a URL taken from the request, but some validation appears nearby. Confirm it rejects other hosts, protocol-relative URLs (`//evil.com`) and `javascript:` URLs.',
+    'The response redirects to a URL that is not a fixed value. If users can influence it, they can send victims to another site; confirm that only relative paths or allow-listed hosts pass and that protocol-relative (`//evil.com`) and `javascript:` URLs are rejected.',
   recommendation:
     'Redirect only to relative paths you control or to an allow-list of hosts. Parse the target with `new URL(target, base)` and check its origin, or accept a short key and map it to a known URL on the server.',
   references: [REF.accessControl, cweUrl('CWE-601')],
@@ -151,7 +160,7 @@ const XSS_SERVER: RuleMeta = {
   cwe: 'CWE-79',
   severity: 'high',
   message:
-    'Request data is written into an HTTP response as raw text/HTML (`res.send`/`res.write`). An attacker can make a victim open a link whose input contains `<script>`, which then runs in the victim’s browser with their session on your site.',
+    'Request data is written into an HTTP response as raw text/HTML (`res.send`/`res.write`, Koa `ctx.body`). An attacker can make a victim open a link whose input contains `<script>`, which then runs in the victim’s browser with their session on your site.',
   recommendation:
     'Return JSON with `res.json()`, or render HTML with a template engine that escapes by default. If you must build HTML by hand, escape every dynamic value (for example with `escape-html`) and set a Content Security Policy.',
   references: [REF.injection, cweUrl('CWE-79')],
@@ -298,7 +307,7 @@ const JWT_DECODE: RuleMeta = {
   cwe: 'CWE-347',
   severity: 'medium',
   message:
-    'This function reads the `Authorization` header and calls `jwt.decode()`, which only base64-decodes the token and does not check its signature. If the decoded claims are used for authentication, anyone can forge a token.',
+    'This function passes a token from the `Authorization` header, another request header or a cookie to `jwt.decode()`, which only base64-decodes the token and does not check its signature. If the decoded claims are used for authentication, anyone can forge a token.',
   recommendation:
     'Use `jwt.verify(token, key, { algorithms: [...] })` and trust only its result. Use `decode()` only for non-security purposes such as logging.',
   references: [REF.authn, cweUrl('CWE-347')],
@@ -435,6 +444,23 @@ const BACKDOOR: RuleMeta = {
   references: [REF.authn, cweUrl('CWE-798'), cweUrl('CWE-287')],
 }
 
+const XXE: RuleMeta = {
+  id: 'js.xxe',
+  title: 'XML external entity (XXE) processing',
+  sinkTitle: 'XML parsed with entity substitution enabled (check where it comes from)',
+  category: 'injection',
+  cwe: 'CWE-611',
+  severity: 'high',
+  sinkSeverity: 'low',
+  message:
+    'Request data is parsed by libxmljs with `noent: true`, which substitutes entities. A document that declares an external entity (`<!ENTITY x SYSTEM "file:///etc/passwd">`) makes the server read local files or fetch URLs and put the content into the parsed result.',
+  sinkMessage:
+    'libxmljs parses a value that is not fixed with `noent: true`. If it can come from users, external entities can read local files or reach internal URLs.',
+  recommendation:
+    'Leave `noent` off (the default) and do not enable `dtdload`/`dtdvalid` for untrusted XML, or use a parser that never resolves external entities (`fast-xml-parser`, `@xmldom/xmldom`).',
+  references: [REF.misconfig, cweUrl('CWE-611')],
+}
+
 /** Every rule of this rule set (several matchers may share one id). */
 export const JS_RULES: readonly RuleMeta[] = [
   SQLI,
@@ -463,6 +489,7 @@ export const JS_RULES: readonly RuleMeta[] = [
   PROTO,
   REDOS,
   BACKDOOR,
+  XXE,
 ]
 
 // ---------------------------------------------------------------------------
@@ -472,6 +499,8 @@ export const JS_RULES: readonly RuleMeta[] = [
 const SQL_METHODS: ReadonlySet<string> = new Set([
   'query',
   'execute',
+  // postgres.js runs `sql.unsafe(text)` as raw SQL (its tagged template is parameterized).
+  'unsafe',
   'raw',
   '$queryRawUnsafe',
   '$executeRawUnsafe',
@@ -523,6 +552,9 @@ const CP_SPAWN = /^(?:child_process\.(?:spawn|spawnSync|execFile|execFileSync)|e
 
 const FS_OPS =
   /^(?:fs|fs\.promises)\.(?:readFile|readFileSync|createReadStream|createWriteStream|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|readdir|readdirSync|open|openSync|copyFile|copyFileSync|rename|renameSync|mkdir|mkdirSync|access|accessSync|stat|statSync|lstat|lstatSync|exists|existsSync|readlink|readlinkSync|symlink|symlinkSync|truncate|truncateSync|chmod|chmodSync|chown|chownSync|cp|cpSync|opendir|opendirSync|outputFile|outputFileSync|remove|removeSync|readJson|readJsonSync|writeJson|writeJsonSync|readJSON|writeJSON|pathExists|ensureFile|move|moveSync|copy|copySync)$/
+/** File-system calls that only inspect or prepare paths (no file content is read, written or removed). */
+const FS_METADATA =
+  /^(?:readdir|mkdir|access|stat|lstat|exists|readlink|chmod|chown|opendir|pathExists|ensureDir|mkdirp)(?:Sync)?$/
 const RES_RECEIVER = /^(?:res|response|resp|ctx\.res|reply\.raw)$/
 const CONTAINMENT_CHECK =
   /\.startsWith\s*\(|\.indexOf\s*\(\s*['"`]\.\.|\.includes\s*\(\s*['"`]\.\.|isPathInside|path\.relative\s*\(|is_relative_to|commonpath/
@@ -544,10 +576,27 @@ const MERGE_QUALIFIED =
 const MERGE_BARE =
   /^(?:_\.(?:merge|mergeWith|defaultsDeep|set|setWith)|merge|deepmerge|deepMerge|mergeDeep|deepExtend|defaultsDeep)$/
 
-const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd\b|passphrase/i
+/**
+ * Receivers that write records: model classes (`User`, `db.User`), Prisma delegates (`prisma.user`), model and
+ * repository instances (`userModel`, `this.orderRepository`, `repo`, `em`, `entityManager`), and Knex query
+ * builders (`knex('users')`).
+ */
+const ORM_RECEIVER =
+  /^(?:(?:[\w$]+\.)*[A-Z][A-Za-z0-9]*|[\w$]*(?:Model|Models|Repository|Repo|Entity|Collection|Dao|DAO)|(?:prisma|tx|trx|db|database)\.[a-z][\w$]*|(?:repo|repository|em|entityManager|manager|model|collection|queryRunner\.manager)|(?:knex|db|trx|tx|database|qb|sql)\((['"`])[\w.]+\1\))$/
+/** Names that are services, controllers, clients or framework objects even when capitalized. */
+const NOT_A_MODEL =
+  /(?:Service|Services|Controller|Handler|Client|Api|API|Error|Exception|Response|Request|Router|Factory|Helper|Manager|Validator|Schema|Dto|DTO|Store|Cache|Map|Set)$|^(?:res|response|req|request|ctx|map|cache|headers|searchParams|params|formData|localStorage|sessionStorage|Object|Array|Promise|Reflect|JSON|Math|Date)$/
+const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd?\b|passphrase/i
 const AUTH_HEADER_READ =
   /headers\s*(?:\.\s*authorization|\[\s*['"`]authorization['"`]\s*\])|\.(?:get|header)\s*\(\s*['"`]authorization['"`]\s*\)/i
 const SAFE_SENTINEL_OBJECT = /^\{\s*\}$/
+/** Request parts that carry credentials, as taint sources: cookies and headers (`req.get('authorization')`). */
+const CREDENTIAL_SOURCE =
+  /^(?:(?:req|request|ctx|ctx\.request|c\.req|event)\.(?:cookies|signedCookies|headers|multiValueHeaders|get\(\)|header\(\))|@(?:Headers|Cookies)\(\))/
+/** Reads of request cookies, including Next.js `cookies().get('token')` and the raw `Cookie` header. */
+const COOKIE_READ =
+  /\.(?:cookies|signedCookies)\b|\bcookies\(\s*\)|headers\s*(?:\.\s*cookie\b|\[\s*['"`]cookie['"`]\s*\])|\.(?:get|header)\s*\(\s*['"`]cookie['"`]\s*\)/i
+const VERIFY_CALL = /\b(?:verify|jwtVerify|verifyToken|verifyJwt)\s*\(/
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -576,6 +625,7 @@ export function jsRules(model: FileModel, ctx: FileContext): void {
     prototypePollution(chk, call, q)
     regexInjection(chk, call)
     sessionSecret(chk, call, q)
+    xxe(chk, call, q)
   }
   propertyRules(chk)
   memberAssignRules(chk)
@@ -778,7 +828,26 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
     taint = chk.ex.taintResolved(span)
     if (taint) break
   }
-  if (!taint) return
+  if (taint && sanitizedBy(PATH, taint.guard)) {
+    if (!protectedBy) chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: GUARDED_NOTE })
+    return
+  }
+  if (taint?.guard?.segmentSafe) {
+    // An allow-list that keeps out separators still lets `..` through: a review hint, not a finding.
+    chk.report(PATH, call, { kind: 'sink', confidence: 'low', taint }, { note: DOT_SEGMENT_NOTE })
+    return
+  }
+  if (!taint) {
+    // Origin unknown: steer review to content reads, writes, deletes and downloads of dynamic paths that are
+    // not confined by `root` or `path.basename()` (metadata calls such as `stat` or `mkdir` are left out).
+    if (
+      !protectedBy &&
+      !FS_METADATA.test(call.name) &&
+      paths.some(span => span !== undefined && chk.dynamic(span) && !isConfinedPath(chk, span))
+    )
+      chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
   if (!protectedBy && CONTAINMENT_CHECK.test(chk.scopeText(call.start))) {
     protectedBy = 'A prefix or `..` check appears in the same function; confirm it checks the final resolved path.'
   }
@@ -791,7 +860,7 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
 function ssrf(chk: Checker, call: CallFact, q: string): void {
   const head = rootName(call.callee)
   const imported = chk.model.imports.some(imp => imp.bindings.some(b => b.local === head))
-  if (!(HTTP_GLOBALS.test(q) || (imported && HTTP_IMPORTED.test(q)))) return
+  if (!(HTTP_GLOBALS.test(q) || (imported && HTTP_IMPORTED.test(q)) || isNestHttpCall(chk, call))) return
   if (call.isNew) return
   let target = chk.positional(call, 0)
   if (!target) return
@@ -807,6 +876,17 @@ function ssrf(chk: Checker, call: CallFact, q: string): void {
   reportUrlTaint(chk, SSRF, call, target)
 }
 
+/**
+ * NestJS `HttpService` (`@nestjs/axios`) injected as a class property: `this.http.get(url)`,
+ * `this.httpService.axiosRef.post(url)`.
+ */
+function isNestHttpCall(chk: Checker, call: CallFact): boolean {
+  if (!/^(?:get|post|put|patch|delete|head|request)$/.test(call.name)) return false
+  const m = /^this\.([A-Za-z_$][\w$]*)(?:\.axiosRef)?$/.exec(call.receiver)
+  if (!m || !chk.imports(/^@nestjs\/(?:axios|common)$/)) return false
+  return new RegExp(`(?<![\\w$])${m[1]!.replace(/\$/g, '\\$')}\\s*:\\s*HttpService\\b`).test(chk.model.source)
+}
+
 function openRedirect(chk: Checker, call: CallFact, q: string): void {
   if (call.name !== 'redirect') return
   const receiverRoot = rootName(call.receiver)
@@ -820,9 +900,14 @@ function openRedirect(chk: Checker, call: CallFact, q: string): void {
   if (/^\d+$/.test(chk.text(target).trim()) && call.args.length > 1) target = chk.positional(call, 1)
   if (!target) return
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
   const values = [target, ...chk.values(target)]
-  if (values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)) return
+  const fixed = values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)
+  if (!taint) {
+    if (!fixed && chk.dynamic(target) && !isSameOriginUrlCall(chk, target))
+      chk.report(REDIRECT, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) return
   const cls = classifyTaint(REDIRECT, taint)
   if (!cls) return
   if (REDIRECT_CHECK.test(chk.scopeText(call.start))) {
@@ -869,6 +954,17 @@ function serverXss(chk: Checker, call: CallFact): void {
   if (taint?.origin !== 'request') return
   if (PLAIN_CONTENT_TYPE.test(chk.scopeText(call.start))) return
   chk.report(XSS_SERVER, call, { kind: 'vulnerability', confidence: taint.direct ? 'high' : 'medium', taint })
+}
+
+/** libxmljs `parseXml`/`parseXmlString` with `noent: true` substitutes (external) entities. */
+function xxe(chk: Checker, call: CallFact, q: string): void {
+  if (!/^libxmljs2?\.(?:parseXml|parseXmlString|parseXmlAsync)$/.test(q)) return
+  const options = chk.positional(call, 1)
+  if (!options || !chk.ex.isObjectLiteral(options)) return
+  const noent = chk.ex.prop(options, 'noent')
+  if (!noent || !chk.ex.isWord(noent, 'true')) return
+  const xml = chk.positional(call, 0)
+  if (xml) chk.check(XXE, call, chk.ex.taintResolved(xml), chk.dynamic(xml))
 }
 
 function domXssCall(chk: Checker, call: CallFact): void {
@@ -1036,7 +1132,7 @@ function deserialization(chk: Checker, call: CallFact, q: string): void {
 function weakCrypto(chk: Checker, call: CallFact, q: string): void {
   if (/^crypto\.createHash$/.test(q) || (call.callee === 'createHash' && chk.importedFrom('createHash', /^crypto/))) {
     const alg = chk.ex.literal(chk.positional(call, 0) ?? { start: 0, end: 0 })
-    if (alg && /^(?:md5|md4|sha1|sha-1|ripemd160)$/i.test(alg) && PASSWORD_CONTEXT.test(chk.statementText(call))) {
+    if (alg && /^(?:md5|md4|sha1|sha-1|ripemd160)$/i.test(alg) && PASSWORD_CONTEXT.test(chk.digestUsage(call))) {
       chk.certain(WEAK_HASH, call, 'medium')
     }
     return
@@ -1052,6 +1148,7 @@ function weakCrypto(chk: Checker, call: CallFact, q: string): void {
     return
   }
   if (call.callee === 'Math.random') {
+    if (chk.usedAsNumber(call)) return
     const kind = secretContext(chk.contextNames(call))
     if (kind === 'strong') chk.certain(WEAK_RANDOM, call, 'medium')
     else if (kind === 'weak') chk.report(WEAK_RANDOM, call, { kind: 'sink', confidence: 'low' })
@@ -1062,10 +1159,35 @@ function jwtDecode(chk: Checker, call: CallFact, q: string): void {
   if (call.name !== 'decode') return
   if (!/^jsonwebtoken\.decode$/.test(q) && !/^(?:jwt|JWT|jsonwebtoken)$/.test(call.receiver)) return
   const fn = chk.fnAt(call.start)
-  if (!fn) return
+  const token = chk.positional(call, 0)
+  if (!fn || !token) return
   const body = chk.text(fn)
-  if (!AUTH_HEADER_READ.test(body) || /\b(?:verify|jwtVerify|verifyToken|verifyJwt)\s*\(/.test(body)) return
-  chk.certain(JWT_DECODE, call, 'medium')
+  if (VERIFY_CALL.test(body)) return
+  if (AUTH_HEADER_READ.test(body) || credentialToken(chk, token)) chk.certain(JWT_DECODE, call, 'medium')
+}
+
+/**
+ * The decoded token comes from a cookie or a request header: directly (`req.cookies.session`,
+ * `const { session } = req.cookies`), through Next.js `cookies()`, or from a helper in this file that reads one
+ * without verifying it (`jwt.decode(getBearer(req))`). A token passed in as a plain parameter is not enough:
+ * decoding it may be for display or logging.
+ */
+function credentialToken(chk: Checker, token: Span): boolean {
+  const taint = chk.ex.taintResolved(token)
+  if (taint && CREDENTIAL_SOURCE.test(taint.source)) return true
+  const values = [token, ...chk.ex.resolve(token).filter(v => v.start !== token.start)]
+  for (const value of values) {
+    if (/\bcookies\(\s*\)/.test(chk.text(value))) return true
+    for (const helper of chk.model.calls) {
+      if (helper.start < value.start || helper.end > value.end) continue
+      if (helper.receiver !== '' && helper.receiver !== 'this') continue
+      const fn = chk.model.fns.find(f => f.name === helper.name && !(f.start <= helper.start && helper.end <= f.end))
+      if (!fn) continue
+      const text = chk.text(fn)
+      if ((AUTH_HEADER_READ.test(text) || COOKIE_READ.test(text)) && !VERIFY_CALL.test(text)) return true
+    }
+  }
+  return false
 }
 
 function corsReflection(chk: Checker, call: CallFact): void {
@@ -1088,6 +1210,7 @@ function massAssignment(chk: Checker, call: CallFact, q: string): void {
   if (
     call.isNew &&
     /^[A-Z]/.test(lastName(call.callee)) &&
+    !NOT_A_MODEL.test(lastName(call.callee)) &&
     !/^(?:Error|Map|Set|URL|URLSearchParams|Date|Promise|Response|Request|Headers|FormData|Blob)$/.test(call.callee)
   ) {
     candidates = call.args.slice(0, 1)
@@ -1101,12 +1224,8 @@ function massAssignment(chk: Checker, call: CallFact, q: string): void {
     ) &&
     call.receiver !== ''
   ) {
-    if (
-      /^(?:res|response|req|request|ctx|map|cache|headers|searchParams|params|formData|localStorage|sessionStorage)$/i.test(
-        lastName(call.receiver),
-      )
-    )
-      return
+    // Only data-layer receivers write records; a service or controller method picks its own fields.
+    if (!isRecordWriter(chk, call)) return
     candidates = [...call.args]
   } else return
   for (const arg of candidates) {
@@ -1141,6 +1260,38 @@ function massAssignment(chk: Checker, call: CallFact, q: string): void {
     }
   }
 }
+
+/**
+ * The receiver of `create`/`update`/`insert`… writes database records: a model class, a Prisma delegate, a
+ * model or repository instance, a Knex builder, or a record loaded through one of those
+ * (`const user = await User.findByPk(id)`; an unassigned `user` parameter counts too). Services, controllers,
+ * API clients and imported modules other than models do not.
+ */
+function isRecordWriter(chk: Checker, call: CallFact): boolean {
+  const receiver = call.receiver.replace(/^this\./, '')
+  const last = lastName(receiver)
+  if (NOT_A_MODEL.test(last) && !/^(?:entityManager|manager)$/.test(last)) return false
+  if (ORM_RECEIVER.test(receiver)) return true
+  if (receiver !== call.receiver || !/^[a-z_$][\w$]*$/.test(receiver) || NOT_A_RECORD.test(receiver)) return false
+  if (chk.model.imports.some(imp => imp.bindings.some(b => b.local === receiver))) return false
+  const values = chk.values({ start: call.calleeSpan.start, end: call.calleeSpan.start + receiver.length })
+  const assigned = values.filter(v => v.start !== call.calleeSpan.start)
+  if (assigned.length === 0) return !chk.model.assigns.some(a => a.targets.some(t => t.name === receiver))
+  return assigned.some(value =>
+    chk.model.calls.some(
+      c =>
+        c.start >= value.start &&
+        c.end <= value.end &&
+        (c.isNew
+          ? /^[A-Z]/.test(lastName(c.callee)) && !NOT_A_MODEL.test(lastName(c.callee))
+          : ORM_RECEIVER.test(c.receiver.replace(/^this\./, ''))),
+    ),
+  )
+}
+
+/** Lower-case names of things that are not records: clients, framework objects, utilities. */
+const NOT_A_RECORD =
+  /^(?:api|http|https|axios|client|service|services|controller|router|app|server|store|cache|queue|bus|emitter|events?|logger|log|mailer|transport|stripe|twilio|sendgrid|s3|sns|sqs|redis|socket|io|ws|fs|path|util|utils|helpers?|lodash|_)$/
 
 function prototypePollution(chk: Checker, call: CallFact, q: string): void {
   let args: Span[]
@@ -1256,6 +1407,8 @@ function propertyRules(chk: Checker): void {
       case 'secure':
       case 'httpOnly':
         if (chk.ex.isWord(prop.value, 'false') && isCookieOptions(chk, prop.objectStart)) {
+          // Page scripts are meant to read a preference cookie (`res.cookie('theme', …, { httpOnly: false })`).
+          if (prop.key === 'httpOnly' && namesPlainCookie(chk, prop.objectStart)) break
           chk.certain(prop.key === 'secure' ? COOKIE_SECURE : COOKIE_HTTPONLY, prop.span, 'medium')
         }
         break
@@ -1333,8 +1486,44 @@ function isCookieOptions(chk: Checker, objectStart: number): boolean {
   return false
 }
 
+/** Cookie names that may carry a session, a credential or a CSRF token. */
+const AUTH_COOKIE_NAME = /sess|sid|auth|token|jwt|remember|login|user|account|csrf|xsrf|secret|key|(?:^|[._-])id$/i
+
+/**
+ * The cookie options at `objectStart` belong to `res.cookie('<name>', …)` (or `setCookie`/`serialize`) with a
+ * literal name that does not suggest a session or credential (`theme`, `locale`, `consent`).
+ */
+function namesPlainCookie(chk: Checker, objectStart: number): boolean {
+  const call = chk.model.calls.find(c => c.args.some(arg => arg.start === objectStart))
+  if (!call || !/^(?:cookie|setCookie|serialize)$/.test(call.name)) return false
+  const first = chk.positional(call, 0)
+  const name = first ? chk.ex.literal(first) : undefined
+  return name !== undefined && name !== '' && !AUTH_COOKIE_NAME.test(name)
+}
+
+/** Koa answers a string body as HTML when it starts with `<`, or when `ctx.type` says so. */
+const KOA_HTML_TYPE = /\bctx\.(?:response\.)?type\s*=\s*['"`](?:html|text\/html)/
+const KOA_OTHER_TYPE = /\bctx\.(?:response\.)?type\s*=\s*['"`](?!html|text\/html)/
+
+/** `ctx.body = '<p>' + ctx.query.name` in a Koa handler. */
+function koaBody(chk: Checker, assign: MemberAssignFact): void {
+  const value = assign.value
+  if (chk.ex.isObjectLiteral(value) || chk.ex.isArrayLiteral(value) || chk.ex.wholeBody(value)) return
+  const taint = chk.ex.taintResolved(value)
+  if (taint?.origin !== 'request') return
+  const scope = chk.scopeText(assign.start)
+  if (KOA_OTHER_TYPE.test(scope) || PLAIN_CONTENT_TYPE.test(scope)) return
+  const markup = chk.values(value).some(v => /^\s*(?:`|'|")\s*</.test(chk.text(v)))
+  if (!markup && !KOA_HTML_TYPE.test(scope)) return
+  chk.report(XSS_SERVER, assign, { kind: 'vulnerability', confidence: taint.direct ? 'high' : 'medium', taint })
+}
+
 function memberAssignRules(chk: Checker): void {
   for (const assign of chk.model.memberAssigns) {
+    if (assign.op === '=' && /^ctx\.(?:response\.)?body$/.test(assign.target)) {
+      koaBody(chk, assign)
+      continue
+    }
     if (assign.prop === 'innerHTML' || assign.prop === 'outerHTML') {
       if (assign.op === '=' || assign.op === '+=') htmlSink(chk, assign, assign.value)
       continue
@@ -1370,14 +1559,29 @@ function classifyTaint(rule: RuleMeta, taint: Taint): Classification | undefined
   }
 }
 
-/** Report SSRF-style URL taint: fixed origin or browser input becomes a sink. */
+/**
+ * Report SSRF-style URL taint: fixed origin or browser input becomes a sink. A dynamic URL of unknown origin
+ * is a sink too, except in browser code, where the request leaves from the user's machine.
+ */
 function reportUrlTaint(chk: Checker, rule: RuleMeta, call: CallFact, target: Span): void {
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
   const values = [target, ...chk.values(target)]
-  if (values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)) {
+  const fixed = values.some(v => chk.ex.hasFixedOrigin(v)) || hasFixedOriginUrlCall(chk, target)
+  if (!taint) {
+    if (!fixed && chk.dynamic(target) && !isBrowserCode(chk.model))
+      chk.report(rule, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) {
     if (taint.origin !== 'request') return
-    chk.report(rule, call, { kind: 'sink', confidence: 'low', taint })
+    chk.report(
+      rule,
+      call,
+      { kind: 'sink', confidence: 'low', taint },
+      {
+        note: 'The scheme and host are fixed, so input can only change the path; check that it cannot change the host (for example via `@`, `//` or encoded characters).',
+      },
+    )
     return
   }
   const cls = classifyTaint(rule, taint)
@@ -1399,6 +1603,53 @@ function reportUrlTaint(chk: Checker, rule: RuleMeta, call: CallFact, target: Sp
 /** Allow-list or host validation of an outgoing URL. */
 const URL_CHECK =
   /allow(?:ed)?_?(?:list|Hosts?|Origins?|Domains?|Urls?)|white_?list|ALLOWED_|isAllowed\w*\s*\(|isSafeUrl|isValidUrl|validateUrl|\.hostname\s*(?:===|!==|==|!=)|\.host\s*(?:===|!==|==|!=)|\.origin\s*(?:===|!==|==|!=)|\b\w*(?:allow|white|safe|trusted|permitted|hosts|domains|origins|urls)\w*\.(?:includes|has|indexOf|some)\s*\(/i
+
+/** Note for sinks whose value has no visible source. */
+const UNKNOWN_ORIGIN =
+  'Where the value comes from is not visible here (a parameter, a stored record or another module); review the callers.'
+
+/** Browser code: a `'use client'` module, a JSX/TSX/Vue/Svelte file, or one importing a UI library. */
+function isBrowserCode(model: FileModel): boolean {
+  const first = model.tokens[0]
+  if (first?.type === 'str' && /^['"]use client['"]$/.test(first.value)) return true
+  if (/\.(?:jsx|tsx|vue|svelte|html?)$/i.test(model.path)) return true
+  return model.imports.some(imp =>
+    /^(?:react|react-dom(?:\/client)?|vue|svelte|@angular\/[\w-]+|preact|solid-js|swr|@tanstack\/[\w-]+)$/.test(
+      imp.source,
+    ),
+  )
+}
+
+/**
+ * A path whose dynamic parts are all stripped of directories (`path.basename(name)`, also inside
+ * `path.join(dir, path.basename(name))` or a template), looking through one level of local assignment.
+ */
+function isConfinedPath(chk: Checker, span: Span, depth = 0): boolean {
+  if (depth > 3) return false
+  return chk.values(span).every(value => {
+    if (!chk.dynamic(value)) return true
+    const call = callAt(chk.model, value)
+    if (call) {
+      const q = chk.qualify(call.callee)
+      if (/^(?:path\.(?:posix\.|win32\.)?)?basename$/.test(q)) return true
+      if (!/^path\.(?:posix\.|win32\.)?(?:join|resolve|normalize)$/.test(q)) return false
+      return call.args.every(arg => !chk.dynamic(arg) || isConfinedPath(chk, arg, depth + 1))
+    }
+    const parts = chk.ex.dynamicParts(value)
+    return parts?.every(part => !chk.dynamic(part) || isConfinedPath(chk, part, depth + 1)) === true
+  })
+}
+
+/** `new URL('/login', req.url)`: a same-site path resolved against the request's own URL or a constant base. */
+function isSameOriginUrlCall(chk: Checker, target: Span): boolean {
+  const call = callAt(chk.model, target)
+  if (call?.callee !== 'URL' || call.args.length < 2) return false
+  const base = chk.text(call.args[1]!).replace(/\s+/g, '')
+  return (
+    chk.ex.hasFixedOrigin(call.args[0]!) &&
+    (/^(?:req|request)\.(?:url|nextUrl)$/.test(base) || chk.ex.isConstant(call.args[1]!))
+  )
+}
 
 /** `new URL(path, 'https://fixed.example')` with a constant base and a path-only input. */
 function hasFixedOriginUrlCall(chk: Checker, target: Span): boolean {

@@ -17,15 +17,16 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
 
 ## What it does
 
-- **Deterministic analyzers.** A secret scanner with 25 rules (it also does the redaction), 52 pattern rules for
+- **Deterministic analyzers.** A secret scanner with 25 rules (it also does the redaction), 56 pattern rules for
   JavaScript/TypeScript, Python, Dockerfiles, Compose and Kubernetes, and endpoint discovery for Express, Fastify,
   Koa, Hono, NestJS, Next.js, Flask, FastAPI and Django. It also reads lock files for npm, PyPI, Go and Cargo.
   Optional extras: OSV.dev advisory lookups, plus Gitleaks, OSV-Scanner or Semgrep if they are installed.
   See [docs/analyzers.md](docs/analyzers.md).
-- **Read-only multi-agent review.** A *Planner* builds a threat model, *Hunters* investigate endpoints, rule hits,
-  sensitive files and the planner's hypotheses, and in Research mode a *Chain analyst* looks for combined attacks.
-  The workers can only list, read and search files in the snapshot. They have no shell, no network access and no
-  way to write files.
+- **Read-only multi-agent review.** A *Planner* maps the repository, in any language, and plans the review as parts
+  to examine. *Hunters* investigate each part, plus the endpoints and rule hits the plan missed. In Deep and Research
+  mode a *Critic* checks which important parts are still uncovered, and in Research mode a *Chain analyst* looks for
+  combined attacks. The results list what was examined, what was not and why. The workers can only list, read and
+  search files in the snapshot. They have no shell, no network access and no way to write files.
 - **Host-verified evidence.** Every code citation is compared with the redacted snapshot. A citation counts as
   verified only if the quoted code is there. Findings with no verified step are discarded, and the number
   discarded is shown under Coverage.
@@ -66,16 +67,18 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
    `dsh --profile web --dump-config` and look for a `# == dsh-security-plugin` layer.
 
    To update, add the newer tag the same way. The *Settings* tab shows the running version.
-2. **Open Security** in the DSH sidebar and choose a project. Use **Add project folder…** (when available) to
-   register another folder in DSH’s project list and select it for scanning.
+2. **Open Security** in the DSH sidebar and choose a project. The project list shows each project's state
+   (scanning, queued, or the open findings of its last scan). The folder button next to it (**Add project
+   folder…**, when available) registers another folder in DSH’s project list and selects it.
 3. **Pick models** under the page's *Settings* tab → *Models*. A *Default* model is enough; each role (Planner,
-   Hunter, Skeptic, Chain analyst) can override it. A scan needs at least a Hunter model, either its own or the
-   default.
+   Hunter, Skeptic, Chain analyst) can override it; the Planner model also runs the Critic. A scan needs at least a
+   Hunter model, either its own or the default.
 4. **New scan** → choose **Deep**, read the estimate (files, endpoints, planned AI tasks, token range), and tick the
    consent box. Your consent is saved in Security settings and applies to later scans until you turn it off.
 5. **Start scan.** Progress, live workers and token usage appear on *Overview*. You can close the tab; the scan runs
    in the DSH Host. Pause, resume and cancel are on the same page. A scan that DSH interrupted by stopping can be
-   resumed later.
+   resumed later. Scans of all projects share one queue (`maxConcurrentScans`, default 1); a queued scan names the
+   project whose scan it waits for.
 
 ## Reading the results
 
@@ -94,8 +97,8 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 - **Your decision** (Open, Accepted risk, False positive, Fixed) is stored per project and per finding fingerprint,
   so it carries over to later scans. Fingerprints ignore line numbers, so moving code does not reset decisions.
   Findings that were not in the previous completed scan are marked **New**.
-- Every quoted step shows its check: *Quote verified*, *Verified, lines adjusted* (found once elsewhere in the same
-  file), or *NOT VERIFIED*.
+- Every quoted step shows its check: *Verified*, *Verified (lines adjusted)* (found once elsewhere in the same
+  file), or *Not verified*.
 - **Fix in DSH chat** opens a new DSH chat for the same project with a fix prompt filled in: the finding, its
   verified code and the recommendation. Read it before you send it. The fix is made by your normal coding agent
   under its normal permissions; this plugin never edits code. *Copy fix prompt* copies the same text instead.
@@ -105,8 +108,9 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 
 | | Quick | Deep (default) | Research |
 | --- | --- | --- | --- |
-| Threat model (Planner) | no | yes, up to 8 hypotheses | yes, up to 16 hypotheses |
-| AI hunting | verifies medium-or-higher rule hits, file by file | endpoints, rule hits, planner hypotheses, up to 6 security-sensitive files | same as Deep |
+| Repository map and review plan (Planner) | yes, brief: up to 8 parts | yes: up to 40 parts | yes: up to 80 parts |
+| AI hunting | medium-or-higher rule hits first, then the planned parts and unplanned endpoints, then a sweep of source files nothing targets if task and budget room is left | the planned parts, endpoints and rule hits no part covers, then a sweep of source files nothing targets | same as Deep |
+| Coverage check (Critic) | no | 1 pass, up to 8 more parts | up to 2 passes, up to 16 more parts each |
 | Independent review (Skeptic) | no | findings at or above *Second opinion from* (default Medium) | findings at Low or above |
 | Attack chains | no | no | yes |
 | **Default budget**: AI requests | 120 | 900 | 3,600 |
@@ -115,8 +119,11 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 | Requests per reviewer | 36 | 72 | 120 |
 | Review tasks | 18 | 120 | 450 |
 
-Quick mode asks the AI only to confirm or dismiss rule hits. It does not look for logic flaws such as broken
-authorization. If the built-in rules find nothing, Quick runs no AI tasks.
+Quick mode maps the repository briefly (the Planner gets at most 10 replies, plus one grace request if its last
+reply submits nothing, and retries of failed requests) and reviews a few parts, starting with medium-or-higher rule
+hits. It covers less than Deep: its small task and request budget usually leaves little room to sweep source files
+that fall in no part. A Quick scan sweeps them when room is left, as Deep does; files no task reaches are counted
+as unassigned in the results, not read.
 
 When an AI budget limit is reached, the scan stops starting new work, finishes, and lists what was skipped. Budgets
 are editable per mode in Settings and are capped by the operator limits (see
@@ -214,8 +221,9 @@ pnpm check:dsh            # latest DSH alpha (network): peer range, types, scrat
 - To try a checkout in DSH, run `pnpm install && pnpm build` in it, then
   `dsh plugin --profile web add /absolute/path/to/checkout`. Rebuild (`pnpm build:watch`) and restart DSH after
   changes.
-- End-to-end runs without an API key use the deterministic test model in `tests/e2e/scripted-llm/`. See
-  [docs/e2e-testing.md](docs/e2e-testing.md).
+- End-to-end runs without an API key use the deterministic test model in `tests/e2e/scripted-llm/`.
+  `pnpm e2e` starts a scratch DSH, adds every fixture app as its own project, scans them at the same time and
+  checks each result and the shared queue. See [docs/e2e-testing.md](docs/e2e-testing.md).
 - `pnpm bench` scans the intentionally vulnerable fixture apps in `tests/fixtures/apps/` offline (built-in analyzers,
   and the scripted model for the AI path) and scores the results against their ground truth. See
   [docs/benchmark.md](docs/benchmark.md).

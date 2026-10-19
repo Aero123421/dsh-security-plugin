@@ -51,7 +51,11 @@ const LEAKS = [
 ]
 
 const CLIENT_PREFIX = 'window.__ModuleLoader__.load('
-const CLIENT_MAX_BYTES = 300 * 1024
+/**
+ * Catches a second runtime copy (React, Cordis) or another large library slipping into the browser bundle, which
+ * adds 100 KB or more. The bundle itself is mostly the three UI dictionaries (en/ja/zh) and the scoped CSS.
+ */
+const CLIENT_MAX_BYTES = 320 * 1024
 
 const problems = []
 const warnings = []

@@ -27,7 +27,7 @@ describe('unguarded route steering', () => {
         snapshot,
         endpoints,
         signals,
-        hypotheses: [],
+        units: [],
         includeTests: false,
         maxTasks: 1,
       })
@@ -37,7 +37,7 @@ describe('unguarded route steering', () => {
         snapshot,
         endpoints,
         signals: [],
-        hypotheses: [],
+        units: [],
         includeTests: false,
         maxTasks: 1,
       })

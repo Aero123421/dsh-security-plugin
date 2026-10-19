@@ -41,7 +41,9 @@ import type { RpcHandlers } from './rpc/server.ts'
 import { resolveScanRoot } from './scan/root.ts'
 import { snapshotWorkspace } from './scan/analysis.ts'
 import type { ScanController } from './scan/controller.ts'
+import { CALLS_PER_HUNT } from './scan/budget.ts'
 import { endpointPath, planHuntTasks } from './scan/planning.ts'
+import { RECON_UNITS } from './scan/units.ts'
 import { buildFixPrompt } from './fix-prompt.ts'
 import { createPathMasker, homeRelative, maskDeep, type PathMasker } from './paths.ts'
 import type { SettingsService } from './settings.ts'
@@ -398,12 +400,13 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
         snapshot,
         endpoints: inScope,
         signals: [],
-        hypotheses: [],
+        units: [],
         includeTests,
         maxTasks: budget.maxTasks,
+        budgetTasks: Math.floor(budget.maxLlmCalls / CALLS_PER_HUNT),
       })
-      // Planner, reviews, and signal-driven tasks are not known before the scan; estimate generously.
-      const extra = payload.mode === 'quick' ? 2 : payload.mode === 'deep' ? 8 : 20
+      // Reconnaissance units, reviews, and signal-driven tasks are not known before the scan; estimate generously.
+      const extra = RECON_UNITS[payload.mode] + (payload.mode === 'quick' ? 2 : payload.mode === 'deep' ? 8 : 20)
       const tasks = Math.min(budget.maxTasks, plan.tasks.length + extra)
       const estimate: ScanEstimate = {
         dependencyManifests: [...snapshot.files.keys()].filter(path =>

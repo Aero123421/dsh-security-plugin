@@ -190,12 +190,15 @@ describe('scan start dismissal repair', () => {
   })
 })
 
+const MODE_LABELS = { quick: 'Quick', deep: 'Deep', research: 'Research' } as const
+
 describe('recheck depth repair', () => {
   it.each(['quick', 'deep', 'research'] as const)('uses the original %s depth instead of always Quick', async mode => {
     const { api, root } = await renderFinding({ createScan: () => ok({ scanId: 'recheck' }) }, mode)
-    const section = root.querySelector<HTMLElement>('[data-section="recheck"]')!
-    expect(section.textContent).not.toContain('see whether this finding goes away')
-    await click(section.querySelector('button'))
+    // The re-scan sits with the fix and names the depth it will reuse.
+    const recheck = root.querySelector<HTMLElement>('[data-section="fix"] .dshsec-recheck')!
+    expect(recheck.querySelector('button')?.textContent).toContain(`Re-scan (${MODE_LABELS[mode]})`)
+    await click(recheck.querySelector('button'))
     expect(api.callsOf('createScan')).toEqual([{ workspaceId: 'ws-1', mode, language: 'en' }])
   })
 })

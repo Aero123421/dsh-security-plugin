@@ -16,15 +16,18 @@ import {
   cweSchema,
   describeMismatches,
   MAX_CITATIONS,
+  normalizeShortId,
   severitySchema,
+  submitCoercion,
   systemPreamble,
   type VerifiedCitation,
   verifyCitation,
 } from './common.ts'
 
+const findingIdSchema = z.string().min(1).max(20)
 const chainSchema = z.object({
   title: z.string().min(1).max(160),
-  finding_ids: z.array(z.string().min(1).max(20)).min(2).max(5).describe('Ids (F1, F2, …) of the combined findings.'),
+  finding_ids: z.array(findingIdSchema).min(2).max(5).describe('Ids (F1, F2, …) of the combined findings.'),
   category: categorySchema,
   cwe: cweSchema,
   severity: severitySchema.describe('Severity of the combined attack.'),
@@ -75,9 +78,10 @@ export function chainSubmitTool(source: QuoteSource, maxRejections = 1): WorkerT
     name: 'submit_chains',
     description: 'Submit attack chains (possibly none). This ends your work.',
     input: submissionSchema,
+    coerce: submitCoercion(submissionSchema, [[findingIdSchema, normalizeShortId('F')]]),
     terminal: {
-      validate: args => {
-        if (rejections >= maxRejections) return undefined
+      validate: (args, context) => {
+        if (rejections >= maxRejections || context.final) return undefined
         const problems: string[] = []
         args.chains.forEach((chain, index) => {
           const verified = chain.attack_path.map(c => verifyCitation(source, c))

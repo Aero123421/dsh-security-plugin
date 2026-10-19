@@ -32,7 +32,7 @@ import { Expr } from '../sast/taint.ts'
 import { type Endpoint, type Snapshot, type SnapshotFile, yieldToEventLoop } from '../types.ts'
 import {
   ANY_RECEIVER,
-  AUTH_HINT,
+  isAuthHint,
   joinRoute,
   type Mount,
   type MountTarget,
@@ -347,7 +347,7 @@ function addEndpoint(
   const scoped = target === undefined ? [] : graph.scopedFor(target, route.file, route.offset, route.path, sources)
   const middleware = dedupe([...ctx.middleware, ...scoped, ...route.middleware])
   const authHints = dedupe([
-    ...middleware.filter(name => AUTH_HINT.test(name) || graph.hinted.has(name)),
+    ...middleware.filter(name => isAuthHint(name) || graph.hinted.has(name)),
     ...(route.extraAuthHints ?? []),
   ])
   const params = dedupe([...routeParams(path), ...(route.params ?? [])])

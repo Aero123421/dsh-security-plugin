@@ -277,7 +277,7 @@ const RULES: readonly SecretRule[] = [
     id: 'database-url',
     description: 'Database or message-broker URL with an inline password',
     pattern:
-      /(?<![A-Za-z0-9+])(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|mssql|sqlserver):\/\/(?<user>[^:@/\s'"`]{0,128}):(?<secret>[^@/\s'"`]{1,256})@(?<host>[^\s/'"`:?#,]{1,255})/dg,
+      /(?<![A-Za-z0-9+])(?:postgres(?:ql)?|mysql|mariadb|mongodb|rediss?|amqps?|mssql|sqlserver)(?:\+[a-z][a-z0-9_]{1,20})?:\/\/(?<user>[^:@/\s'"`]{0,128}):(?<secret>[^@/\s'"`]{1,256})@(?<host>[^\s/'"`:?#,]{1,255})/dg,
     severity: 'high',
     confidence: 'high',
     keywords: ['://'],
@@ -295,7 +295,7 @@ const RULES: readonly SecretRule[] = [
     id: 'generic-secret',
     description: 'Hard-coded password, token, or API key',
     pattern:
-      /(?<kw>pass(?:word|wd|phrase)|pwd|secret|api[_-]?key|token|private[_-]?key|credentials?)(?<suffix>[A-Za-z0-9_-]{0,40})["']?\s*(?::=|=>|===?|:|=)\s*(?<q>["'`])(?<secret>[^"'`\s\\]{12,256})\k<q>/dgi,
+      /(?<kw>pass(?:word|wd|phrase)|pass(?![a-z])|pwd|secret|api[_-]?key|token|private[_-]?key|credentials?)(?<suffix>[A-Za-z0-9_-]{0,40})["']?\s*(?::=|=>|===?|:|=)\s*(?<q>["'`])(?<secret>[^"'`\s\\]{12,256})\k<q>/dgi,
     severity: 'medium',
     confidence: 'low',
     keywords: ['pass', 'pwd', 'secret', 'api_key', 'apikey', 'api-key', 'token', 'private', 'credential'],
@@ -323,6 +323,21 @@ const RULES: readonly SecretRule[] = [
       return undefined
     },
   },
+  {
+    // The same finding for an upper-case environment variable set in YAML without quotes: docker-compose
+    // `environment:` (`- JWT_SECRET=…`, `POSTGRES_PASSWORD: …`), CI `env:` blocks, Kubernetes Secret data.
+    id: 'env-secret',
+    description: 'Secret value in an environment setting',
+    pattern:
+      /^[ \t]*(?:-[ \t]+["']?)?(?<key>(?:[A-Z][A-Z0-9]*_)*(?:PASSWORDS?|PASSWD|PASSPHRASE|PASS|PWD|SECRETS?|APIKEY|API_KEY|TOKENS?|PRIVATE_KEY|CREDENTIALS?)(?:_[A-Z0-9]+)*)[ \t]*(?:=|:[ \t]+)(?<secret>[^\s"'#&*!|>[{%@`$][^\s"'#]{7,255})["']?[ \t]*(?:#.*)?\r?$/dgm,
+    severity: 'medium',
+    confidence: 'medium',
+    keywords: ['pass', 'pwd', 'secret', 'key', 'token', 'credential'],
+    minEntropy: 3,
+    generic: true,
+    languages: ['yaml'],
+    refine: ({ secret, groups }) => refineSetting(secret, groups.key ?? ''),
+  },
 ]
 
 const PLACEHOLDER_PASSWORDS: ReadonlySet<string> = new Set([
@@ -341,6 +356,15 @@ const PLACEHOLDER_PASSWORDS: ReadonlySet<string> = new Set([
   'dbpassword',
   'db_password',
   'user:password',
+])
+/** Passwords from container image documentation (`POSTGRES_PASSWORD: mysecretpassword`), not real credentials. */
+const IMAGE_EXAMPLE_PASSWORDS: ReadonlySet<string> = new Set([
+  'mysecretpassword',
+  'my-secret-pw',
+  'my_secret_pw',
+  'secretpassword',
+  'example',
+  'rootpassword',
 ])
 const WEAK_DEFAULT_PASSWORDS: ReadonlySet<string> = new Set([
   'postgres',
@@ -833,13 +857,60 @@ function isProseValue(value: string): boolean {
   return nonAsciiLetters >= 6 && nonAsciiLetters > chars.length / 2
 }
 
+/** Keys naming a secret object stored elsewhere (Helm `existingSecret`), never the secret itself. */
+const EXISTING_SECRET_KEY = /(?:^|[_.-])existing/i
+
 function refineGeneric(secret: string, key: string): SecretConfidence | false | undefined {
   if (KEY_NAME_EXCLUDE.test(key) || /token(?:iz|s?[_-]?(?:count|limit|usage|type))/i.test(key)) return false
+  if (EXISTING_SECRET_KEY.test(key)) return false
   if (secret.includes('://') || /^[$%@{<]/.test(secret) || isProseValue(secret)) return false
-  if (/^[a-z]+(?:[._-][a-z0-9]+)+$/.test(secret)) return false // dotted.or_snake identifiers
-  if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(secret)) return false // ENV_VAR_NAMES
+  if (isIdentifierValue(secret)) return false
   if (/^[\w./-]+\.(?:js|ts|json|py|go|rb|php|java|ya?ml|txt|html?|css|png|svg)$/i.test(secret)) return false
   if (!/\d/.test(secret) && !/[^A-Za-z0-9]/.test(secret)) return false // plain words / camelCase identifiers
+  return secret.length >= 20 && shannonEntropy(secret) >= 4 ? 'medium' : 'low'
+}
+
+/** Words a hand-written secret uses to describe itself (`nest-app-jwt-secret-2024`). */
+const SELF_DESCRIBED_SECRET: ReadonlySet<string> = new Set([
+  'secret',
+  'secrets',
+  'jwt',
+  'signing',
+  'hmac',
+  'password',
+  'passwd',
+  'passphrase',
+])
+
+/**
+ * A name rather than a secret: `dotted.or-snake_identifiers` and `ENV_VAR_NAMES`. A lower-case value is still a
+ * secret when one part looks random (Mailgun `key-3ax6…`), it starts with Stripe's webhook-secret prefix
+ * (`whsec-…`), or it calls itself a secret and carries a number (`nest-app-jwt-secret-2024`).
+ */
+function isIdentifierValue(value: string): boolean {
+  if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(value)) return true
+  if (!/^[a-z]+(?:[._-][a-z0-9]+)+$/.test(value)) return false
+  const parts = value.split(/[._-]/)
+  if (parts.some(p => p.length >= 16 && /\d/.test(p) && /[a-z]/.test(p) && shannonEntropy(p) >= 3.5)) return false
+  if (parts[0] === 'whsec') return false
+  const named = parts.some(p => SELF_DESCRIBED_SECRET.has(p)) && parts.some(p => /^\d{2,}$/.test(p))
+  return !(parts.length >= 3 && named)
+}
+
+/**
+ * Scan-mode filter for an unquoted environment setting in YAML. Besides the key-name and identifier filters of
+ * `generic-secret`, it drops values that only point at a secret: YAML anchors, tags and blocks (rejected by the
+ * pattern), SOPS-encrypted values, cloud secret-manager references and paths, header or cookie names, numbers.
+ */
+function refineSetting(secret: string, key: string): SecretConfidence | false | undefined {
+  if (KEY_NAME_EXCLUDE.test(key) || EXISTING_SECRET_KEY.test(key)) return false
+  if (PLACEHOLDER_PASSWORDS.has(secret.toLowerCase()) || IMAGE_EXAMPLE_PASSWORDS.has(secret.toLowerCase())) return false
+  if (/_(?:HEADER|COOKIE|ISSUER|AUDIENCE|SCOPES?|REF|PROVIDER|BACKEND)$/.test(key)) return false
+  if (/^(?:true|false|yes|no|on|off|null|none|~)$/i.test(secret) || /^[\d.,:_-]+$/.test(secret)) return false
+  if (secret.includes('://') || /^(?:ENC\[|arn:|vault:)/i.test(secret)) return false
+  if (/^[a-z0-9._-]+(?:\/[a-z0-9._-]+)+$/.test(secret)) return false // secret-manager or file paths
+  if (/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$/.test(secret)) return false // header and cookie names (`XSRF-TOKEN`)
+  if (isIdentifierValue(secret)) return false
   return secret.length >= 20 && shannonEntropy(secret) >= 4 ? 'medium' : 'low'
 }
 

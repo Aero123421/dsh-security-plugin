@@ -66,6 +66,29 @@ export function isWhitespace(code: number): boolean {
 }
 
 /**
+ * A path as models write it in citations and plans, reduced to what
+ * {@link normalizePath} expects: surrounding quotes or backticks, a `<root>/`
+ * prefix (the placeholder tools show for the workspace root), leading
+ * slashes, and a trailing `:12`, `:12:5` or `#L12-L14` location are removed,
+ * and backslashes become `/`. The result still goes through
+ * {@link normalizePath}, so `..`, drive letters, URLs and NUL are rejected;
+ * this never widens what a path may name, it only finds the snapshot file a
+ * model meant.
+ */
+export function cleanModelPath(path: string): string | undefined {
+  if (typeof path !== 'string') return undefined
+  let text = path
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .trim()
+    .replace(/\\/g, '/')
+  text = text.replace(/^<root>(?:\/+|$)/i, '')
+  text = text.replace(/#L\d+(?:-L?\d+)?$/i, '').replace(/:\d+(?::\d+)?(?:-\d+)?$/, '')
+  if (/^\/+[^/]/.test(text)) text = text.replace(/^\/+/, '')
+  return normalizePath(text)
+}
+
+/**
  * Normalize a path supplied by a model to the snapshot's POSIX relative form.
  * Backslashes become `/`, surrounding whitespace, `.` segments, empty segments
  * and a trailing `/` are dropped. Returns `undefined` for anything that is not

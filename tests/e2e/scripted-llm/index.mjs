@@ -27,7 +27,7 @@ export const inject = ['llm']
 
 /** @param {any} ctx @param {{ fixturesDir?: string, delayMs?: number }} config */
 export function apply(ctx, config = {}) {
-  const truth = loadTruth(config.fixturesDir)
+  const apps = loadTruth(config.fixturesDir)
   const delayMs = config.delayMs ?? 30
   const adapter = {
     providerInfo: (/** @type {string} */ provider) => ({ id: provider, name: 'Scripted (tests)' }),
@@ -53,7 +53,7 @@ export function apply(ctx, config = {}) {
   /** @param {any} options */
   async function* stream(options) {
     await new Promise(resolve => setTimeout(resolve, delayMs))
-    const reply = decide(options, truth)
+    const reply = decide(options, apps)
     let index = 0
     for (const block of reply.blocks) {
       yield { type: 'block-start', index, blockType: block.type }
@@ -68,21 +68,63 @@ export function apply(ctx, config = {}) {
   }
 }
 
-/** @param {string | undefined} dir */
+/**
+ * @typedef {{ findings: any[], negatives: any[] }} Truth
+ * @typedef {Truth & { app: string, paths: Set<string> }} AppTruth
+ */
+
+/**
+ * One ground truth per fixture app. A DSH profile usually holds several of
+ * these apps as separate projects, so every answer is scoped to the app the
+ * worker is looking at (see {@link pickApp}); mixing them would make one
+ * project's scan report or review another project's planted issues.
+ * @param {string | undefined} dir
+ * @returns {AppTruth[]}
+ */
 function loadTruth(dir) {
-  /** @type {any[]} */
-  const findings = []
-  /** @type {any[]} */
-  const negatives = []
-  if (!dir || !existsSync(dir)) return { findings, negatives }
+  /** @type {AppTruth[]} */
+  const apps = []
+  if (!dir || !existsSync(dir)) return apps
   for (const app of readdirSync(dir)) {
     const file = join(dir, app, 'expected.json')
     if (!existsSync(file)) continue
     const manifest = JSON.parse(readFileSync(file, 'utf8'))
-    findings.push(...manifest.findings)
-    negatives.push(...manifest.negatives)
+    const findings = manifest.findings ?? []
+    const negatives = manifest.negatives ?? []
+    apps.push({ app, findings, negatives, paths: new Set([...findings, ...negatives].map(entry => entry.path)) })
   }
-  return { findings, negatives }
+  return apps
+}
+
+/** @type {Truth} */
+const NO_TRUTH = { findings: [], negatives: [] }
+
+/**
+ * The fixture app whose answer-key paths best overlap the files this worker
+ * has seen (a `list_files` listing, read files, and paths in the task).
+ * Returns no truth when nothing overlaps, so an unrelated project gets no
+ * planted answers. With a single app, that app is used.
+ * @param {AppTruth[]} apps
+ * @param {Set<string>} seen
+ * @returns {Truth}
+ */
+function pickApp(apps, seen) {
+  if (apps.length === 1) return apps[0] ?? NO_TRUTH
+  let best
+  let bestScore = 0
+  let tied = false
+  for (const app of apps) {
+    let score = 0
+    for (const path of app.paths) if (seen.has(path)) score++
+    if (score > bestScore) {
+      best = app
+      bestScore = score
+      tied = false
+    } else if (score === bestScore && score > 0) {
+      tied = true
+    }
+  }
+  return best && !tied ? best : NO_TRUTH
 }
 
 let callCounter = 0
@@ -95,22 +137,31 @@ const call = (/** @type {string} */ name, /** @type {any} */ args) => ({
 
 /**
  * @param {any} options
- * @param {{ findings: any[], negatives: any[] }} truth
+ * @param {AppTruth[]} apps
  */
-function decide(options, truth) {
+function decide(options, apps) {
   const system = String(options.system ?? '')
   const messages = options.messages
   const first = messages[0]?.content?.map((/** @type {any} */ b) => b.text ?? '').join('\n') ?? ''
   const tools = new Set((options.tools ?? []).map((/** @type {any} */ t) => t.name))
   const reads = collectReads(messages)
+  const listed = collectListed(messages)
   const role = /"planner"/.test(system)
     ? 'planner'
-    : /"independent reviewer"/.test(system)
-      ? 'skeptic'
-      : /"attack-chain researcher"/.test(system)
-        ? 'chain'
-        : 'hunter'
+    : /"coverage critic"/.test(system)
+      ? 'critic'
+      : /"independent reviewer"/.test(system)
+        ? 'skeptic'
+        : /"attack-chain researcher"/.test(system)
+          ? 'chain'
+          : 'hunter'
+  // First turn: look at the project layout, like a real reviewer, so the
+  // answers below come from this project's ground truth only.
+  if (apps.length > 1 && listed.size === 0 && tools.has('list_files')) {
+    return { blocks: [{ type: 'text', text: 'Listing the project files.' }, call('list_files', { limit: 500 })] }
+  }
   const targets = targetsOf(first, role)
+  const truth = pickApp(apps, new Set([...listed, ...reads.keys(), ...targets]))
   const unread = targets.filter(path => !reads.has(path))
   // First turns: read what the task points at (only while non-terminal tools are offered).
   if (unread.length > 0 && tools.has('read_file')) {
@@ -123,7 +174,12 @@ function decide(options, truth) {
   }
   switch (role) {
     case 'planner':
-      return { blocks: [call('submit_threat_model', plannerAnswer(truth))] }
+      return { blocks: [call('submit_review_plan', plannerAnswer(first, truth))] }
+    case 'critic':
+      // The plan already covers every planted issue: the critic finds no gap worth another wave.
+      return {
+        blocks: [call('submit_coverage_review', { done: true, units: [], note: 'Scripted: coverage is adequate.' })],
+      }
     case 'skeptic':
       return { blocks: [call('submit_verdict', skepticAnswer(first, reads, truth))] }
     case 'chain':
@@ -144,6 +200,22 @@ function collectReads(messages) {
     if (header?.[1]) reads.set(header[1], text)
   }
   return reads
+}
+
+/** Paths shown by list_files results ("path  (language, N lines)"). @param {any[]} messages */
+function collectListed(messages) {
+  /** @type {Set<string>} */
+  const listed = new Set()
+  for (const message of messages) {
+    if (message.role !== 'tool') continue
+    const text = message.content.map((/** @type {any} */ b) => b.text ?? '').join('\n')
+    if (!/^\d+ files?\b/.test(text)) continue
+    for (const line of text.split('\n').slice(1)) {
+      const match = /^(\S+) {2}[[(]/.exec(line)
+      if (match?.[1]) listed.add(match[1])
+    }
+  }
+  return listed
 }
 
 /** @param {string} task @param {string} role */
@@ -172,16 +244,39 @@ function lineOf(numbered, anchor) {
   return undefined
 }
 
-/** @param {{ findings: any[] }} truth */
-function plannerAnswer(truth) {
-  const ai = truth.findings.filter(f => f.detectableBy.includes('ai')).slice(0, 4)
+/**
+ * Reconnaissance: one coverage unit per file of the answer key (AI-detectable
+ * issues first), up to the limit the task states, so every planted issue sits
+ * in a unit a hunter reads.
+ * @param {string} task @param {{ findings: any[] }} truth
+ */
+function plannerAnswer(task, truth) {
+  const limit = Number(/Plan up to (\d+) coverage units/.exec(task)?.[1] ?? 8)
+  /** @type {Map<string, { categories: Set<string>, ai: boolean, titles: string[] }>} */
+  const files = new Map()
+  for (const finding of truth.findings) {
+    const entry = files.get(finding.path) ?? { categories: new Set(), ai: false, titles: [] }
+    entry.categories.add(finding.category)
+    entry.ai ||= finding.detectableBy.includes('ai')
+    entry.titles.push(finding.title)
+    files.set(finding.path, entry)
+  }
+  const ordered = [...files.entries()].sort((a, b) => Number(b[1].ai) - Number(a[1].ai) || (a[0] < b[0] ? -1 : 1))
   return {
     summary: 'A small web application with user accounts, an API, and an admin area (scripted test model).',
     assets: ['user accounts', 'orders and personal data'],
     actors: ['anonymous visitor', 'logged-in customer', 'administrator'],
     trust_boundaries: ['HTTP API entry points'],
-    priorities: ai.map(f => ({ target: f.path, reason: f.title })),
-    hypotheses: ai.map(f => ({ title: f.title, category: f.category, target_paths: [f.path], rationale: f.notes })),
+    components: [{ name: 'application', paths: ordered.map(([path]) => path).slice(0, 10) }],
+    units: ordered.slice(0, limit).map(([path, entry]) => ({
+      title: `Review ${path}`,
+      component: 'application',
+      focus: [...entry.categories].slice(0, 6),
+      target_paths: [path],
+      priority: entry.ai ? 'high' : 'medium',
+      rationale: entry.titles.slice(0, 3).join('; ').slice(0, 700) || 'Security-relevant code.',
+    })),
+    excluded: [],
   }
 }
 
@@ -245,7 +340,13 @@ function hunterAnswer(task, reads, truth) {
     const negative = truth.negatives.find(n => n.path === path && Math.abs(n.line - Number(line)) <= 3)
     assessments.push({ id, verdict: negative ? 'false_positive' : 'true_positive', reason: 'Scripted assessment.' })
   }
-  return { findings, signal_assessments: assessments, reviewed_paths: [...reads.keys()], notes: 'scripted' }
+  return {
+    findings,
+    signal_assessments: assessments,
+    coverage: 'complete',
+    reviewed_paths: [...reads.keys()],
+    notes: 'scripted',
+  }
 }
 
 /** @param {string} task @param {Map<string, string>} reads @param {{ findings: any[], negatives: any[] }} truth */

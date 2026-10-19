@@ -61,6 +61,8 @@ const TASK_KIND: Readonly<Record<TaskKind, true>> = {
   'hunt-signals': true,
   'hunt-file': true,
   'hunt-hypothesis': true,
+  'hunt-unit': true,
+  critic: true,
   review: true,
   chain: true,
 }

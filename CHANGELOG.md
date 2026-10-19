@@ -8,6 +8,223 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- `pnpm e2e` runs every fixture app as its own project in a scratch DSH with the scripted model, scans them at
+  the same time, and checks each report (completion, AI tasks, recall, negative controls, discarded fabricated
+  claims, no file paths from another project) and the shared scan queue. CI runs it against the DSH `alpha` and
+  `next` dist-tags. The scripted model now answers per fixture app, so several fixture projects can share one DSH.
+- The project picker shows each project's state: scanning, queued, paused, or the open findings of its last scan.
+  A queued scan names the project whose scan it waits for and links to it. While any scan is queued or running,
+  the page polls the active scans of all projects (every 5 seconds, 10 seconds while the tab is hidden).
+- Operator setting `llmFirstChunkTimeoutMs` (default 10 minutes): how long a model request may wait for its first
+  stream chunk. `llmIdleTimeoutMs` (default 2 minutes) now applies only once the stream has started, so queued
+  requests at busy providers are no longer abandoned after 2 minutes.
+- New SAST rules `js.xxe` (libxmljs with `noent: true`), `py.xxe` (lxml parser with `resolve_entities=True`),
+  `py.reflected-xss` (request data in an HTML string returned by a Flask view or sent with `make_response`,
+  Django `HttpResponse` or `HTMLResponse`) and `py.cors-misconfiguration` (`CORSMiddleware` with `"*"` or a
+  catch-all regex plus credentials, Flask-CORS with credentials and no origin list, django-cors-headers allowing
+  all origins with credentials).
+- More sinks and sources: postgres.js `sql.unsafe()`, asyncpg and `databases` fetch methods with SQL text,
+  werkzeug `FileStorage.save()` under the upload's own name, `tarfile` extraction of an uploaded archive without
+  `filter=` (tar slip), Jinja2 `Environment().from_string()`, NestJS `HttpService`, Koa `ctx.body` HTML strings,
+  and GraphQL resolver arguments, NestJS/type-graphql `@Args()` and tRPC procedure `input` as request data.
+- Give the AI review a hint for SSRF, path traversal and open redirect sinks whose value has no visible source,
+  such as a webhook URL loaded from the database or a file name passed in by a caller. These rules used to stay
+  silent unless request data was visible; they now emit a low-severity `sink` (never a finding) for dynamic
+  values, except for fixed hosts, same-site paths, sanitized file names, framework-built URLs, metadata-only file
+  calls and requests made from browser code. Findings are unchanged.
+- Scan unquoted upper-case environment settings in YAML for secrets (`- JWT_SECRET=…` and `POSTGRES_PASSWORD: …`
+  in docker-compose, CI `env:` blocks, Kubernetes Secret data), reported as `env-secret`. These values are now
+  also redacted when a compose file or manifest is shown to the AI review. Values that only point at a secret
+  (`${VAR}`, YAML anchors and tags, SOPS `ENC[…]`, ARNs and secret-manager paths) and the example passwords of
+  container image docs (`mysecretpassword`) are ignored.
+- Coverage ledger: the results page lists the parts of the project the AI review was planned to examine and what
+  became of each (examined, with findings, undecided, not examined, with the reason), plus the number of source
+  files that belong to no part. The Markdown report has a *Review units* table and the JSON report the same data
+  (`coverage.units`, `coverage.unassignedFiles`); SARIF does not. New coverage gaps: `unassigned-files` and
+  `excluded-by-plan`. Hunters may state how completely they examined their part (complete, partial, needs
+  runtime), which marks the part *Undecided*. Titles of parts the Host adds itself (endpoint, rule-hit and sweep
+  tasks) are shown in the UI language.
+- Coverage critic: after the first hunt wave, Deep runs one pass and Research up to two in which the Planner's model
+  reads the ledger, the source files no reviewer opened and the endpoints no task reviewed, and adds up to 8 (Deep)
+  or 16 (Research) parts for real gaps. The passes are paid out of the hunt budget: waves stop at a ceiling that
+  keeps up to 20% of the hunt requests for them, and a fifth of the task limit stays free for their parts. A pass
+  that fails or adds no valid part ends the passes; the critic's `done` flag does not, if it also submits parts.
+
+### Changed
+
+- Rework the Security page to follow DSH's own patterns: severity and status as a colored dot with plain text
+  instead of pill badges and signal bars; a centered empty state; one Export menu; filter menus for severity,
+  status, decision and source instead of rows of chips; a segmented review-depth control with a one-line
+  description instead of mode cards; a one-line scope estimate; and one "Usage and activity" disclosure for usage,
+  reviewers and the activity log. Results start with how complete the AI review was, then the open findings, then
+  coverage.
+- Order the finding detail as Problem, Evidence, Independent review, Fix and Decision. Repeated evidence excerpts
+  are shown once, and the re-scan button names the depth it reuses.
+- The activity log shows the Host's own sentence for reviewer, warning and failure events (after a localized
+  label in Japanese and Chinese) instead of "check technical details" placeholders.
+- Adding a project folder from the header selects it without opening New scan.
+- Offer **Add budget** only when a budget limit stopped scheduled AI work, not for every incomplete review.
+- Tasks skipped because their target file no longer exists no longer count as unfinished AI review work.
+- Deep and Research scans keep part of the budget for the independent review. Hunting stops at a ceiling that
+  reserves about 6 AI requests per finding awaiting review (at most 30% in Deep, 35% in Research), the Research
+  attack-chain run, and 2 wrap-up requests per worker running in parallel (at most 5%). Lower-priority hunt tasks
+  that do not fit are skipped with the notice `hunt-budget-reserved` and run after **Add budget**; low-priority file
+  sweeps are planned only as far as the budget pays for them. Before, hunters could spend the whole budget and
+  leave most findings without a review (8 of 56 reviewed in a Deep probe; 46 of 56 now).
+- A reviewer stopped by the budget mid-task now gets one wrap-up request to submit what it found, instead of
+  losing all of its work. On its last request, a submission is accepted with what verifies, list entries that do
+  not fit the schema are dropped, and other tool calls are refused with a note instead of discarding the run. A
+  missed last turn gets one grace request.
+- Workers see the same tool list on every request (stable prompt cache), are reminded to submit at 75% of their
+  turns, and are told how many replies a task allows. Plain-text replies end a run only when three come in a row,
+  not three over the whole run.
+- Quote verification undoes harmless copy mistakes before matching: line-number prefixes of other formats
+  (`12: `, `12 | `, `12→`, `L12: `, `cat -n`, `path:12: `), code fences, escaped or typographic quotes, HTML
+  entities, full-width punctuation, a trailing `;`, and `...`/`…` for skipped lines (every fragment with a letter or
+  digit must occur in order in the cited window, however short, and one fragment must have 12 or more characters;
+  fragments of punctuation alone are skipped). The stored quote and snippet are always the file's own span.
+  Rejected citations now come back with where the quote stops matching and the file's actual lines. In a probe of
+  313 realistic citation variants, 275 verify instead of 149.
+- A cited range much wider than its quote is no longer rejected outright: it verifies when the quote occurs once in
+  the file. A quote that repeats in the file is bound only to the copy on the cited lines; a few lines off, it is
+  reported as ambiguous with the candidate lines instead of being bound to a nearby identical line.
+- Hunter submissions keep their verified findings across resubmissions (up to 3), ask once for missing rule-hit
+  verdicts, and send back an empty submission made before reading any code once. The unused `confidence`,
+  `reviewed_paths` and `notes` fields were removed from `submit_findings`; models that still send them are accepted.
+  Submit tools accept common argument mistakes (`null`, JSON-encoded strings, numeric strings, enum spelling, camelCase
+  keys) instead of rejecting the whole submission.
+- `search_code` runs a pattern that looks like a regular expression as one when a literal search finds nothing,
+  within the same per-call limits, and says so.
+- Workers ask for temperature 0.2 when the model's details show it is not a reasoning model; a provider that
+  rejects it is retried without one.
+- When a planned independent review did not complete (budget, failure, review cap), a hunter's verified-code
+  dismissal of a rule hit now makes it `inconclusive`, as it already did without a reviewer.
+- Endpoint review tasks of layered apps target the handler file and the route file instead of only the
+  `*.routes.ts` file. Task keys of such endpoint groups change from the route file to the handler file.
+- Tell every endpoint and sweep review to look for injection, OS command execution, SSRF, path traversal and XSS.
+  Sweeps were asked only about authentication, authorization, business logic, crypto and configuration, and
+  endpoint reviews added other categories only from rule hits in the handler file; rule hits in the route file
+  now count too.
+- Quick scans also verify medium sinks of high and critical rules (dynamic SQL, shell commands, code evaluation,
+  unsafe deserialization), which in layered code are often the only trace of an injection; before, Quick
+  triaged only vulnerability hits.
+- AI-led planning replaces rule-driven task planning. The `threat-model` phase, now shown as *Review plan*, is
+  reconnaissance in every AI mode: the Planner maps the repository in any language (directory overview, manifests,
+  endpoints with auth hints, rule hits per file, read-only workspace tools) and submits `submit_review_plan` with
+  the threat model, components, coverage units (up to 8 in Quick, 40 in Deep, 80 in Research, never above the task
+  limit, at most 8 files each) and exclusions (vendored, generated, documentation or fixtures only). Units
+  beyond the mode's limit are dropped instead of sending the whole plan back. Target paths are resolved against
+  the snapshot (directories, near matches, symbol names); a unit none of whose paths exists is sent back once with
+  suggestions and otherwise dropped. Each unit becomes a hunt task that carries the unit's rationale and optional
+  hypothesis (unverified), the threat model's actors and trust boundaries, and the rule hits in the unit's files;
+  the unit's priority ranks it in Deep and Research. The Host still plans what the units leave out: endpoint
+  tasks, a verdict task for every reportable rule hit, and a sweep of source files no task targets (all modes,
+  within the task limit and what the hunt budget can pay for; production files and files whose names say what
+  they enforce, such as `requireRole.ts`, `tenantScope.ts` or `upload.ts`, come first). The Planner gets up to 10
+  replies in Quick (plus a grace request if its last reply submits nothing, and retries of failed requests), and
+  a Quick scan with no rule hits can run AI tasks. The plan is stored with the scan and never planned again on
+  resume. Source files that no task covers are reported as unassigned instead of being left unmentioned.
+- Downgrade caveat: scans from this version store `hunt-unit` and `critic` tasks and the review plan in the threat
+  model record. An older plugin version that opens a database with such scans treats those task rows as corrupt, so
+  do not downgrade over a database that holds them. Scans from older versions (hypothesis and file tasks) still
+  resume. No database migration is needed.
+
+### Security
+
+- The review plan's exclusions can no longer take hand-written code out of the AI review. A path is excluded from
+  the sweep only when the Planner's reason claims vendored, generated, documentation or fixture code and every
+  visible file under it carries a marker the Host sees itself: a vendor or third-party directory, generated
+  content or a generator's directory or file name, a documentation directory or `.md`/`.rst`/`.txt` file, or a
+  fixture, example, sample or mock directory. Paths with detected endpoints or rule hits and the workspace root are
+  never excluded. The check runs again on every run, so resumed scans and plans stored by earlier versions are
+  covered. Refused entries stay in the review and are logged as the info event `plan-exclusions-refused`. The
+  `excluded-by-plan` diagnostic now lists the excluded paths (`params.paths`, the first 10 and `(+N more)`). Before,
+  words like "external" or "docker" in the reason and any existing path were enough.
+
+### Fixed
+
+- A task the model provider refused (content policy) now keeps the error code `blocked_by_provider`, with the
+  provider's code at the start of the message, so the coverage ledger shows its unit as *provider-rejected*. It
+  stored the provider's own code (such as `CONTENT_FILTER`) and showed as failed.
+- The coverage critic listed hunt tasks that were still waiting for a later wave as not run and their files and
+  endpoints as never opened or given, so it planned duplicates. It now sees them in a separate *queued* list ("will
+  run, do not plan again") and their files and endpoints are left out of the gap lists. In the final ledger a hunt
+  task still pending or running without an error counts as not examined for `budget`, not as failed.
+- The critic reserve now holds under parallel hunters. Wave hunters work under the wave ceiling and get the usual
+  wrap-up request there; before, they ran under the full hunt ceiling and tasks started just below the wave
+  ceiling could use up the reserve, so the critic never ran. A wave hunter refused before its first request goes
+  back to pending for a later pool instead of being skipped. The final pool keeps the full hunt ceiling.
+- A resumed scan could plan duplicate sweeps. Sweep groups of 4 files are now built from the files the plan's own
+  tasks leave and keyed by all of their files; files that other stored hunt tasks target (critic units, legacy
+  `file:` and `hypothesis:` tasks) are removed afterwards without regrouping, so re-planning finds the same tasks.
+- Closing a dialog no longer moves focus back to its opener when another dialog has already taken focus. Escape
+  closes the topmost dialog even when focus has left it.
+- The folder browser's breadcrumb has its own accessible name instead of repeating "Folder path".
+- In Deep and Research, rule hits beyond the 12 attached to an endpoint file's first task were never assigned to a
+  hunter. They now get their own tasks.
+- Tool calls of a reply cut off at the output limit were parsed from partial arguments and replayed. They are now
+  dropped, and the model is told which calls to resend.
+- Context compaction kept only the last two tool results, including in the middle of the latest reply's batch. It
+  now elides the oldest results first, never the latest reply's, names the elided call, and runs before a request
+  would exceed a known context window.
+- A model route that answers without ever calling a tool no longer burns every task: after two such tasks in a row
+  its remaining tasks are skipped with the notice `model-no-tools`.
+- Tool schemas no longer carry meaningless `minimum`/`maximum` bounds of ±(2^53 − 1) on integer fields.
+- Skeptic task messages label host-checked excerpts as "quote found in the repository (not a verdict)", and the
+  reviewer is told that a SQL string alone or a search without callers does not refute a finding.
+- Keep every distinct rule hit and credential on a line. Scan-level de-duplication merged any two signals of
+  the same kind and category on one line, so a JWT `none` algorithm next to `ignoreExpiration: true`,
+  `httpOnly: false` next to `secure: false`, an AWS secret key next to its key ID, or a Slack token next to a
+  database URL lost a finding (sometimes the more severe one). Now only a built-in and an external result for
+  the same issue are merged, and the merged signal keeps the higher severity.
+- Stop treating `session()`, `cookieSession()`, `passport.initialize()`, `passport.session()` and database-session
+  dependencies (`Depends(get_session)`) as auth hints. They load state but never reject a request, so an app
+  that installs them globally had every route presented as guarded, and the unguarded-route steering signal
+  never fired.
+- Next.js middleware whose auth check sits behind `pathname.startsWith('/prefix')` gives auth hints only to routes
+  under that prefix instead of to every route; other reads of the request path give none.
+- Locate route handlers imported from controller modules (`import * as controller` then `controller.getUser`,
+  named and default imports, exported objects, classes and instances, CommonJS exports, `export *` barrels).
+  Layered Express apps had almost no handler located.
+- Follow request data through helpers imported by name, such as `import { join } from 'node:path'` then
+  `readFile(join(dir, req.params.name))`, `import * as p from 'path'`, and Python `from os.path import join`.
+  Taint only passed through these helpers when they were called as `path.join(...)`.
+- Treat destructuring defaults the same without the native engine: the built-in tokenizer (used when ast-grep is
+  unavailable, for files over 512 KiB and for files with parse errors) recorded `name = 'x'` in
+  `const { name = 'x' } = req.query` as a constant assignment and missed the injection. It also now records
+  destructuring assignments such as `({ sort = 'id' } = req.query)`, as the AST mode does.
+- Stop reporting common validation idioms as injections. The condition of `req.query.x ? 'a' : 'b'` no longer
+  taints its result, a branch restricted by an allow-list (`LIST.includes(x) ? x : 'en'`) is clean, numbers and
+  booleans derived from input (`items.length`, comparisons, `.map(Number)`, Python comprehensions over `int()`)
+  are not text, and an anchored allow-list pattern with an early exit before `exec`/`subprocess` or a file call
+  turns the hit into a review hint (not in Python with `re.M`/`re.MULTILINE` or an unreadable flags argument,
+  where `$` also matches before a newline: `"main\n;id"` passes). Some of these were reported as critical command injection. A preference
+  cookie such as `theme` set with `httpOnly: false` is no longer reported.
+- Report JavaScript mass assignment only on receivers that write records (model classes, Prisma delegates, model
+  and repository instances, Knex builders, records loaded through them). `teamService.create(req.body)` and
+  other service or controller calls were reported, and in a layered app one controller pattern produced most of
+  the rule hits that Quick mode triages.
+- Stop reporting SQL injection for a Django view parameter that every URLconf route fills through `<int:…>` or
+  `<uuid:…>` (or a digits-only `re_path` group); the URLconf in another file is now read before the views.
+- Find MD5/SHA-1 password hashing split over statements or named by its function (`const h =
+  createHash('md5')` then `h.update(pw)`, `def hash_password(raw): return md5(...)`, a digest compared with
+  `user.password_hash`), and random tokens built in callbacks (`newApiKey() { return [...].map(() =>
+  Math.random()...) }`). Only the statement computing the digest or the random value was read before. Random
+  numbers that are compared or subtracted (`Math.random() < 0.1`, `sort(() => Math.random() - 0.5)`) are no
+  longer reported in functions named after tokens.
+- Report `jwt.decode()` without verification also when the token comes from a cookie or a request header, from
+  Next.js `cookies()`, or from a same-file helper that reads the `Authorization` header or a cookie
+  (`jwt.decode(getBearer(req))`). Only functions that read the `Authorization` header themselves were checked,
+  so admin checks on a decoded cookie token were missed.
+- Find hard-coded secrets that were dropped: database URLs with a driver scheme (`postgresql+asyncpg://`),
+  Mailgun `key-…` keys and hand-written secrets such as `app-jwt-secret-2024`, which the identifier filter took
+  for names, and passwords under a `pass` key (nodemailer `auth: { user, pass }`, `smtpPass`). Helm
+  `existingSecret` references are ignored.
+- Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
+  and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
+
 ## [0.4.0] - 2026-10-18
 
 ### Changed

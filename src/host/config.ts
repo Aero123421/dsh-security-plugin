@@ -49,9 +49,9 @@ export const Config = z.object({
   /** Timeout for one external analyzer run, in milliseconds. */
   externalTimeoutMs: positiveInt(24 * 60 * 60 * 1000).default(10 * 60 * 1000),
   /**
-   * Abandon a model request when its stream sends nothing for this long, in
-   * milliseconds (the wait for the first chunk included). The request is
-   * retried with backoff like any other transient `TIMEOUT`.
+   * Abandon a model request when its stream, once started, sends nothing for
+   * this long, in milliseconds. The request is retried with backoff like any
+   * other transient `TIMEOUT`.
    */
   llmIdleTimeoutMs: z
     .number()
@@ -59,6 +59,18 @@ export const Config = z.object({
     .min(1_000)
     .max(60 * 60 * 1000)
     .default(120_000),
+  /**
+   * How long to wait for a model request's first stream chunk, in
+   * milliseconds. Providers can hold queued requests for minutes under load
+   * (sending keep-alive comments the adapters do not surface). Never shorter
+   * than `llmIdleTimeoutMs`.
+   */
+  llmFirstChunkTimeoutMs: z
+    .number()
+    .int()
+    .min(1_000)
+    .max(60 * 60 * 1000)
+    .default(600_000),
   /** Disable the native ast-grep engine (fall back to the built-in lexer). */
   disableAstGrep: z.boolean().default(false),
 })

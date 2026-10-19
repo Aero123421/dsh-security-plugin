@@ -1,16 +1,15 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ModelOption, ProviderOption, RpcFailure, ScanEstimate, WorkspaceSummary } from '../../shared/contracts.ts'
 import { type RoleName, SCAN_MODES, type ScanMode } from '../../shared/domain.ts'
 import { DEFAULT_SETTINGS, type ModelRef } from '../../shared/settings.ts'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
-import { ChoiceCards } from '../components/Choice.tsx'
 import { Field, Select, type SelectOption } from '../components/Field.tsx'
 import { Modal } from '../components/Modal.tsx'
 import { ProjectSelect } from '../components/ProjectSelect.tsx'
 import { useController, useSecurity, useT } from '../context.tsx'
 import type { NewScanRequest } from '../controller.ts'
-import { DASH, formatCompact, formatNumber } from '../format.ts'
+import { formatCompact, formatNumber } from '../format.ts'
 import { errorText } from '../i18n.ts'
 import {
   describeRoute,
@@ -20,7 +19,6 @@ import {
   resolveRoleModels,
   rolesForMode,
 } from '../models.ts'
-
 import { AddProjectFolder } from './AddProjectFolder.tsx'
 
 const EMPTY_WORKSPACES: readonly WorkspaceSummary[] = []
@@ -31,7 +29,9 @@ type EstimateState =
   | { readonly status: 'ready'; readonly value: ScanEstimate }
   | { readonly status: 'error' }
 
-type Approach = 'ai' | 'builtin'
+/** What the review choice can be: the built-in checks alone, or AI review at a depth. */
+export type ReviewChoice = 'builtin' | ScanMode
+const REVIEW_CHOICES: readonly ReviewChoice[] = ['builtin', ...SCAN_MODES]
 
 /** Mode sent for a built-in-only scan; depth only shapes the AI phases. */
 const BUILTIN_MODE: ScanMode = 'quick'
@@ -52,8 +52,10 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
     () => props.request.workspaceId ?? currentWorkspace ?? workspaces[0]?.id ?? '',
   )
   const [subpath, setSubpath] = useState(props.request.subpath ?? '')
-  const [approach, setApproach] = useState<Approach>(() => (llmAvailable ? 'ai' : 'builtin'))
-  const [mode, setMode] = useState<ScanMode>(() => props.request.mode ?? settings.scan?.defaultMode ?? 'deep')
+  const [showSubpath, setShowSubpath] = useState(Boolean(props.request.subpath))
+  const [choice, setChoice] = useState<ReviewChoice>(() =>
+    llmAvailable ? (props.request.mode ?? settings.scan?.defaultMode ?? 'deep') : 'builtin',
+  )
   const [picked, setPicked] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
   const [estimate, setEstimate] = useState<EstimateState>({ status: 'loading' })
   const [agreed, setAgreed] = useState(false)
@@ -63,10 +65,13 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
   const [showConsentHint, setShowConsentHint] = useState(false)
   const [showModelHint, setShowModelHint] = useState(false)
   const consentId = useId()
+  const projectId = useId()
+  const subpathId = useId()
   const pickerRef = useRef<HTMLDivElement>(null)
 
-  const ai = approach === 'ai'
-  const scanMode = ai ? mode : BUILTIN_MODE
+  const ai = choice !== 'builtin'
+  const mode: ScanMode = ai ? choice : (settings.scan?.defaultMode ?? 'deep')
+  const scanMode = ai ? choice : BUILTIN_MODE
 
   useEffect(() => {
     void controller.loadModels()
@@ -103,7 +108,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
   }
 
   const chooseBuiltin = () => {
-    setApproach('builtin')
+    setChoice('builtin')
     setError(undefined)
   }
 
@@ -188,102 +193,75 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
           void submit()
         }}
       >
-        <fieldset className="dshsec-fieldset dshsec-stack" disabled={submitting}>
-          <Field label={tr.t('newScan.project')} hint={tr.t('project.managedHint')}>
-            {({ id, describedBy, invalid }) => (
-              <>
-                <ProjectSelect
-                  id={id}
-                  variant="field"
-                  ariaLabel={tr.t('newScan.project')}
-                  value={workspaceId}
-                  workspaces={workspaces}
-                  disabled={addingProject || submitting}
-                  describedBy={describedBy}
-                  invalid={invalid}
-                  onChange={value => {
-                    setWorkspaceId(value)
-                    setSubpath('')
-                  }}
-                />
-                <AddProjectFolder
-                  disabled={submitting}
-                  onAdded={value => {
-                    setWorkspaceId(value)
-                    setSubpath('')
-                  }}
-                />
-              </>
-            )}
-          </Field>
-
-          <Field label={tr.t('newScan.subpath')} hint={tr.t('newScan.subpathHint')}>
-            {({ id, describedBy }) => (
-              <input
-                id={id}
-                className="dshsec-input"
-                type="text"
-                value={subpath}
-                placeholder="packages/app"
-                maxLength={1024}
-                aria-describedby={describedBy}
-                onChange={event => setSubpath(event.target.value)}
+        <fieldset className="dshsec-fieldset dshsec-form" disabled={submitting}>
+          <FormRow label={tr.t('newScan.project')} htmlFor={projectId}>
+            <div className="dshsec-form-inline">
+              <ProjectSelect
+                id={projectId}
+                variant="field"
+                ariaLabel={tr.t('newScan.project')}
+                value={workspaceId}
+                workspaces={workspaces}
+                disabled={addingProject || submitting}
+                onChange={value => {
+                  setWorkspaceId(value)
+                  setSubpath('')
+                }}
               />
+              <AddProjectFolder
+                variant="icon"
+                disabled={submitting}
+                onAdded={value => {
+                  setWorkspaceId(value)
+                  setSubpath('')
+                }}
+              />
+            </div>
+            {showSubpath ? (
+              <div className="dshsec-field">
+                <label className="dshsec-label dshsec-label--sub" htmlFor={subpathId}>
+                  {tr.t('newScan.subpath')}
+                </label>
+                <input
+                  id={subpathId}
+                  className="dshsec-input"
+                  type="text"
+                  value={subpath}
+                  placeholder="packages/app"
+                  maxLength={1024}
+                  onChange={event => setSubpath(event.target.value)}
+                />
+              </div>
+            ) : (
+              <Button size="sm" variant="link" className="dshsec-form-extra" onClick={() => setShowSubpath(true)}>
+                {tr.t('newScan.subpathShow')}
+              </Button>
             )}
-          </Field>
+          </FormRow>
 
-          <fieldset className="dshsec-fieldset">
-            <legend className="dshsec-label">{tr.t('newScan.how')}</legend>
-            <ChoiceCards<Approach>
-              name="dshsec-newscan-approach"
-              value={approach}
-              onChange={value => {
-                setApproach(value)
-                setError(undefined)
-              }}
-              options={[
-                { value: 'ai', label: tr.t('newScan.ai'), description: tr.t('newScan.ai.desc') },
-                { value: 'builtin', label: tr.t('newScan.builtin'), description: tr.t('newScan.builtin.desc') },
-              ]}
-            />
+          <fieldset className="dshsec-fieldset dshsec-form-row">
+            <legend className="dshsec-form-label">{tr.t('newScan.how')}</legend>
+            <div className="dshsec-form-control">
+              <ReviewChoices
+                value={choice}
+                onChange={next => {
+                  setChoice(next)
+                  setError(undefined)
+                }}
+                name="dshsec-newscan-review"
+              />
+              <p className="dshsec-hint">
+                {tr.t(choice === 'builtin' ? 'newScan.builtin.desc' : `mode.${choice}.desc`)}
+              </p>
+            </div>
           </fieldset>
 
-          {ai ? (
-            <fieldset className="dshsec-fieldset">
-              <legend className="dshsec-label">{tr.t('newScan.mode')}</legend>
-              <ModeCards value={mode} onChange={setMode} name="dshsec-newscan-mode" />
-            </fieldset>
-          ) : null}
-
-          <EstimatePanel estimate={estimate} budget={budget} ai={ai} />
-
-          {settings.privacy?.allowDependencyLookup !== true &&
-          (estimate.status !== 'ready' || estimate.value.dependencyManifests !== 0) ? (
-            <Callout
-              title={tr.t('newScan.dependencyLookupOff')}
-              live={false}
-              action={
-                <Button size="sm" variant="link" onClick={goToSettings}>
-                  {tr.t('newScan.dependencySettings')}
-                </Button>
-              }
-            >
-              {tr.t('newScan.dependencyLookupHint')}
-            </Callout>
-          ) : null}
+          <FormRow label={tr.t('newScan.estimateTitle')}>
+            <EstimateLine estimate={estimate} budget={budget} ai={ai} />
+          </FormRow>
 
           {ai ? (
-            <section className="dshsec-subsection" aria-labelledby={`${consentId}-models`}>
-              <div className="dshsec-subhead">
-                <h3 className="dshsec-h3" id={`${consentId}-models`}>
-                  {configured ? tr.t('newScan.modelsTitle') : tr.t('newScan.chooseModel')}
-                </h3>
-                {configured ? (
-                  <Button size="sm" variant="link" onClick={goToSettings}>
-                    {tr.t('newScan.changeModels')}
-                  </Button>
-                ) : null}
-              </div>
+            <FormRow label={tr.t('newScan.modelsTitle')}>
               {models.status === 'error' && models.error ? (
                 <Callout
                   tone="error"
@@ -297,7 +275,12 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
                 </Callout>
               ) : null}
               {configured ? (
-                <RouteList roles={roles} providers={providers} />
+                <div className="dshsec-form-inline">
+                  <RouteList roles={roles} providers={providers} />
+                  <Button size="sm" variant="link" onClick={goToSettings}>
+                    {tr.t('newScan.changeModels')}
+                  </Button>
+                </div>
               ) : noProviders ? (
                 <Callout
                   tone="warn"
@@ -330,7 +313,7 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
                   )}
                 </div>
               )}
-            </section>
+            </FormRow>
           ) : null}
 
           {needsConsent ? (
@@ -341,18 +324,17 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
               <h3 className="dshsec-h3" id={`${consentId}-title`}>
                 {tr.t('consent.title')}
               </h3>
-              <p>{tr.t('consent.body')}</p>
-              <ul className="dshsec-list">
-                {sendTo.length ? (
-                  sendTo.map(r => (
-                    <li key={r.provider}>
-                      <strong>{r.provider}</strong> — {r.models.join(', ')}
-                    </li>
-                  ))
-                ) : (
-                  <li>{tr.t('consent.noProviders')}</li>
-                )}
-              </ul>
+              <p>
+                {tr.t('consent.body')}{' '}
+                {sendTo.length
+                  ? sendTo.map((r, i) => (
+                      <span key={r.provider}>
+                        {i > 0 ? ', ' : null}
+                        <strong>{r.provider}</strong> ({r.models.join(', ')})
+                      </span>
+                    ))
+                  : tr.t('consent.noProviders')}
+              </p>
               <p className="dshsec-hint">{tr.t('consent.withheld')}</p>
               {withheld.length ? (
                 <p className="dshsec-hint">{tr.t('consent.withheldExtra', { globs: withheld.join(', ') })}</p>
@@ -380,6 +362,16 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
             </section>
           ) : null}
 
+          {settings.privacy?.allowDependencyLookup !== true &&
+          (estimate.status !== 'ready' || estimate.value.dependencyManifests !== 0) ? (
+            <p className="dshsec-hint dshsec-form-note">
+              {tr.t('newScan.dependencyLookupOff')}{' '}
+              <Button size="sm" variant="link" onClick={goToSettings}>
+                {tr.t('newScan.dependencySettings')}
+              </Button>
+            </p>
+          ) : null}
+
           {error ? (
             <Callout
               tone={error.code === 'security/busy' ? 'info' : 'error'}
@@ -405,29 +397,48 @@ export function NewScanDialog(props: { readonly request: NewScanRequest }) {
   )
 }
 
-/** Scan depth as radio cards. */
-export function ModeCards(props: {
-  readonly value: ScanMode
-  readonly onChange: (mode: ScanMode) => void
+/** Label column + control, like DSH's settings rows. */
+function FormRow(props: { readonly label: string; readonly htmlFor?: string; readonly children: ReactNode }) {
+  return (
+    <div className="dshsec-form-row">
+      {props.htmlFor ? (
+        <label className="dshsec-form-label" htmlFor={props.htmlFor}>
+          {props.label}
+        </label>
+      ) : (
+        <span className="dshsec-form-label">{props.label}</span>
+      )}
+      <div className="dshsec-form-control">{props.children}</div>
+    </div>
+  )
+}
+
+/** Built-in only / Quick / Deep / Research as one segmented radio group (arrow keys move the choice). */
+export function ReviewChoices(props: {
+  readonly value: ReviewChoice
+  readonly onChange: (value: ReviewChoice) => void
   readonly name: string
 }) {
   const tr = useT()
   return (
-    <ChoiceCards<ScanMode>
-      name={props.name}
-      value={props.value}
-      onChange={props.onChange}
-      options={SCAN_MODES.map(mode => ({
-        value: mode,
-        label: tr.t(`mode.${mode}`),
-        description: tr.t(`mode.${mode}.desc`),
-        ...(mode === 'deep' ? { tag: tr.t('mode.recommended') } : {}),
-      }))}
-    />
+    <div className="dshsec-modes">
+      {REVIEW_CHOICES.map(choice => (
+        <label key={choice} className={`dshsec-mode${props.value === choice ? ' is-selected' : ''}`}>
+          <input
+            type="radio"
+            name={props.name}
+            value={choice}
+            checked={props.value === choice}
+            onChange={() => props.onChange(choice)}
+          />
+          <span>{choice === 'builtin' ? tr.t('newScan.builtin') : tr.t(`mode.${choice}`)}</span>
+        </label>
+      ))}
+    </div>
   )
 }
 
-/** Which model each role will use; collapsed to one line when they all share a route. */
+/** Which model each role will use; one line when they all share a route. */
 function RouteList(props: { readonly roles: readonly ResolvedRole[]; readonly providers: readonly ProviderOption[] }) {
   const tr = useT()
   const { roles, providers } = props
@@ -440,16 +451,7 @@ function RouteList(props: { readonly roles: readonly ResolvedRole[]; readonly pr
         r.ref?.model === first.model &&
         (r.ref?.reasoningEffort ?? '') === (first.reasoningEffort ?? ''),
     )
-  if (shared && roles.length > 1) {
-    return (
-      <ul className="dshsec-routes">
-        <li>
-          <span className="dshsec-route-role">{tr.t('newScan.allRoles')}</span>
-          <span className="dshsec-route-model">{describeRoute(providers, first)}</span>
-        </li>
-      </ul>
-    )
-  }
+  if (shared) return <span className="dshsec-route-model">{describeRoute(providers, first)}</span>
   return (
     <ul className="dshsec-routes">
       {roles.map(r => (
@@ -540,7 +542,8 @@ function ModelPicker(props: {
   )
 }
 
-function EstimatePanel(props: {
+/** The scan's size in one line: files and endpoints, and for AI review the tasks and token range. */
+function EstimateLine(props: {
   readonly estimate: EstimateState
   readonly budget: number | undefined
   readonly ai: boolean
@@ -548,71 +551,42 @@ function EstimatePanel(props: {
   const tr = useT()
   const locale = tr.intlLocale
   const { estimate, ai } = props
+  if (estimate.status === 'loading') {
+    return (
+      <p className="dshsec-muted" aria-busy="true">
+        {tr.t('newScan.estimating')}
+      </p>
+    )
+  }
+  if (estimate.status === 'error') return <p className="dshsec-muted">{tr.t('newScan.estimateFailed')}</p>
+  const value = estimate.value
+  const languages = Array.isArray(value.languages)
+    ? value.languages.map(l => `${l.language} (${formatNumber(l.files, locale)})`).join(', ')
+    : ''
+  const frameworks = Array.isArray(value.frameworks) ? value.frameworks.join(', ') : ''
   return (
-    <section className="dshsec-subsection" aria-busy={estimate.status === 'loading'}>
-      <h3 className="dshsec-h3">{tr.t('newScan.estimateTitle')}</h3>
-      {estimate.status === 'loading' ? <p className="dshsec-muted">{tr.t('newScan.estimating')}</p> : null}
-      {estimate.status === 'error' ? <p className="dshsec-muted">{tr.t('newScan.estimateFailed')}</p> : null}
-      {estimate.status === 'ready' ? (
-        <>
-          <dl className="dshsec-estimate">
-            <div>
-              <dt>{tr.t('newScan.files')}</dt>
-              <dd>{formatNumber(estimate.value.files, locale)}</dd>
-            </div>
-            <div>
-              <dt>{tr.t('newScan.endpoints')}</dt>
-              <dd>{formatNumber(estimate.value.endpoints, locale)}</dd>
-            </div>
-            {ai ? (
-              <>
-                <div>
-                  <dt>{tr.t('newScan.tasks')}</dt>
-                  <dd>{formatNumber(estimate.value.plannedTasks, locale)}</dd>
-                </div>
-                <div>
-                  <dt>{tr.t('newScan.tokens')}</dt>
-                  <dd>
-                    {tr.t('newScan.tokensRange', {
-                      min: formatCompact(estimate.value.tokens?.min, locale),
-                      max: formatCompact(estimate.value.tokens?.max, locale),
-                    })}
-                  </dd>
-                </div>
-              </>
-            ) : null}
-          </dl>
-          <dl className="dshsec-kv">
-            <div className="dshsec-kv-row">
-              <dt>{tr.t('newScan.languages')}</dt>
-              <dd>
-                {Array.isArray(estimate.value.languages) && estimate.value.languages.length
-                  ? estimate.value.languages.map(l => `${l.language} (${formatNumber(l.files, locale)})`).join(', ')
-                  : DASH}
-              </dd>
-            </div>
-            <div className="dshsec-kv-row">
-              <dt>{tr.t('newScan.frameworks')}</dt>
-              <dd>
-                {Array.isArray(estimate.value.frameworks) && estimate.value.frameworks.length
-                  ? estimate.value.frameworks.join(', ')
-                  : DASH}
-              </dd>
-            </div>
-          </dl>
-          {estimate.value.excluded > 0 ? (
-            <p className="dshsec-hint">
-              {tr.t('newScan.excluded', { count: formatNumber(estimate.value.excluded, locale) })}
-            </p>
-          ) : null}
-          {estimate.value.truncated ? <Callout tone="warn">{tr.t('newScan.truncated')}</Callout> : null}
-          {ai ? (
-            <p className="dshsec-hint">
-              {tr.t('newScan.estimateNote', { budget: formatCompact(props.budget, locale) })}
-            </p>
-          ) : null}
-        </>
+    <div className="dshsec-stack-xs">
+      <p className="dshsec-num">
+        {tr.t('newScan.scopeFiles', {
+          files: formatNumber(value.files, locale),
+          endpoints: formatNumber(value.endpoints, locale),
+        })}
+        {ai
+          ? ` · ${tr.t('newScan.scopeAi', {
+              tasks: formatNumber(value.plannedTasks, locale),
+              min: formatCompact(value.tokens?.min, locale),
+              max: formatCompact(value.tokens?.max, locale),
+              budget: formatCompact(props.budget, locale),
+            })}`
+          : null}
+      </p>
+      {languages || frameworks ? (
+        <p className="dshsec-hint">{[languages, frameworks].filter(Boolean).join(' · ')}</p>
       ) : null}
-    </section>
+      {value.excluded > 0 ? (
+        <p className="dshsec-hint">{tr.t('newScan.excluded', { count: formatNumber(value.excluded, locale) })}</p>
+      ) : null}
+      {value.truncated ? <Callout tone="warn">{tr.t('newScan.truncated')}</Callout> : null}
+    </div>
   )
 }

@@ -2,6 +2,7 @@ import { type KeyboardEvent, useEffect, useId, useLayoutEffect, useRef, useState
 import { createPortal } from 'react-dom'
 import type { WorkspaceSummary } from '../../shared/contracts.ts'
 import { IconCheck, IconChevronDown, IconFolder } from '../icons.tsx'
+import type { ProjectStatus } from '../projects.ts'
 
 function projectTitle(workspace: WorkspaceSummary | undefined): string {
   return workspace?.title || workspace?.displayPath || workspace?.id || ''
@@ -18,6 +19,8 @@ export function ProjectSelect(props: {
   readonly invalid?: boolean
   readonly disabled?: boolean
   readonly ariaLabel: string
+  /** Short per-project status shown in the list ("Scanning", "2 Critical · 5 High", "Not scanned"). */
+  readonly status?: (workspace: WorkspaceSummary) => ProjectStatus | undefined
 }) {
   const { workspaces, variant } = props
   const current = workspaces.find(w => w.id === props.value) ?? workspaces[0]
@@ -206,7 +209,10 @@ export function ProjectSelect(props: {
                       {workspace.id === current?.id ? <IconCheck size={16} /> : null}
                     </span>
                     <span className="dshsec-projsel-text">
-                      <span className="dshsec-projsel-title">{projectTitle(workspace)}</span>
+                      <span className="dshsec-projsel-line">
+                        <span className="dshsec-projsel-title">{projectTitle(workspace)}</span>
+                        <ProjectStatusText status={props.status?.(workspace)} />
+                      </span>
                       {workspace.title && workspace.displayPath ? (
                         <span className="dshsec-projsel-path">{workspace.displayPath}</span>
                       ) : null}
@@ -219,5 +225,19 @@ export function ProjectSelect(props: {
           )
         : null}
     </div>
+  )
+}
+
+function ProjectStatusText(props: { readonly status: ProjectStatus | undefined }) {
+  const { status } = props
+  if (!status) return null
+  return (
+    <span className={`dshsec-projsel-status is-${status.tone}`}>
+      <span
+        className={`dshsec-projsel-dot${status.severity ? ` dshsec-sev--${status.severity}` : ''}`}
+        aria-hidden="true"
+      />
+      {status.text}
+    </span>
   )
 }

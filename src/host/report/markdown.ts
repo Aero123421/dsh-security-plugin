@@ -5,7 +5,15 @@
  * untrusted text.
  */
 
-import type { AttackStepView, EvidenceView, FindingDetail, ReportLanguage } from '../../shared/contracts.ts'
+import type {
+  AttackStepView,
+  Coverage,
+  CoverageUnit,
+  CoverageUnitStatus,
+  EvidenceView,
+  FindingDetail,
+  ReportLanguage,
+} from '../../shared/contracts.ts'
 import type { CodeRef, QuoteCheck } from '../../shared/domain.ts'
 import { formatCodeRef, ROLE_NAMES, SEVERITIES, TRIAGE_STATES, VERIFICATIONS } from '../../shared/domain.ts'
 import type { ReportInput } from './common.ts'
@@ -228,6 +236,8 @@ function coverage(input: ReportInput, labels: ReportLabels): string {
         [false, true],
       ),
     )
+    const units = coverageUnits(c, labels, language)
+    if (units !== undefined) blocks.push(units)
     if (c.analyzers.length > 0) {
       const lines = c.analyzers.map(analyzer => {
         const version = analyzer.version === undefined ? '' : ` ${inline(analyzer.version)}`
@@ -247,6 +257,73 @@ function coverage(input: ReportInput, labels: ReportLabels): string {
     blocks.push(`**${inline(l.notices)}**\n\n${lines.join('\n')}`)
   }
   return blocks.join('\n\n')
+}
+
+/** Most coverage units listed in the Markdown report; the JSON report has all of them. */
+const MAX_REPORT_UNITS = 100
+
+/**
+ * The title of a unit: rebuilt in the report language for units the Host made itself (as the UI does with the
+ * `coverage.unit.title.*` messages), the reviewing model's own words for plan and critic units.
+ */
+function unitTitle(
+  unit: CoverageUnit,
+  titles: ReportLabels['coverage']['unitTitles'],
+  language: ReportLanguage,
+): string {
+  const file = unit.paths.find(path => typeof path === 'string' && path !== '')
+  if (unit.origin !== 'gap' || file === undefined) return unit.title
+  switch (unit.kind) {
+    case 'endpoints':
+      return titles.endpoints(file)
+    case 'signals':
+      return titles.signals(file)
+    case 'triage':
+      return titles.triage(file)
+    case 'sweep':
+      return titles.sweep(number(unit.paths.length, language))
+    case 'file':
+      return titles.file(file)
+    default:
+      return unit.title
+  }
+}
+
+/** The coverage ledger: a status line and one row per unit, not-examined and undecided units first. */
+function coverageUnits(c: Coverage, labels: ReportLabels, language: ReportLanguage): string | undefined {
+  const units = c.units
+  if (units === undefined || units.length === 0) return undefined
+  const l = labels.coverage
+  const count = (status: CoverageUnitStatus) => number(units.filter(u => u.status === status).length, language)
+  const order: Record<CoverageUnitStatus, number> = { 'not-run': 0, blocked: 1, finding: 2, covered: 3 }
+  const sorted = units.toSorted((a, b) => order[a.status] - order[b.status])
+  const rows = sorted.slice(0, MAX_REPORT_UNITS).map(unit => {
+    const where = unit.surface ?? unit.paths.slice(0, 2).join(', ') + (unit.paths.length > 2 ? ', …' : '')
+    const reason = unit.reason ? (l.unitReasons[unit.reason.code] ?? unit.reason.fallback) : ''
+    const detail = unit.reason?.params?.note
+    const note = typeof detail === 'string' ? `${reason} ${detail}` : reason
+    const status =
+      unit.status === 'finding'
+        ? `${l.unitStatus.finding} (${number(unit.findings, language)})`
+        : l.unitStatus[unit.status]
+    const title =
+      unit.id === 'unassigned'
+        ? `${l.unassignedFiles} (${number(c.unassignedFiles ?? 0, language)})`
+        : unitTitle(unit, l.unitTitles, language)
+    return [
+      inline(status),
+      `${inline(title)} · ${inline(l.unitOrigin[unit.origin])}`,
+      inline(where),
+      inline(note.trim()),
+    ]
+  })
+  const more = units.length - rows.length
+  return [
+    `**${inline(l.units)}**`,
+    inline(l.unitsLine(count('covered'), count('finding'), count('blocked'), count('not-run'))),
+    table([l.unitColumns.status, l.unitColumns.unit, l.unitColumns.where, l.unitColumns.note].map(inline), rows),
+    ...(more > 0 ? [inline(l.unitsMore(more))] : []),
+  ].join('\n\n')
 }
 
 function threatModel(input: ReportInput, labels: ReportLabels): string | undefined {

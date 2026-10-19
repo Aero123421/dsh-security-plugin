@@ -1,11 +1,13 @@
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { IconChevronDown } from '../icons.tsx'
+import { IconCheck, IconChevronDown } from '../icons.tsx'
 
 export interface MenuItem {
   readonly id: string
   readonly label: string
   readonly onSelect: () => void
+  /** Present for a checkable item (`menuitemcheckbox`): whether it is checked. */
+  readonly checked?: boolean
 }
 
 const VIEWPORT_GUTTER = 8
@@ -48,6 +50,10 @@ export function MenuButton(props: {
   readonly disabled?: boolean
   readonly busy?: boolean
   readonly align?: 'start' | 'end'
+  /** Keep the menu open after a choice (multi-select filters). */
+  readonly keepOpen?: boolean
+  /** Mark the trigger as changed from its default (an applied filter). */
+  readonly active?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const unavailable = props.disabled || props.busy || props.items.length === 0
@@ -199,7 +205,7 @@ export function MenuButton(props: {
         ref={buttonRef}
         id={triggerId}
         type="button"
-        className={`dshsec-btn dshsec-btn--secondary ${props.size === 'sm' ? 'dshsec-btn--sm' : ''}`}
+        className={`dshsec-btn dshsec-btn--secondary ${props.size === 'sm' ? 'dshsec-btn--sm' : ''}${props.active ? ' is-active' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
@@ -243,24 +249,44 @@ export function MenuButton(props: {
                 }}
                 onKeyDown={onMenuKey}
               >
-                {props.items.map((item, i) => (
-                  <button
-                    key={item.id}
-                    ref={el => {
-                      itemRefs.current[i] = el
-                    }}
-                    type="button"
-                    role="menuitem"
-                    tabIndex={-1}
-                    className="dshsec-menu-item"
-                    onClick={() => {
-                      close(true)
-                      item.onSelect()
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                ))}
+                {props.items.map((item, i) => {
+                  const ref = (el: HTMLButtonElement | null) => {
+                    itemRefs.current[i] = el
+                  }
+                  const onClick = () => {
+                    if (!props.keepOpen) close(true)
+                    item.onSelect()
+                  }
+                  return item.checked === undefined ? (
+                    <button
+                      key={item.id}
+                      ref={ref}
+                      type="button"
+                      role="menuitem"
+                      tabIndex={-1}
+                      className="dshsec-menu-item"
+                      onClick={onClick}
+                    >
+                      {item.label}
+                    </button>
+                  ) : (
+                    <button
+                      key={item.id}
+                      ref={ref}
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={item.checked}
+                      tabIndex={-1}
+                      className="dshsec-menu-item dshsec-menu-item--check"
+                      onClick={onClick}
+                    >
+                      <span className="dshsec-menu-check" aria-hidden="true">
+                        {item.checked ? <IconCheck size={14} /> : null}
+                      </span>
+                      {item.label}
+                    </button>
+                  )
+                })}
               </div>
             </div>,
             host,

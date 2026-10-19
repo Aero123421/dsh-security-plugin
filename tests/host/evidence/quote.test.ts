@@ -113,6 +113,159 @@ describe('verifyQuote: match', () => {
   })
 })
 
+describe('verifyQuote: harmless copy mistakes', () => {
+  const source = sourceOf({
+    'src/app.ts': APP,
+    'src/cmp.ts': 'export function cmp(a, b, c) {\n  if (a < b && c) return "less"\n  return "more"\n}\n',
+    'src/i18n.ts': "export const label = 'café'\n",
+  })
+  const at = (startLine: number, endLine: number, quote: string, options = {}) =>
+    verifyQuote(source, { path: 'src/app.ts', startLine, endLine, quote }, options)
+  const users = ['  const user = await db.query(', "    'SELECT * FROM users WHERE id = ' + req.params.id,"]
+
+  it.each([
+    ['N: ', (n: number, line: string) => `${n}: ${line}`],
+    ['N | ', (n: number, line: string) => `${n} | ${line}`],
+    ['cat -n', (n: number, line: string) => `${String(n).padStart(6)}\t${line}`],
+    ['N→', (n: number, line: string) => `${String(n).padStart(6)}→${line}`],
+    ['LN: ', (n: number, line: string) => `L${n}: ${line}`],
+    ['path:N: ', (n: number, line: string) => `src/app.ts:${n}: ${line.trim()}`],
+    ['first line only', (n: number, line: string) => (n === 7 ? `7| ${line}` : line)],
+  ])('strips %s line prefixes and stores the file text', (_name, prefix) => {
+    const result = at(7, 8, users.map((line, i) => prefix(7 + i, line)).join('\n'))
+    expect(result).toMatchObject({ check: 'match', location: { startLine: 7, endLine: 8 } })
+    expect(result.quote).toBe(users.join('\n').trimStart())
+  })
+
+  it('strips code fences and inline backticks around the quote', () => {
+    expect(at(7, 7, '```ts\n  const user = await db.query(\n```')).toMatchObject({
+      check: 'match',
+      location: { startLine: 7 },
+    })
+    expect(at(10, 10, '`res.json(user)`')).toMatchObject({ check: 'match', quote: 'res.json(user)' })
+  })
+
+  it('folds typographic and swapped quotes, full-width punctuation, and decomposed letters', () => {
+    const health = "app.get('/health', (req, res) => res.send('ok'))"
+    for (const quote of [
+      'app.get(‘/health’, (req, res) => res.send(‘ok’))',
+      'app.get("/health", (req, res) => res.send("ok"))',
+      'app.get（"/health"， (req, res) => res.send("ok")）',
+    ]) {
+      expect(at(13, 13, quote)).toEqual({
+        check: 'match',
+        location: { path: 'src/app.ts', startLine: 13, endLine: 13 },
+        snippet: health,
+        quote: health,
+      })
+    }
+    const decomposed = "export const label = 'café'"
+    expect(verifyQuote(source, { path: 'src/i18n.ts', startLine: 1, endLine: 1, quote: decomposed })).toMatchObject({
+      check: 'match',
+      quote: "export const label = 'café'",
+    })
+  })
+
+  it('undoes HTML entities and backslash-escaped quotes', () => {
+    const cmp = (quote: string) => verifyQuote(source, { path: 'src/cmp.ts', startLine: 2, endLine: 2, quote })
+    expect(cmp('if (a &lt; b &amp;&amp; c) return "less"')).toMatchObject({
+      check: 'match',
+      quote: 'if (a < b && c) return "less"',
+    })
+    expect(cmp('if (a < b && c) return \\"less\\"')).toMatchObject({ check: 'match' })
+  })
+
+  it('tolerates one added trailing semicolon or comma, but not more', () => {
+    expect(at(10, 10, 'res.json(user);')).toMatchObject({ check: 'match', quote: 'res.json(user)' })
+    expect(at(4, 4, 'const app = express(),')).toMatchObject({ check: 'match', quote: 'const app = express()' })
+    expect(at(10, 10, 'res.json(user);;').check).toBe('mismatch')
+    // A missing trailing semicolon or comma never mattered: the quote is still a part of the line.
+    expect(at(8, 8, "'SELECT * FROM users WHERE id = ' + req.params.id").check).toBe('match')
+  })
+
+  it('accepts "..." gaps when every meaningful fragment occurs in order within the cited window', () => {
+    const lines = APP.split('\n')
+    const elided = `app.get('/users/:id', async (req, res) => {\n  ...\n  res.json(user)`
+    const result = at(6, 10, elided)
+    expect(result).toMatchObject({ check: 'match', location: { path: 'src/app.ts', startLine: 6, endLine: 10 } })
+    // The stored quote is the file's own contiguous text, never the model's.
+    expect(result.quote).toBe(lines.slice(5, 10).join('\n').trim())
+    expect(at(6, 10, elided.replace('...', '…')).check).toBe('match')
+    expect(at(6, 10, elided.replace('  ...', '  // ...')).check).toBe('match')
+    // Inline gaps, and punctuation-only fragments ("})") are not required.
+    expect(at(8, 8, "'SELECT * FROM users WHERE id = ' ... req.params.id")).toMatchObject({
+      check: 'match',
+      location: { startLine: 8, endLine: 8 },
+    })
+    expect(at(6, 11, `${lines[5]}\n...\n})`)).toMatchObject({ check: 'match', location: { startLine: 6, endLine: 6 } })
+  })
+
+  it('checks short gap fragments too, and only skips punctuation-only ones', () => {
+    // A legitimate short fragment ("res.json" is 8 characters) next to a long anchor still matches.
+    expect(at(6, 10, "app.get('/users/:id', async (req, res) => {\n...\nres.json(user)\n...\n})").check).toBe('match')
+    expect(at(6, 10, "app.get('/users/:id', async (req, res) => {\n...\nres.json\n...\n(user)").check).toBe('match')
+    // A fabricated short fragment between real ones used to be dropped silently.
+    for (const quote of [
+      '... exec(cmd) ... res.json(user)',
+      "app.get('/users/:id', async (req, res) => {\n...\nexec(cmd)\n...\nres.json(user)",
+      "app.get('/users/:id', async (req, res) => {\n...\nres.json(user)\n... eval(x)",
+    ]) {
+      expect(at(6, 10, quote).check).toBe('mismatch')
+    }
+    // Short fragments alone cannot anchor a quote.
+    expect(at(6, 10, 'res ... json').check).toBe('mismatch')
+    expect(at(6, 10, 'res.json ... (user)').check).toBe('mismatch')
+  })
+
+  it('rejects gaps whose fragments are invented, out of order, outside the cited window, or too far apart', () => {
+    expect(at(6, 10, "app.get('/users/:id', async (req, res) => {\n...\nres.json(secretStuff)").check).toBe('mismatch')
+    expect(at(6, 10, "res.json(user)\n...\napp.get('/users/:id', async (req, res) => {").check).toBe('mismatch')
+    // Gap quotes are never relocated: they must cite the lines they span.
+    expect(at(1, 2, "app.get('/users/:id', async (req, res) => {\n...\nres.json(user)").check).toBe('mismatch')
+    const far = sourceOf({
+      'f.ts': [
+        'const firstFragment = open()',
+        ...Array.from({ length: 38 }, (_, i) => `step${i}()`),
+        'const lastFragment = done()',
+      ].join('\n'),
+    })
+    const gap = verifyQuote(far, {
+      path: 'f.ts',
+      startLine: 1,
+      endLine: 40,
+      quote: 'const firstFragment = open()\n...\nconst lastFragment = done()',
+    })
+    expect(gap.check).toBe('mismatch')
+  })
+
+  it('reports a gap quote that fits two places in a loose range as ambiguous, and takes the nearest in a tight one', () => {
+    const handler = (name: string) => [`function ${name}() {`, '  const value = load()', '  return send(value)', '}']
+    const twice = sourceOf({
+      't.ts': [...handler('handlerA'), 'a()', 'b()', 'c()', 'd()', ...handler('handlerB')].join('\n'),
+    })
+    const quote = 'const value = load()\n...\nreturn send(value)'
+    expect(verifyQuote(twice, { path: 't.ts', startLine: 1, endLine: 12, quote }).reason).toBe(
+      'quote ambiguous: its parts occur 2 times in lines 1-12; candidate lines: 2-3, 10-11; cite the exact lines of one occurrence',
+    )
+    expect(verifyQuote(twice, { path: 't.ts', startLine: 10, endLine: 11, quote })).toMatchObject({
+      check: 'match',
+      location: { startLine: 10, endLine: 11 },
+    })
+  })
+
+  it('explains a mismatch with the actual lines when asked for feedback', () => {
+    const result = at(10, 10, 'res.json(user.profile)', { feedback: true })
+    expect(result.check).toBe('mismatch')
+    expect(result.hint).toBe(
+      'The quote matches the file up to "…res.json(user" and then differs; the file continues with ")". The file has at lines 8-12:\n 8|     \'SELECT * FROM users WHERE id = \' + req.params.id,\n 9|   )\n10|   res.json(user)\n11| })\n12|',
+    )
+    expect(at(40, 40, 'res.json(user.profile)', { feedback: true }).hint).toBe(
+      'The file has only 15 lines; read it again to find the right lines.',
+    )
+    expect(at(10, 10, 'res.json(user.profile)').hint).toBeUndefined()
+  })
+})
+
 describe('verifyQuote: relocation', () => {
   const source = sourceOf({ 'src/app.ts': APP })
 
@@ -393,45 +546,73 @@ describe('verifyQuote: cited ranges are narrowed and bounded', () => {
     })
   })
 
-  it('rejects a cited range wider than the quote lines + 40 and says how to cite', () => {
-    expect(cite(1, 60, CONFIG)).toEqual({
-      check: 'mismatch',
-      reason: 'cited range too wide: lines 1-60 (60 lines) for a 1-line quote; cite only the lines the quote is on',
-    })
+  it('treats a cited range wider than the quote lines + 40 as naming no place: only a unique quote relocates', () => {
+    // A whole-file range proves nothing about the cited lines, but a quote found once in the file still proves the code.
+    const relocated = { check: 'relocated', location: { path: 'src/admin.ts', startLine: 50, endLine: 50 } }
+    expect(cite(1, 60, CONFIG)).toMatchObject(relocated)
     expect(cite(10, 50, CONFIG).check).toBe('match') // 41 lines
-    expect(cite(10, 51, CONFIG).reason).toMatch(/^cited range too wide: lines 10-51 \(42 lines\)/)
+    expect(cite(10, 51, CONFIG)).toMatchObject(relocated) // 42 lines
+    expect(cite(1, 10_000, CONFIG)).toMatchObject(relocated)
     // The allowance grows with the quote's own lines, ignoring blank lines around it.
     const threeLines = '\nconst filler48 = 48\nconst filler49 = 49\n  const config = loadConfig(\n'
     expect(cite(8, 50, threeLines)).toMatchObject({ check: 'match', location: { startLine: 48, endLine: 50 } })
-    expect(cite(7, 50, threeLines).reason).toMatch(/^cited range too wide: lines 7-50 \(44 lines\) for a 3-line quote/)
-    // Wide citations past the end of the file are rejected too instead of being relocated.
-    expect(cite(1, 10_000, CONFIG).reason).toMatch(/^cited range too wide/)
+    expect(cite(7, 50, threeLines)).toMatchObject({ check: 'relocated', location: { startLine: 48, endLine: 50 } })
+    // A repeated quote stays ambiguous, and the reason says the range is the problem.
+    expect(cite(1, 60, 'isAdmin(req.user)')).toEqual({
+      check: 'mismatch',
+      reason:
+        'cited range too wide: lines 1-60 (60 lines) for a 1-line quote, and the quote is ambiguous; candidate lines: 8, 30; cite the exact lines of one occurrence',
+    })
     // Blank lines inside the quote do not buy a wider range: matching collapses them anyway.
     const padded = `loadConfig(${'\n'.repeat(40)}process.env.CONFIG_PATH)`
-    expect(cite(1, 60, padded).reason).toMatch(/^cited range too wide: lines 1-60 \(60 lines\) for a 2-line quote/)
+    expect(cite(1, 60, padded).reason).toBe(
+      'cited range too wide: lines 1-60 (60 lines) for a 2-line quote, and the quote was not found in the file; cite only the lines the quote is on',
+    )
+    // Short quotes are never relocated, however the range is cited.
+    expect(cite(1, 60, 'x = 1').reason).toMatch(/^cited range too wide: lines 1-60/)
   })
 
   it('honors a custom maxExtraLines', () => {
     const cited = { path: 'src/admin.ts', startLine: 45, endLine: 50, quote: 'loadConfig(process.env.CONFIG_PATH)' }
     expect(verifyQuote(source, cited).check).toBe('match')
-    expect(verifyQuote(source, cited, { maxExtraLines: 4 }).reason).toMatch(/^cited range too wide/)
+    expect(verifyQuote(source, cited, { maxExtraLines: 4 }).check).toBe('relocated')
     expect(verifyQuote(source, cited, { maxExtraLines: 5 }).check).toBe('match')
   })
 
-  it('accepts a repeated quote only when the cited range is tight, taking the nearest occurrence', () => {
+  it('binds a repeated quote only to the copy on the cited lines, never to a nearby identical line', () => {
     const lines = ['a()', 'check(user.id)', 'b()', 'check(user.id)', 'c()', 'd()', 'e()', 'f()', 'g()', 'h()']
     const near = sourceOf({ 'a.ts': lines.join('\n') })
     const at = (startLine: number, endLine: number, options = {}) =>
       verifyQuote(near, { path: 'a.ts', startLine, endLine, quote: 'check(user.id)' }, options)
     expect(at(4, 4)).toMatchObject({ check: 'match', location: { startLine: 4, endLine: 4 } })
     expect(at(2, 2)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
-    expect(at(5, 5)).toMatchObject({ check: 'match', location: { startLine: 4, endLine: 4 } })
-    expect(at(1, 7)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } }) // 7 <= 1 + 2 × 3
-    expect(at(1, 8).reason).toBe(
+    expect(at(2, 3)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
+    // Off the cited line, or both copies on the cited lines: which one was meant is a guess.
+    expect(at(5, 5).reason).toBe(
+      'quote ambiguous: it occurs 2 times in lines 2-8; candidate lines: 2, 4; cite the exact lines of one occurrence',
+    )
+    expect(at(1, 7).reason).toBe(
       'quote ambiguous: it occurs 2 times in lines 1-10; candidate lines: 2, 4; cite the exact lines of one occurrence',
     )
     expect(at(2, 4, { slackLines: 0 }).reason).toMatch(/^quote ambiguous: it occurs 2 times in lines 2-4/)
     expect(at(2, 2, { slackLines: 0 })).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
+  })
+
+  it('accepts a few lines off only for a quote that occurs once in the file', () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `step${i + 1}()`)
+    lines[4] = 'res.json(rows)'
+    lines[19] = 'res.json(rows)'
+    lines[9] = 'db.all(sql, params)'
+    const s = sourceOf({ 'h.ts': lines.join('\n') })
+    const at = (line: number, quote: string) => verifyQuote(s, { path: 'h.ts', startLine: line, endLine: line, quote })
+    expect(at(12, 'db.all(sql, params)')).toMatchObject({ check: 'match', location: { startLine: 10, endLine: 10 } })
+    // Cited at 17 while meaning line 5: the copy at line 20 is near, but the quote repeats in the file.
+    expect(at(17, 'res.json(rows)')).toMatchObject({
+      check: 'mismatch',
+      reason:
+        'quote ambiguous: it is not on lines 17-17, and it occurs 2 times in the file; candidate lines: 5, 20; cite the exact lines of one occurrence',
+    })
+    expect(at(20, 'res.json(rows)')).toMatchObject({ check: 'match', location: { startLine: 20, endLine: 20 } })
   })
 
   it('narrows a short quote accepted from a short cited range to its own line', () => {

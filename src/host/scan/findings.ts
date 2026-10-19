@@ -23,6 +23,7 @@ import type { HunterFinding, HunterOutput } from '../agents/roles/hunter.ts'
 import type { SkepticOutput } from '../agents/roles/skeptic.ts'
 import type { Signal } from '../analysis/types.ts'
 import type { AttackStepRecord, EvidenceRecord, FindingRecord, FindingReview, Origin } from '../core/model.ts'
+import { type QuoteSource, verifyQuote } from '../evidence/quote.ts'
 import type { SecurityStore } from '../store/types.ts'
 import { fingerprintOf, normalizeCode } from './fingerprint.ts'
 
@@ -336,13 +337,7 @@ export function recordHunterOutput(
           ...(dispute
             ? {
                 verification: 'inconclusive' as const,
-                limitations: dedupe([
-                  ...target.limitations,
-                  clip(
-                    `An AI hunter assessed this rule hit as a false positive (${assessment.reason.trim()}), but no independent review confirmed the cited defense, so it stays open.`,
-                    600,
-                  ),
-                ]).slice(0, 10),
+                limitations: dedupe([...target.limitations, disputeNote(assessment.reason)]).slice(0, 10),
               }
             : {}),
         })
@@ -355,6 +350,59 @@ export function recordHunterOutput(
     }
   })
   return { created, merged, discarded, assessed, disputed }
+}
+
+function disputeNote(reason: string): string {
+  return clip(
+    `An AI hunter assessed this rule hit as a false positive (${reason.trim()}), but no independent review confirmed the cited defense, so it stays open.`,
+    600,
+  )
+}
+
+/**
+ * Settle hunter dismissals that waited for a review which did not happen (the
+ * review was skipped for budget, failed, or was not planned under the review
+ * cap). A finding still `potential` whose hunter counter-evidence re-verifies
+ * as code (not only comments) against the snapshot becomes `inconclusive`,
+ * never refuted. Findings in `reviewed` (a review completed) are left alone.
+ * Returns how many findings changed.
+ */
+export function applyUnreviewedDismissals(
+  store: SecurityStore,
+  scanId: string,
+  source: QuoteSource,
+  reviewed: ReadonlySet<string>,
+): number {
+  let disputed = 0
+  store.transaction(() => {
+    for (const finding of store.listFindings(scanId)) {
+      if (finding.verification !== 'potential' || reviewed.has(finding.id) || finding.counterEvidenceIds.length === 0) {
+        continue
+      }
+      const defense = store
+        .getEvidence(scanId, finding.counterEvidenceIds)
+        .find(
+          evidence =>
+            evidence.origin === 'hunter' && evidence.kind === 'counterevidence' && provesCode(source, evidence),
+        )
+      if (!defense) continue
+      // The stored claim is "<reason> — <description>"; the whole claim reads fine as the reason.
+      store.updateFinding(finding.id, {
+        verification: 'inconclusive',
+        limitations: dedupe([...finding.limitations, disputeNote(defense.claim)]).slice(0, 10),
+      })
+      disputed++
+    }
+  })
+  return disputed
+}
+
+/** Re-check stored evidence against the snapshot: its quote still matches and is code, not only comments. */
+function provesCode(source: QuoteSource, evidence: EvidenceRecord): boolean {
+  if (!isQuoteVerified(evidence.quoteCheck) || !evidence.location || !evidence.quote) return false
+  const { path, startLine, endLine } = evidence.location
+  const check = verifyQuote(source, { path, startLine, endLine, quote: evidence.quote })
+  return isQuoteVerified(check.check) && check.commentOnly !== true
 }
 
 /**

@@ -187,6 +187,52 @@ export interface Coverage {
   readonly gaps: readonly string[]
   /** Structured diagnostics when provided by a newer Host. */
   readonly gapDetails?: readonly Diagnostic[]
+  /**
+   * The scan's coverage ledger: what the AI review set out to examine and what
+   * became of each part. Absent for built-in-only scans and scans from Hosts
+   * before the ledger existed.
+   */
+  readonly units?: readonly CoverageUnit[]
+  /** In-scope source files that no coverage unit included (after gap filling and limits). */
+  readonly unassignedFiles?: number
+}
+
+/**
+ * How one coverage unit ended:
+ * - `covered`: examined, nothing reportable found;
+ * - `finding`: examined, at least one finding recorded;
+ * - `blocked`: examined, but the reviewer could not decide from the source alone (see `reason`);
+ * - `not-run`: never examined (budget, task limit, failure, consent; see `reason`).
+ */
+export type CoverageUnitStatus = 'covered' | 'finding' | 'blocked' | 'not-run'
+
+/** One part of the project the AI review was planned to examine. */
+export interface CoverageUnit {
+  /** Stable within the scan. */
+  readonly id: string
+  /** Short title written by the reviewing model (scan language) or the Host. */
+  readonly title: string
+  /** Component or subsystem it belongs to, when known. */
+  readonly component?: string
+  /** Entry surface, e.g. `POST /api/orders/:id` or `CLI arguments`, when known. */
+  readonly surface?: string
+  readonly focus: readonly FindingCategory[]
+  /** Workspace-relative files the unit starts from. */
+  readonly paths: readonly string[]
+  readonly status: CoverageUnitStatus
+  /** Findings recorded by the unit's review. */
+  readonly findings: number
+  /** Why a unit is `blocked` or `not-run`. */
+  readonly reason?: Diagnostic
+  /** Who proposed it: the reconnaissance plan, the coverage critic, or the Host's gap filling. */
+  readonly origin: 'recon' | 'critic' | 'gap'
+  /**
+   * What produced the unit: a plan unit from a model (`plan`), or a Host task
+   * for endpoints, rule hits, rule-hit triage, a source sweep or a single
+   * file (`legacy`: a task kind of older versions). The UI localizes the
+   * title of Host-made units from it. Absent on Hosts before this field.
+   */
+  readonly kind?: 'plan' | 'endpoints' | 'signals' | 'triage' | 'sweep' | 'file' | 'legacy'
 }
 
 export interface ReviewOutcome {

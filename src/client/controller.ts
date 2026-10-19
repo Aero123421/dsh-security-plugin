@@ -98,6 +98,11 @@ export interface SecurityState {
   readonly addingProject: boolean
   /** Scan lists by workspace id, newest first. */
   readonly scans: Readonly<Record<string, Loadable<readonly ScanSummary[]>>>
+  /**
+   * Queued, running and paused scans of every project, newest first. Feeds the
+   * project picker's status and the "waiting for …" line of a queued scan.
+   */
+  readonly activeScans: readonly ScanSummary[]
   readonly scansHasMore: Readonly<Record<string, boolean>>
   /** A scan picked in History; undefined follows the latest scan. */
   readonly viewScanId: string | undefined
@@ -147,6 +152,8 @@ export interface ControllerOptions {
 /** Poll intervals for an active scan. */
 export const POLL_VISIBLE_MS = 1500
 export const POLL_HIDDEN_MS = 10_000
+/** How often the other projects' active scans are re-read while any of them runs. */
+export const ACTIVE_POLL_MS = 5000
 export const SCAN_PAGE_SIZE = 50
 export const MAX_EVENTS = 200
 const FLASH_MS = 6000
@@ -205,6 +212,8 @@ export interface SecurityController {
   reloadBootstrap(options?: { readonly force?: boolean }): Promise<RpcResult<Bootstrap>>
   refreshWorkspaces(force?: boolean): Promise<void>
   refreshScans(workspaceId?: string, force?: boolean): Promise<void>
+  /** Re-read the queued/running/paused scans of all projects; keeps polling while any runs. */
+  refreshActiveScans(): Promise<void>
   loadMoreScans(workspaceId?: string): Promise<void>
   setDshLocale(locale: string): void
   contractMismatch(): boolean
@@ -295,6 +304,7 @@ export function createController(options: ControllerOptions): SecurityController
     addingProject: false,
     scans: {},
     scansHasMore: {},
+    activeScans: [],
     viewScanId: undefined,
     details: {},
     events: {},
@@ -323,6 +333,7 @@ export function createController(options: ControllerOptions): SecurityController
   let disposed = false
   let flashSeq = 0
   let flashTimer: ReturnType<typeof setTimeout> | undefined
+  let activeTimer: ReturnType<typeof setTimeout> | undefined
   const watchers = new Map<string, Watcher>()
   const estimateCache = new Map<string, { readonly value: ScanEstimate; readonly at: number }>()
   let estimateGeneration = 0
@@ -545,10 +556,49 @@ export function createController(options: ControllerOptions): SecurityController
     })
   }
 
+  /**
+   * Queued, running and paused scans across all projects. Scans run one after
+   * another across projects (`maxConcurrentScans`), so a project's queued scan
+   * waits for another project's: this is what the picker and the queue line
+   * show. Polls slowly while any of them is queued or running.
+   */
+  async function refreshActiveScans(): Promise<void> {
+    if (disposed) return
+    await once('active-scans', async isCurrent => {
+      const result = await api.call('listScans', { limit: SCAN_PAGE_SIZE })
+      if (!isCurrent() || !result.ok) {
+        if (!disposed && isCurrent()) scheduleActiveScans(POLL_HIDDEN_MS)
+        return
+      }
+      const active = sortScans(asList<ScanSummary>(result.value)).filter(
+        scan => scan && typeof scan.id === 'string' && isPollableStatus(scan.status),
+      )
+      const before = get().activeScans
+      set(s => (sameScans(s.activeScans, active) ? s : { ...s, activeScans: active }))
+      // A scan that left the active set finished somewhere: refresh the project list's last scans.
+      if (before.some(scan => !active.some(next => next.id === scan.id && next.status === scan.status))) {
+        void refreshWorkspaces()
+      }
+      if (active.some(scan => scan.status === 'running' || scan.status === 'queued')) {
+        scheduleActiveScans(doc?.visibilityState === 'hidden' ? POLL_HIDDEN_MS : ACTIVE_POLL_MS)
+      }
+    })
+  }
+
+  function scheduleActiveScans(delay: number): void {
+    if (disposed) return
+    if (activeTimer !== undefined) clearTimeout(activeTimer)
+    activeTimer = setTimeout(() => {
+      activeTimer = undefined
+      void refreshActiveScans()
+    }, delay)
+  }
+
   function ensureLoaded(): void {
     if (loaded) return
     loaded = true
     lastRevalidate = Date.now()
+    void refreshActiveScans()
     void reloadBootstrap()
     void refreshWorkspaces()
   }
@@ -563,6 +613,7 @@ export function createController(options: ControllerOptions): SecurityController
     lastRevalidate = now
     void reloadBootstrap()
     void refreshWorkspaces()
+    void refreshActiveScans()
   }
 
   async function reload(): Promise<void> {
@@ -571,7 +622,7 @@ export function createController(options: ControllerOptions): SecurityController
     // A picker/create response from the previous connection must not navigate this one.
     generations.set('add-project', (generations.get('add-project') ?? 0) + 1)
     set(s => ({ ...s, addingProject: false, connectionGeneration: s.connectionGeneration + 1 }))
-    const tasks: Promise<unknown>[] = [reloadBootstrap({ force: true }), refreshWorkspaces(true)]
+    const tasks: Promise<unknown>[] = [reloadBootstrap({ force: true }), refreshWorkspaces(true), refreshActiveScans()]
     const s = get()
     if (s.models.status !== 'idle') tasks.push(loadModels(true))
     if (s.toolkit.status !== 'idle') tasks.push(loadToolkit(true))
@@ -833,7 +884,7 @@ export function createController(options: ControllerOptions): SecurityController
         selectedFinding: s.workspaceId === input.workspaceId ? s.selectedFinding : undefined,
       }))
       writeStorage(storage, WORKSPACE_KEY, input.workspaceId)
-      await refreshScans(input.workspaceId)
+      await Promise.all([refreshScans(input.workspaceId), refreshActiveScans()])
     }
     return result
   }
@@ -1038,7 +1089,7 @@ export function createController(options: ControllerOptions): SecurityController
 
   async function onScanSettled(summary: ScanSummary | undefined): Promise<void> {
     if (!summary) return
-    const tasks: Promise<unknown>[] = [refreshScans(summary.workspaceId), refreshWorkspaces()]
+    const tasks: Promise<unknown>[] = [refreshScans(summary.workspaceId), refreshWorkspaces(), refreshActiveScans()]
     if (summary.status === 'completed') tasks.push(loadFindings(summary.id, true))
     await Promise.all(tasks)
   }
@@ -1090,6 +1141,7 @@ export function createController(options: ControllerOptions): SecurityController
       await loadScanDetail(scanId, true)
       // A resumed scan becomes pollable again; the page re-attaches its watcher.
       if (!isPollableStatus(summary.status)) void onScanSettled(summary)
+      else void refreshActiveScans()
     }
     return result
   }
@@ -1514,6 +1566,7 @@ export function createController(options: ControllerOptions): SecurityController
     disposed = true
     for (const scanId of [...watchers.keys()]) stopWatcher(scanId)
     if (flashTimer !== undefined) clearTimeout(flashTimer)
+    if (activeTimer !== undefined) clearTimeout(activeTimer)
     doc?.removeEventListener('visibilitychange', onVisibility)
   }
 
@@ -1527,6 +1580,7 @@ export function createController(options: ControllerOptions): SecurityController
     reloadBootstrap,
     refreshWorkspaces,
     refreshScans,
+    refreshActiveScans,
     loadMoreScans,
     setDshLocale,
     contractMismatch,
@@ -1578,6 +1632,17 @@ export function createController(options: ControllerOptions): SecurityController
 
 function isBootstrap(value: unknown): value is Bootstrap {
   return typeof value === 'object' && value !== null && 'settings' in value
+}
+
+/** Same active scans in the same states; keeps the store reference when a poll changes nothing. */
+function sameScans(a: readonly ScanSummary[], b: readonly ScanSummary[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((scan, i) => {
+      const other = b[i]
+      return other?.id === scan.id && other.status === scan.status && other.phase === scan.phase
+    })
+  )
 }
 
 /** Prefer the workspace scanned most recently, else the first listed. */

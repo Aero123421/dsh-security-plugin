@@ -1,7 +1,8 @@
 /** Small builders for analysis records used by the orchestration tests. */
 
 import type { Endpoint, Signal } from '../../../src/host/analysis/types.ts'
-import type { FindingRecord, ScanRecord } from '../../../src/host/core/model.ts'
+import type { FindingRecord, PlanUnitRecord, ScanRecord } from '../../../src/host/core/model.ts'
+import { unitId } from '../../../src/host/scan/units.ts'
 import type { SecurityStore } from '../../../src/host/store/types.ts'
 import { DEFAULT_SETTINGS } from '../../../src/shared/settings.ts'
 
@@ -23,6 +24,25 @@ export function signalOf(overrides: Partial<Signal> = {}): Signal {
     message: 'User input reaches a SQL query. It may be injectable.',
     recommendation: 'Use bound parameters.',
     fingerprintParts: [ruleId, path, `line-${line}`],
+    ...overrides,
+  }
+}
+
+/** A validated coverage unit (as reconnaissance would store it). */
+export function unitOf(
+  title: string,
+  targetPaths: readonly string[],
+  overrides: Partial<PlanUnitRecord> = {},
+): PlanUnitRecord {
+  const focus = overrides.focus ?? ['authz']
+  return {
+    id: unitId(targetPaths, focus),
+    title,
+    focus,
+    targetPaths,
+    priority: 'high',
+    rationale: `Check ${title}.`,
+    origin: 'recon',
     ...overrides,
   }
 }

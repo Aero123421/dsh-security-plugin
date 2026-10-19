@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import type { WorkspaceSummary } from '../../shared/contracts.ts'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
@@ -10,6 +10,7 @@ import { TAB_IDS, type SecurityController, type TabId } from '../controller.ts'
 import { useElementWidth } from '../hooks.ts'
 import { errorText } from '../i18n.ts'
 import { IconPlus, IconRefresh } from '../icons.tsx'
+import { projectStatus } from '../projects.ts'
 import { AddProjectFolder } from './AddProjectFolder.tsx'
 import { FindingsView, SPLIT_MIN_WIDTH } from './Findings.tsx'
 import { HistoryView } from './History.tsx'
@@ -112,24 +113,30 @@ function PageHeader() {
       >
         {tr.t('page.newScan')}
       </Button>
-      <div className="dshsec-head-project">
-        {workspaces.length ? (
+      {workspaces.length ? (
+        <div className="dshsec-head-project">
           <ProjectPicker workspaces={workspaces} value={workspaceId} onChange={controller.selectWorkspace} />
-        ) : null}
-        <AddProjectFolder onAdded={id => controller.openNewScan({ workspaceId: id })} showHint />
-      </div>
+          <AddProjectFolder variant="icon" onAdded={controller.selectWorkspace} />
+        </div>
+      ) : null}
     </header>
   )
 }
 
-/** The current project as a quiet line, with a themed listbox when there is a choice. */
+/**
+ * The current project as a quiet line, with a themed listbox when there is a
+ * choice. Each project in the list carries its scan status, so a scan running
+ * or waiting in another project is visible from here.
+ */
 export function ProjectPicker(props: {
   readonly workspaces: readonly WorkspaceSummary[]
   readonly value: string | undefined
   readonly onChange: (workspaceId: string) => void
 }) {
   const tr = useT()
-  return <ProjectSelect {...props} variant="quiet" ariaLabel={tr.t('page.workspace')} />
+  const active = useSecurity(s => s.activeScans)
+  const status = useCallback((workspace: WorkspaceSummary) => projectStatus(tr, workspace, active), [tr, active])
+  return <ProjectSelect {...props} variant="quiet" ariaLabel={tr.t('page.workspace')} status={status} />
 }
 
 function GlobalBanners() {

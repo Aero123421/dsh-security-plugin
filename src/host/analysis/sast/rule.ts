@@ -5,6 +5,7 @@
 
 import type { FindingCategory, Severity } from '../../../shared/domain.ts'
 import type { SnapshotFile } from '../types.ts'
+import type { Charset } from './guards.ts'
 import type { Span } from './model.ts'
 import type { Taint, TaintOrigin } from './taint.ts'
 
@@ -55,6 +56,11 @@ export interface Hit {
 export interface FileContext {
   readonly file: SnapshotFile
   readonly report: (hit: Hit) => void
+  /**
+   * Function name → parameters every route fills through a numeric or UUID converter (Django
+   * `<int:id>` in a URLconf of another file), so they never hold attacker-chosen text.
+   */
+  readonly scalarParams?: ReadonlyMap<string, ReadonlySet<string>>
 }
 
 /** Common reference URLs. */
@@ -82,12 +88,35 @@ export interface Classification {
   readonly note?: string
 }
 
+/** Note for a value that passed an allow-list pattern check before the sink. */
+export const GUARDED_NOTE =
+  'The value is checked against an allow-list pattern before this call, which keeps out the characters this sink needs; confirm the check runs on every path to it.'
+
+/** Note for a path checked against an allow-list that admits dots but no separators. */
+export const DOT_SEGMENT_NOTE =
+  'The value is checked against an allow-list pattern first, but the pattern admits `.`, so `..` can still reach the parent folder; check how the path is used.'
+
+/**
+ * Whether an allow-list check admitting `charset` makes request data harmless for this rule's sink: only shell
+ * syntax matters for command execution, and `..` and separators for file paths. Other sinks keep the taint
+ * (an allow-listed host name is still an SSRF target).
+ */
+export function sanitizedBy(rule: RuleMeta, charset: Charset | undefined): boolean {
+  if (!charset) return false
+  if (rule.category === 'command-execution') return charset.shellSafe
+  if (rule.category === 'path-traversal') return charset.pathSafe
+  return false
+}
+
 /**
  * Decide the kind and confidence of a match from the taint of its dangerous
  * value. `dynamic` says the value is not a constant. Returns `undefined`
  * when nothing should be reported.
  */
 export function classify(rule: RuleMeta, taint: Taint | undefined, dynamic: boolean): Classification | undefined {
+  if (taint && sanitizedBy(rule, taint.guard)) {
+    return dynamic && rule.sinkSeverity ? { kind: 'sink', confidence: 'low', note: GUARDED_NOTE } : undefined
+  }
   if (taint) {
     const origins = rule.origins ?? ['request']
     if (origins.includes(taint.origin)) {

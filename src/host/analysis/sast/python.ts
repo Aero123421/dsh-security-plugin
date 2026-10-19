@@ -4,8 +4,18 @@
  */
 
 import { Checker, isCredentialComparison, isSanitizerCall, secretContext } from './helpers.ts'
-import type { CallFact, FileModel, Span } from './model.ts'
-import { type Classification, cweUrl, type FileContext, REF, type RuleMeta } from './rule.ts'
+import { stringContent, type Token } from './lexer.ts'
+import type { CallFact, FileModel, FnFact, Span } from './model.ts'
+import {
+  type Classification,
+  cweUrl,
+  type FileContext,
+  DOT_SEGMENT_NOTE,
+  GUARDED_NOTE,
+  REF,
+  type RuleMeta,
+  sanitizedBy,
+} from './rule.ts'
 import { callAt, type Taint } from './taint.ts'
 
 // ---------------------------------------------------------------------------
@@ -83,7 +93,7 @@ const DESER: RuleMeta = {
 const PATH: RuleMeta = {
   id: 'py.path-traversal',
   title: 'Path traversal',
-  sinkTitle: 'File path from user input (check the containment logic)',
+  sinkTitle: 'File operation on a dynamic path (check where it comes from)',
   category: 'path-traversal',
   cwe: 'CWE-22',
   severity: 'high',
@@ -91,7 +101,7 @@ const PATH: RuleMeta = {
   message:
     'A file path is built from request data and then opened, sent or deleted. `../` sequences or an absolute path (note that `os.path.join(base, "/etc/passwd")` drops `base`) let an attacker reach files outside the intended folder.',
   sinkMessage:
-    'A file path from request data reaches a file operation, but a containment check or a safe helper appears nearby. Make sure the check runs on the final, resolved path.',
+    'A file operation receives a path that is not a fixed value. If any part of it can come from users (a request, an upload name, a stored record), `../` or an absolute path can reach files outside the intended folder.',
   recommendation:
     'Use `werkzeug.utils.secure_filename()` or `os.path.basename()` for names, or resolve with `Path(base, name).resolve()` and reject it unless `is_relative_to(base)`. Flask `send_from_directory` is safer than `send_file` with a joined path.',
   references: [REF.accessControl, cweUrl('CWE-22')],
@@ -100,7 +110,7 @@ const PATH: RuleMeta = {
 const SSRF: RuleMeta = {
   id: 'py.ssrf',
   title: 'Server-side request forgery (SSRF)',
-  sinkTitle: 'Outgoing request to a partly user-controlled URL',
+  sinkTitle: 'Outgoing request to a dynamic URL (check where it comes from)',
   category: 'ssrf',
   cwe: 'CWE-918',
   severity: 'high',
@@ -108,7 +118,7 @@ const SSRF: RuleMeta = {
   message:
     'The server fetches a URL taken from the incoming request. An attacker can make it call internal services, cloud metadata endpoints (`http://169.254.169.254/`) or `localhost` admin interfaces.',
   sinkMessage:
-    'An outgoing request URL contains user-controlled parts but the host appears fixed. Check that the input cannot change the host (for example with `@`, `//` or encoded characters).',
+    'The server sends a request to a URL that is not a fixed value. If users can influence it (a request parameter, a webhook or callback URL they registered, a stored record), they can make the server call internal services or cloud metadata endpoints.',
   recommendation:
     'Map user choices to known URLs, or parse with `urllib.parse.urlparse` and allow only expected schemes and hosts. Block private, loopback and link-local addresses after DNS resolution and disable automatic redirects.',
   references: [REF.ssrf, cweUrl('CWE-918')],
@@ -151,7 +161,7 @@ const XSS: RuleMeta = {
 const REDIRECT: RuleMeta = {
   id: 'py.open-redirect',
   title: 'Open redirect',
-  sinkTitle: 'Redirect to a user-controlled URL (check the validation)',
+  sinkTitle: 'Redirect to a dynamic URL (check where it comes from and how it is validated)',
   category: 'business-logic',
   cwe: 'CWE-601',
   severity: 'medium',
@@ -159,7 +169,7 @@ const REDIRECT: RuleMeta = {
   message:
     'The response redirects to a URL taken from the request (for example `?next=`). Attackers can use links on your domain to send victims to phishing pages.',
   sinkMessage:
-    'A redirect target comes from the request, but some URL validation appears nearby. Confirm it rejects other hosts and `//evil.com`.',
+    'The response redirects to a URL that is not a fixed value. If users can influence it, they can send victims to another site; confirm that only relative paths or allow-listed hosts pass and that `//evil.com` is rejected.',
   recommendation:
     'Redirect only to relative paths or allow-listed hosts. Django provides `url_has_allowed_host_and_scheme()`; in Flask, check `urlparse(target).netloc == ""` and that the path starts with a single `/`.',
   references: [REF.accessControl, cweUrl('CWE-601')],
@@ -297,6 +307,49 @@ const MASS: RuleMeta = {
   references: [REF.accessControl, cweUrl('CWE-915')],
 }
 
+const REFLECTED_XSS: RuleMeta = {
+  id: 'py.reflected-xss',
+  title: 'Reflected cross-site scripting (XSS)',
+  category: 'xss',
+  cwe: 'CWE-79',
+  severity: 'high',
+  message:
+    'Request data is put into an HTML response without escaping: a Flask view returns an HTML string, or `make_response`, Django `HttpResponse` or `HTMLResponse` gets one. An attacker can send a victim a link whose input contains `<script>`, which then runs in the victim’s browser with their session on your site.',
+  recommendation:
+    'Render HTML with a template (Jinja2 and Django templates escape values by default), or escape every dynamic value with `markupsafe.escape()` / `django.utils.html.escape()`. Return JSON for data.',
+  references: [REF.injection, cweUrl('CWE-79')],
+}
+
+const CORS: RuleMeta = {
+  id: 'py.cors-misconfiguration',
+  title: 'Permissive CORS with credentials',
+  category: 'misconfiguration',
+  cwe: 'CWE-942',
+  severity: 'medium',
+  message:
+    'Cross-origin requests with cookies are allowed from any origin: `CORSMiddleware` with `allow_origins=["*"]` (or a catch-all regex) and `allow_credentials=True`, Flask-CORS `supports_credentials=True` without an origin list, or `CORS_ALLOW_ALL_ORIGINS` with `CORS_ALLOW_CREDENTIALS`. The middleware then echoes the caller’s `Origin`, so any website a logged-in user visits can read API responses as that user.',
+  recommendation:
+    'List the exact front-end origins that may send credentials (`allow_origins=["https://app.example.com"]`, Flask-CORS `origins=[...]`, Django `CORS_ALLOWED_ORIGINS`), or turn credentials off for public endpoints.',
+  references: [REF.misconfig, cweUrl('CWE-942')],
+}
+
+const XXE: RuleMeta = {
+  id: 'py.xxe',
+  title: 'XML external entity (XXE) processing',
+  sinkTitle: 'XML parsed with external entities enabled (check where it comes from)',
+  category: 'injection',
+  cwe: 'CWE-611',
+  severity: 'high',
+  sinkSeverity: 'low',
+  message:
+    'Request data is parsed by an lxml parser created with `resolve_entities=True`. A document that declares an external entity (`<!ENTITY x SYSTEM "file:///etc/passwd">`) makes the server read local files or fetch URLs and put the content into the parsed result.',
+  sinkMessage:
+    'An lxml parser created with `resolve_entities=True` parses a value that is not fixed. If it can come from users, external entities can read local files or reach internal URLs.',
+  recommendation:
+    'Create the parser with `resolve_entities=False, no_network=True` (and `load_dtd=False`), or parse untrusted XML with `defusedxml`.',
+  references: [REF.misconfig, cweUrl('CWE-611')],
+}
+
 const BACKDOOR: RuleMeta = {
   id: 'py.hardcoded-credential-check',
   title: 'Hard-coded credential or backdoor check',
@@ -332,6 +385,9 @@ export const PY_RULES: readonly RuleMeta[] = [
   WEAK_RANDOM,
   MASS,
   BACKDOOR,
+  REFLECTED_XSS,
+  CORS,
+  XXE,
 ]
 
 // ---------------------------------------------------------------------------
@@ -339,6 +395,8 @@ export const PY_RULES: readonly RuleMeta[] = [
 // ---------------------------------------------------------------------------
 
 const SQL_EXEC = /^(?:execute|executemany|executescript|raw|extra|exec_driver_sql|from_statement|mogrify)$/
+/** Async drivers that run SQL text through fetch methods (asyncpg `conn.fetch`, `databases` `fetch_all`). */
+const SQL_FETCH = /^(?:fetch|fetchrow|fetchval|fetch_all|fetch_one|fetch_val|iterate)$/
 const SQL_RECEIVER =
   /(?:^|\.)(?:cursor|cur|c|conn|connection|db|database|session|engine|con|objects|manager|tx|transaction|[A-Za-z]*(?:cursor|Cursor|conn|Conn|session|Session|db|DB|engine|Engine))$/
 const SQL_WORDS =
@@ -366,6 +424,23 @@ const SESSION_RECEIVER = /^(?:session|client|http|sess|s|http_client|httpx_clien
 
 const TEMPLATE_FUNCS =
   /^(?:flask\.render_template_string|render_template_string|jinja2\.Template|jinja2\.Environment\(\)\.from_string|django\.template\.Template|mako\.template\.Template|Template)$/
+/** Responses whose body is served as HTML unless a content type says otherwise. */
+const HTML_RESPONSE =
+  /^(?:flask\.make_response|make_response|django\.http\.HttpResponse|HttpResponse|(?:fastapi|starlette)\.responses\.HTMLResponse|HTMLResponse)$/
+/** A content type other than HTML in the response statement. */
+const NON_HTML_TYPE =
+  /\b(?:content_type|mimetype|media_type)\s*=\s*['"](?!text\/html)|['"](?:text\/plain|application\/json|text\/csv)['"]/
+/** The response's content type is set to something other than HTML later in the view. */
+const NON_HTML_TYPE_SET =
+  /\.(?:mimetype|content_type)\s*=\s*['"](?!text\/html)|Content-Type['"]\s*\]\s*=\s*['"](?!text\/html)/i
+/** Values built by escaping or safe-HTML helpers. */
+const MARKUP_VALUE = /^\s*(?:[\w.]+\.)?(?:Markup|mark_safe|SafeString|format_html|escape)\s*\(/
+/** HTML markup in a string literal: a start or end tag, or a comment. */
+const HTML_TAG = /<\/?[A-Za-z][\w-]*(?:[\s>/]|$)|<!--/
+/** Catch-all origin patterns (`.*`, `^https?://.*$`). */
+const CATCH_ALL_ORIGIN = /^\^?(?:https?\??:\/\/)?(?:\.\*|\.\+)\$?$/
+const TAR_OPEN = /^tarfile\.(?:open|TarFile(?:\.(?:open|taropen|gzopen|bz2open|xzopen))?)$/
+const LXML_PARSE = /^lxml\.etree\.(?:fromstring|XML|parse|iterparse|XMLID|fromstringlist)$/
 const SAFE_HTML_FUNCS =
   /^(?:markupsafe\.Markup|flask\.Markup|jinja2\.Markup|Markup|django\.utils\.safestring\.mark_safe|mark_safe|SafeString|django\.utils\.safestring\.SafeString)$/
 
@@ -374,7 +449,7 @@ const REDIRECT_FUNCS =
 const REDIRECT_CHECK =
   /url_has_allowed_host_and_scheme|is_safe_url|urlparse\([^)]*\)\.netloc|allowed_hosts|ALLOWED_REDIRECT|startswith\s*\(\s*['"]\/['"]\s*\)/
 
-const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd\b|passphrase/i
+const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd?\b|passphrase/i
 const MODEL_CALL =
   /^(?:[A-Z]\w*|[\w.]+\.objects\.(?:create|update|update_or_create|get_or_create|filter\(\)\.update)|[\w.]+\.(?:create|update|insert|update_one|insert_one|update_many|update_or_create|get_or_create|model_validate|parse_obj))$/
 
@@ -402,7 +477,12 @@ export function pyRules(model: FileModel, ctx: FileContext): void {
     jwtDecode(chk, call, q)
     weakCrypto(chk, call, q)
     massAssignment(chk, call)
+    htmlResponse(chk, call, q)
+    corsConfig(chk, call, q)
+    archiveExtraction(chk, call)
+    xxe(chk, call, q)
   }
+  flaskHtmlReturns(chk)
   settings(chk)
   for (const cmp of chk.literalComparisons()) {
     if (isCredentialComparison(chk, cmp)) chk.certain(BACKDOOR, cmp.span, 'medium', { mask: [cmp.literalSpan] })
@@ -432,7 +512,8 @@ export function pyTemplateRules(ctx: FileContext): void {
 function sqlInjection(chk: Checker, call: CallFact): void {
   let query: Span | undefined
   let queryBuilderText = false
-  if (SQL_EXEC.test(call.name) && call.receiver !== '') {
+  const fetch = SQL_FETCH.test(call.name)
+  if ((SQL_EXEC.test(call.name) || fetch) && call.receiver !== '') {
     if (call.name === 'extra')
       query = chk.keyword(call, 'where') ?? chk.keyword(call, 'select') ?? chk.positional(call, 0)
     else
@@ -474,6 +555,8 @@ function sqlInjection(chk: Checker, call: CallFact): void {
   const built = values.some(v => chk.ex.isStringBuilt(v) && !chk.ex.isConstant(v))
   if (!built) return
   const text = values.map(v => chk.text(v)).join(' ')
+  // `fetch`/`iterate` are common method names (HTTP clients, iterators): only SQL text counts.
+  if (fetch && !SQL_WORDS.test(text)) return
   if (
     !SQL_WORDS.test(text) &&
     !SQL_RECEIVER.test(call.receiver) &&
@@ -575,6 +658,9 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
   } else if (/^(?:flask\.)?send_from_directory$/.test(q) || q === 'send_from_directory') {
     // Flask joins safely; only the directory argument matters.
     target = chk.positional(call, 0)
+  } else if (call.name === 'save' && isUploadedFile(chk, call)) {
+    // werkzeug `FileStorage.save(dst)`: the upload's own `filename` is attacker-chosen.
+    target = chk.positional(call, 0) ?? chk.keyword(call, 'dst')
   } else if (PATH_METHODS.test(call.name) && /^(?:pathlib\.)?Path\(/.test(chk.qualify(call.receiver))) {
     const inner = chk.text({ start: call.calleeSpan.start, end: call.calleeSpan.end })
     void inner
@@ -590,7 +676,26 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
   )
     return
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
+  if (taint && sanitizedBy(PATH, taint.guard)) {
+    chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: GUARDED_NOTE })
+    return
+  }
+  if (taint?.guard?.segmentSafe) {
+    // An allow-list that keeps out separators still lets `..` through: a review hint, not a finding.
+    chk.report(PATH, call, { kind: 'sink', confidence: 'low', taint }, { note: DOT_SEGMENT_NOTE })
+    return
+  }
+  if (!taint) {
+    // Origin unknown: steer review to content reads, writes, deletes and downloads of dynamic, unsanitized paths.
+    if (
+      !FILE_METADATA.test(q) &&
+      !/^(?:iterdir|glob)$/.test(call.name) &&
+      chk.dynamic(target) &&
+      !isSafePath(chk, target)
+    )
+      chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
   const cls = classify(PATH, taint)
   if (!cls) return
   if (CONTAINMENT_CHECK.test(chk.scopeText(call.start))) {
@@ -614,9 +719,22 @@ function ssrf(chk: Checker, call: CallFact, q: string): void {
   if (!url) return
   if (call.name === 'request' && chk.positional(call, 1) === undefined) url = chk.positional(call, 0) ?? url
   const taint = chk.ex.taintResolved(url)
-  if (!taint) return
-  if ([url, ...chk.values(url)].some(v => chk.ex.hasFixedOrigin(v))) {
-    if (taint.origin === 'request') chk.report(SSRF, call, { kind: 'sink', confidence: 'low', taint })
+  const fixed = [url, ...chk.values(url)].some(v => chk.ex.hasFixedOrigin(v))
+  if (!taint) {
+    if (!fixed && chk.dynamic(url))
+      chk.report(SSRF, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) {
+    if (taint.origin === 'request')
+      chk.report(
+        SSRF,
+        call,
+        { kind: 'sink', confidence: 'low', taint },
+        {
+          note: 'The scheme and host are fixed, so input can only change the path; check that it cannot change the host (for example with `@`, `//` or encoded characters).',
+        },
+      )
     return
   }
   const cls = classify(SSRF, taint)
@@ -635,11 +753,222 @@ function ssrf(chk: Checker, call: CallFact, q: string): void {
   chk.report(SSRF, call, cls)
 }
 
+/** Note for sinks whose value has no visible source. */
+const UNKNOWN_ORIGIN =
+  'Where the value comes from is not visible here (a parameter, a stored record or another module); review the callers.'
+
+/** File operations that only list, inspect or prepare paths. */
+const FILE_METADATA = /^os\.(?:listdir|scandir|chmod|chown|makedirs|mkdir|stat)$/
+
+/** URLs built by the framework from route names: `url_for('index')`, `reverse('orders:detail', args=[...])`. */
+const INTERNAL_URL =
+  /^(?:flask\.url_for|url_for|django\.urls\.reverse|django\.urls\.reverse_lazy|django\.shortcuts\.resolve_url|reverse|reverse_lazy|resolve_url)$/
+
+/** The receiver of `call` is a werkzeug upload: `request.files['f']`, or a variable assigned from it. */
+function isUploadedFile(chk: Checker, call: CallFact): boolean {
+  const receiver = receiverSpan(chk, call)
+  const taint = receiver ? chk.ex.taintResolved(receiver) : undefined
+  return taint !== undefined && /^(?:self\.)?request\.files\b/.test(taint.source)
+}
+
+/** Source span of a call's receiver (`request.files["f"]` in `request.files["f"].save(...)`). */
+function receiverSpan(chk: Checker, call: CallFact): Span | undefined {
+  if (call.receiver === '' || call.name === '') return undefined
+  const src = chk.model.source
+  let end = src.lastIndexOf('.', call.calleeSpan.end - call.name.length)
+  while (end > call.calleeSpan.start && /\s/.test(src[end - 1]!)) end--
+  return end > call.calleeSpan.start ? { start: call.calleeSpan.start, end } : undefined
+}
+
+/**
+ * `tar.extractall(dest)` / `tar.extract(member, dest)` of a tar archive opened from request data (tar slip):
+ * member names such as `../../app/config.py` or absolute paths are written outside `dest`. Python 3.12's
+ * `filter='data'` rejects such members. `zipfile` strips `..` and absolute paths itself and is not reported.
+ */
+function archiveExtraction(chk: Checker, call: CallFact): void {
+  if (call.name !== 'extractall' && call.name !== 'extract') return
+  if (chk.keyword(call, 'filter')) return
+  const opener = archiveOpener(chk, call)
+  if (!opener) return
+  const sources = [chk.positional(opener, 0), chk.keyword(opener, 'name'), chk.keyword(opener, 'fileobj')]
+  const taint = sources.map(s => (s ? chk.ex.taintResolved(s) : undefined)).find(t => t !== undefined)
+  if (!taint) return
+  const cls = classify(PATH, taint)
+  if (!cls) return
+  const note = 'The archive comes from the request; its member names decide where files are written (tar slip).'
+  if (chk.keyword(call, 'members')) {
+    chk.report(PATH, call, { kind: 'sink', confidence: 'low', taint }, { note: `${note} Check the selected members.` })
+  } else chk.report(PATH, call, cls, { note })
+}
+
+/** The `tarfile.open(...)` call that created the receiver of `call` (inline, assigned or `with ... as`). */
+function archiveOpener(chk: Checker, call: CallFact): CallFact | undefined {
+  const receiver = receiverSpan(chk, call)
+  if (!receiver) return undefined
+  const inline = callAt(chk.model, receiver)
+  if (inline) return TAR_OPEN.test(chk.qualify(inline.callee)) ? inline : undefined
+  if (!/^[A-Za-z_]\w*$/.test(call.receiver)) return undefined
+  let opener: CallFact | undefined
+  for (const assign of chk.model.assigns) {
+    if (assign.start >= call.start) break
+    if (assign.fn !== call.fn || !assign.targets.some(t => t.name === call.receiver)) continue
+    if (assign.op !== '=' && assign.op !== 'with') continue
+    const value = callAt(chk.model, assign.value)
+    opener = value && TAR_OPEN.test(chk.qualify(value.callee)) ? value : undefined
+  }
+  return opener
+}
+
+/** lxml parsing with a parser created with `resolve_entities=True`. */
+function xxe(chk: Checker, call: CallFact, q: string): void {
+  if (!LXML_PARSE.test(q)) return
+  const parser = chk.positional(call, 1) ?? chk.keyword(call, 'parser')
+  if (!parser) return
+  const resolves = chk.values(parser).some(value => {
+    const created = callAt(chk.model, value)
+    if (!created || !/^lxml\.etree\.XMLParser$/.test(chk.qualify(created.callee))) return false
+    const flag = chk.keyword(created, 'resolve_entities')
+    return flag !== undefined && chk.ex.isWord(flag, 'True')
+  })
+  if (!resolves) return
+  const data = chk.positional(call, 0) ?? chk.keyword(call, 'text') ?? chk.keyword(call, 'source')
+  if (data) chk.check(XXE, call, chk.ex.taintResolved(data), chk.dynamic(data))
+}
+
+/** `make_response(html)`, Django `HttpResponse(html)`, `HTMLResponse(html)`. */
+function htmlResponse(chk: Checker, call: CallFact, q: string): void {
+  if (!HTML_RESPONSE.test(q) && !HTML_RESPONSE.test(call.callee)) return
+  const body = chk.positional(call, 0) ?? chk.keyword(call, 'content')
+  if (!body || NON_HTML_TYPE.test(chk.text(call))) return
+  reflectedHtml(chk, call, body)
+}
+
+/** Flask views (`@app.route`, `@bp.get`) send a returned string as `text/html`. */
+function flaskHtmlReturns(chk: Checker): void {
+  if (!chk.imports(/^flask(?:\.|$)/) || chk.imports(/^(?:fastapi|starlette)(?:\.|$)/)) return
+  for (const fn of chk.model.fns) {
+    if (!fn.decorators.some(d => /\.(?:route|get|post|put|patch|delete)$/.test(d.name))) continue
+    for (const value of returnedValues(chk, fn)) {
+      if (NON_HTML_TYPE.test(chk.text(value))) continue
+      reflectedHtml(chk, value, value)
+    }
+  }
+}
+
+/** Report request data built into an HTML string: HTML markup in a literal part, and no other content type. */
+function reflectedHtml(chk: Checker, at: Span, body: Span): void {
+  const values = chk.values(body)
+  if (!values.some(value => hasHtmlLiteral(chk, value))) return
+  // Markup escapes what is formatted into it (`Markup("<p>{}</p>").format(q)`); `Markup(f"…")` is `py.xss`.
+  if (values.some(value => MARKUP_VALUE.test(chk.text(value)))) return
+  const taint = chk.ex.taintResolved(body)
+  if (taint?.origin !== 'request') return
+  if (NON_HTML_TYPE_SET.test(chk.scopeText(at.start))) return
+  chk.report(REFLECTED_XSS, at, { kind: 'vulnerability', confidence: taint.direct ? 'high' : 'medium', taint })
+}
+
+function hasHtmlLiteral(chk: Checker, span: Span): boolean {
+  const [a, b] = chk.ex.range(span)
+  for (let k = a; k < b; k++) {
+    const t: Token = chk.model.tokens[k]!
+    if (t.type === 'str' && HTML_TAG.test(stringContent(t))) return true
+  }
+  return false
+}
+
+/** Values `fn` itself returns (`return <expr>` to the end of the logical line), not those of nested functions. */
+function returnedValues(chk: Checker, fn: FnFact): Span[] {
+  const { tokens, match } = chk.model
+  const [from, to] = chk.ex.range(fn.body)
+  const out: Span[] = []
+  for (let k = from; k < to; k++) {
+    const t = tokens[k]!
+    if (t.type !== 'ident' || t.value !== 'return' || chk.fnAt(t.start) !== fn) continue
+    let last = -1
+    for (let e = k + 1; e < to; e++) {
+      const u = tokens[e]!
+      if ((e > k + 1 && u.nl) || (u.type === 'punct' && u.value === ';')) break
+      const close = u.type === 'punct' && (u.value === '(' || u.value === '[' || u.value === '{') ? match[e]! : -1
+      last = close > e ? close : e
+      e = last
+    }
+    if (last > k) out.push({ start: tokens[k + 1]!.start, end: tokens[last]!.end })
+  }
+  return out
+}
+
+/**
+ * CORS that reflects any origin with credentials: Starlette/FastAPI `CORSMiddleware` with `allow_origins=["*"]`
+ * or a catch-all `allow_origin_regex` plus `allow_credentials=True`, and Flask-CORS `supports_credentials=True`
+ * without an origin list or with `"*"`.
+ */
+function corsConfig(chk: Checker, call: CallFact, q: string): void {
+  if (call.name === 'add_middleware' || /(?:^|\.)Middleware$/.test(q)) {
+    const first = chk.positional(call, 0)
+    if (!first || !/(?:^|\.)CORSMiddleware$/.test(chk.qualify(chk.text(first).trim()))) return
+    const credentials = chk.keyword(call, 'allow_credentials')
+    if (!credentials || !chk.ex.isWord(credentials, 'True')) return
+    const origins = chk.keyword(call, 'allow_origins')
+    const regex = chk.keyword(call, 'allow_origin_regex')
+    const any =
+      (origins !== undefined && chk.ex.elements(origins).some(v => chk.ex.literal(v) === '*')) ||
+      (regex !== undefined && CATCH_ALL_ORIGIN.test(chk.ex.literal(regex) ?? ''))
+    if (any) chk.certain(CORS, call, 'high')
+    return
+  }
+  if (q !== 'flask_cors.CORS' && !(call.callee === 'CORS' && chk.importedFrom('CORS', /^flask_cors/))) return
+  const credentials = chk.keyword(call, 'supports_credentials')
+  if (!credentials || !chk.ex.isWord(credentials, 'True')) return
+  const origins = chk.keyword(call, 'origins')
+  const resources = chk.keyword(call, 'resources')
+  const wildcard = (span: Span) =>
+    chk.ex.literal(span) === '*' ||
+    CATCH_ALL_ORIGIN.test(chk.ex.literal(span) ?? '') ||
+    chk.ex.elements(span).some(v => chk.ex.literal(v) === '*')
+  if (origins) {
+    if (wildcard(origins)) chk.certain(CORS, call, 'high')
+    return
+  }
+  // Without `origins` Flask-CORS allows every origin, unless the `resources` entries list their own.
+  const text = resources ? chk.text(resources) : ''
+  if (
+    /['"]origins['"]\s*:/.test(text) &&
+    !/['"]origins['"]\s*:\s*(?:['"](?:\*|\.\*)['"]|\[\s*['"]\*['"]\s*\])/.test(text)
+  )
+    return
+  chk.certain(CORS, call, 'high')
+}
+
+/**
+ * A path whose dynamic parts all pass through a filename sanitizer (`secure_filename`, `os.path.basename`),
+ * also inside `os.path.join(...)`, `Path(...)` or an f-string, looking through local assignments.
+ */
+function isSafePath(chk: Checker, span: Span, depth = 0): boolean {
+  if (depth > 3) return false
+  return chk.values(span).every(value => {
+    if (!chk.dynamic(value)) return true
+    const call = callAt(chk.model, value)
+    if (call) {
+      const q = chk.qualify(call.callee)
+      if (PATH_SAFE_CALL.test(q)) return true
+      if (!/^(?:os\.path\.join|posixpath\.join|(?:pathlib\.)?(?:Pure)?Path)$/.test(q)) return false
+      return call.args.every(arg => !chk.dynamic(arg) || isSafePath(chk, arg, depth + 1))
+    }
+    const parts = chk.ex.dynamicParts(value)
+    return parts?.every(part => !chk.dynamic(part) || isSafePath(chk, part, depth + 1)) === true
+  })
+}
+
 /** Allow-list or host validation of an outgoing URL. */
 const URL_CHECK =
   /allow(?:ed)?_?(?:list|hosts?|origins?|domains?|urls?)|white_?list|ALLOWED_|is_allowed\w*\s*\(|is_safe_url|validate_url|\.(?:hostname|netloc)\s*(?:==|!=|not\s+in|in)\s/i
 
 function templateInjection(chk: Checker, call: CallFact, q: string): void {
+  if (call.name === 'from_string' && isJinjaEnvironment(chk, call)) {
+    const source = chk.positional(call, 0) ?? chk.keyword(call, 'source')
+    if (source) chk.check(SSTI, call, chk.ex.taintResolved(source), chk.dynamic(source))
+    return
+  }
   if (!TEMPLATE_FUNCS.test(q)) return
   if (
     q === 'Template' &&
@@ -651,6 +980,17 @@ function templateInjection(chk: Checker, call: CallFact, q: string): void {
   const source = chk.positional(call, 0) ?? chk.keyword(call, 'source')
   if (!source) return
   chk.check(SSTI, call, chk.ex.taintResolved(source), chk.dynamic(source))
+}
+
+/** `env.from_string(...)` on a Jinja2 `Environment` (not a sandboxed one), or Flask's `app.jinja_env`. */
+function isJinjaEnvironment(chk: Checker, call: CallFact): boolean {
+  if (/(?:^|\.)jinja_env$/.test(call.receiver)) return true
+  const receiver = receiverSpan(chk, call)
+  if (!receiver) return false
+  return chk.values(receiver).some(value => {
+    const created = callAt(chk.model, value)
+    return created !== undefined && /^jinja2\.Environment$/.test(chk.qualify(created.callee))
+  })
 }
 
 function safeHtml(chk: Checker, call: CallFact, q: string): void {
@@ -670,8 +1010,18 @@ function openRedirect(chk: Checker, call: CallFact, q: string): void {
     chk.keyword(call, 'redirect_to')
   if (!target) return
   const taint = chk.ex.taintResolved(target)
-  if (!taint) return
-  if ([target, ...chk.values(target)].some(v => chk.ex.hasFixedOrigin(v))) return
+  const values = [target, ...chk.values(target)]
+  const fixed = values.some(v => chk.ex.hasFixedOrigin(v))
+  if (!taint) {
+    const internal = values.every(v => {
+      const c = callAt(chk.model, v)
+      return c !== undefined && INTERNAL_URL.test(chk.qualify(c.callee))
+    })
+    if (!fixed && !internal && chk.dynamic(target))
+      chk.report(REDIRECT, call, { kind: 'sink', confidence: 'low' }, { note: UNKNOWN_ORIGIN })
+    return
+  }
+  if (fixed) return
   const cls = classify(REDIRECT, taint)
   if (!cls) return
   if (REDIRECT_CHECK.test(chk.scopeText(call.start))) {
@@ -752,7 +1102,7 @@ function weakCrypto(chk: Checker, call: CallFact, q: string): void {
   }
   if (weakHash) {
     if (/usedforsecurity\s*=\s*False/.test(chk.text(call))) return
-    if (PASSWORD_CONTEXT.test(chk.statementText(call))) chk.certain(WEAK_HASH, call, 'medium')
+    if (PASSWORD_CONTEXT.test(chk.digestUsage(call))) chk.certain(WEAK_HASH, call, 'medium')
     return
   }
   if (
@@ -760,6 +1110,7 @@ function weakCrypto(chk: Checker, call: CallFact, q: string): void {
     (/^(?:randint|randrange|choice|choices|getrandbits)$/.test(call.callee) &&
       chk.importedFrom(call.callee, /^random\./))
   ) {
+    if (chk.usedAsNumber(call)) return
     const kind = secretContext(chk.contextNames(call))
     if (kind === 'strong') chk.certain(WEAK_RANDOM, call, 'medium')
     else if (kind === 'weak') chk.report(WEAK_RANDOM, call, { kind: 'sink', confidence: 'low' })
@@ -811,9 +1162,14 @@ function settings(chk: Checker): void {
       chk.model.source.includes('MIDDLEWARE') ||
       /django/i.test(chk.model.source) ||
       /settings/.test(chk.path))
+  let allowAll: Span | undefined
+  let credentials = false
   for (const assign of chk.model.assigns) {
     if (assign.fn || assign.op !== '=' || assign.targets.length !== 1) continue
     const name = assign.targets[0]!.name
+    if (/^CORS_(?:ALLOW_ALL_ORIGINS|ORIGIN_ALLOW_ALL)$/.test(name) && chk.ex.isWord(assign.value, 'True'))
+      allowAll = assign
+    if (name === 'CORS_ALLOW_CREDENTIALS' && chk.ex.isWord(assign.value, 'True')) credentials = true
     cookieSetting(chk, name, assign.value, assign)
     if (name === 'DEBUG' && isDjango && chk.ex.isWord(assign.value, 'True')) {
       chk.certain(DEBUG, assign, 'high', { severity: devPath ? 'low' : 'medium' })
@@ -846,6 +1202,8 @@ function settings(chk: Checker): void {
     const value = chk.keyword(call, 'SECRET_KEY')
     if (value) secretKey(chk, value, call, devPath)
   }
+  // django-cors-headers echoes any origin with credentials.
+  if (allowAll && credentials) chk.certain(CORS, allowAll, 'high', { severity: devPath ? 'low' : 'medium' })
 }
 
 function cookieSetting(chk: Checker, name: string, value: Span, at: Span): void {

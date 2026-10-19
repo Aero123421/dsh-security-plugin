@@ -189,9 +189,26 @@ export function targetKey(file: string, receiver: string): string {
 export const AUTH_HINT =
   /^(?![\s\S]*(?:limit|throttl|slow_?down|logg(?:er|ing)))[\s\S]*?(?:auth|login|session|jwt|token|passport|guard|protect|require(?:User|Admin|Role)|isAuthenticated|verify|acl|permission|rbac|admin|role|current_?(?:active_?)?user|signed_?in|logged_?in|api_?key|passes_?test|staff|superuser)/i
 
+/**
+ * Middleware that loads request state but never rejects a request: session stores (`session({...})`,
+ * `cookieSession()`, `require('express-session')(...)`), Passport's `initialize()` and `session()`, and
+ * database-session dependencies (`Depends(get_session)`). Their names match `AUTH_HINT`, yet a route behind
+ * them alone is still public, so they are not auth hints. Enforcing names (`requireSession`,
+ * `passport.authenticate`, `verifySession`) still are.
+ */
+const NON_ENFORCING_MIDDLEWARE =
+  /^(?:(?:express|cookie|koa|fastify|secure|client|iron|redis)?[Ss]ession|(?:express|cookie|koa|fastify|secure)[_-]session|passport\.(?:initialize|session)|require\((['"`])(?:express-session|cookie-session|koa-session|koa-generic-session|@fastify\/(?:secure-)?session|passport)\1\)(?:\.\w+)?|(?:get|create|open|new|load)_?(?:db_?|async_?|sql_?)?[Ss]ession|(?:get|create|open|new|load)(?:Db|DB|Async|Sql)?Session|SessionLocal)$/
+
+/** Whether a middleware, guard, decorator or dependency name suggests that it enforces authentication or authorization. */
+export function isAuthHint(name: string): boolean {
+  if (!AUTH_HINT.test(name)) return false
+  const bare = name.replace(/^Depends\(\s*([^()]*?)\s*\)$/, '$1')
+  return !NON_ENFORCING_MIDDLEWARE.test(bare)
+}
+
 /** Middleware names whose text suggests auth. */
 export function authHintsOf(middleware: readonly string[]): string[] {
-  return [...new Set(middleware.filter(name => AUTH_HINT.test(name)))]
+  return [...new Set(middleware.filter(isAuthHint))]
 }
 
 /** CodeRef for a span of a model. */

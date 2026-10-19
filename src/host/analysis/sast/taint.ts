@@ -14,7 +14,8 @@
  *   assignment of an untainted value clears the alias.
  */
 
-import { JS_KEYWORDS, PY_KEYWORDS, stringContent, type Token, tokenRange } from './lexer.ts'
+import { allOf, anyOf, type Charset, findGuards, type Guard, guardAt, subjectText } from './guards.ts'
+import { JS_KEYWORDS, PY_KEYWORDS, stringContent, type Token, tokenAt, tokenRange } from './lexer.ts'
 import {
   type AssignFact,
   type CallFact,
@@ -38,6 +39,60 @@ export interface Taint {
   /** The source appears literally in the analyzed expression (not via an alias or parameter). */
   readonly direct: boolean
   readonly origin: TaintOrigin
+  /**
+   * Every tainted part passed an allow-list check first (`if (!/^[\w.-]+$/.test(x)) return`) that admits only
+   * these characters. Rules decide whether that is enough for their sink.
+   */
+  readonly guard?: Charset
+}
+
+/** Properties and methods whose result is a number or a boolean, never attacker-chosen text. */
+const JS_NON_STRING_TAIL =
+  /\.(?:length|size|byteLength)$|\.(?:includes|startsWith|endsWith|has|indexOf|lastIndexOf|findIndex|findLastIndex|some|every|test|toFixed|getTime|valueOf|charCodeAt|codePointAt|localeCompare|isInteger|isSafeInteger|isFinite|isNaN)\(\)$/
+const PY_NON_STRING_TAIL =
+  /\.(?:isdigit|isnumeric|isdecimal|isalpha|isalnum|isspace|isupper|islower|startswith|endswith|count|find|rfind|index|rindex)\(\)$/
+/** Operators whose operands are converted to numbers, or whose result is a boolean. */
+const JS_NUMERIC_OPERATORS: ReadonlySet<string> = new Set([
+  '*',
+  '/',
+  '%',
+  '-',
+  '**',
+  '<',
+  '>',
+  '<=',
+  '>=',
+  '==',
+  '===',
+  '!=',
+  '!==',
+  '&',
+  '|',
+  '^',
+  '<<',
+  '>>',
+  '>>>',
+])
+/** Python operators that reject or convert text operands (`*`, `%` and `+` keep strings). */
+const PY_NUMERIC_OPERATORS: ReadonlySet<string> = new Set(['-', '/', '//', '**', '<', '>', '<=', '>=', '==', '!='])
+/** `.map(Number)`, `.map(n => parseInt(n, 10))`, `.map(x => +x)`: every element becomes a number. */
+const NUMERIC_MAPPER =
+  /^(?:Number|parseInt|parseFloat|BigInt|Boolean|Math\.\w+|\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*(?:(?:Number|parseInt|parseFloat|BigInt|Boolean|Math\.\w+)\(\s*\1\s*(?:,\s*\d+\s*)?\)|\+\s*\1|\1\s*\|\s*0))$/
+/** Nesting depth of brackets and conditionals the taint scan follows structurally. */
+const MAX_SCAN_DEPTH = 48
+
+/** Merge two allow-listed taints: the result is only as safe as both. */
+function mergeGuarded(a: Taint | undefined, b: Taint | undefined): Taint | undefined {
+  if (!a) return b
+  if (!b?.guard || !a.guard) return a
+  return { ...a, guard: allOf(a.guard, b.guard) }
+}
+
+/** Token index ranges of a conditional expression's parts. */
+interface TernaryParts {
+  readonly cond: readonly [number, number]
+  readonly yes: readonly [number, number]
+  readonly no: readonly [number, number]
 }
 
 interface SourcePattern {
@@ -189,19 +244,34 @@ const WHOLE_BODY_JS =
 const WHOLE_BODY_PY =
   /^(?:self\.)?request\.(?:json|form|data|values|POST|GET|args|get_json\(\)|json\(\)|form\(\)|query_params)$|^(?:self\.)?request\.(?:form|args|POST|GET|data|json|values)\.(?:to_dict|dict|copy)\(\)$/
 
+export interface ExprOptions {
+  /**
+   * Canonical callee for a callee as written, mapping its first segment through the file's imports
+   * (`join` → `path.join` after `import { join } from 'node:path'`). Without it, callees are matched as written.
+   */
+  readonly qualify?: (callee: string) => string
+  /** Function name → parameters that hold numbers or UUIDs because every route fills them through a converter. */
+  readonly scalarParams?: ReadonlyMap<string, ReadonlySet<string>>
+}
+
 /** Per-file analysis context. */
 export class Expr {
   readonly model: FileModel
+  readonly #qualify: ((callee: string) => string) | undefined
+  readonly #scalarParams: ReadonlyMap<string, ReadonlySet<string>> | undefined
   readonly #sources: readonly SourcePattern[]
   readonly #keywords: ReadonlySet<string>
   readonly #stateByFn = new Map<FnFact | undefined, ScopeCursor>()
   readonly #eventsByFn = new Map<FnFact | undefined, AliasEvent[]>()
   readonly #paramTaint = new Map<FnFact, Map<string, Taint>>()
   #flaskConverters: Map<FnFact, Set<string>> | undefined
+  #guards: readonly Guard[] | undefined
   readonly #clientFile: boolean
 
-  constructor(model: FileModel) {
+  constructor(model: FileModel, options: ExprOptions = {}) {
     this.model = model
+    this.#qualify = options.qualify
+    this.#scalarParams = options.scalarParams
     this.#clientFile = model.lang === 'js' && /^\s*(?:\/\/[^\n]*\n\s*)*['"]use client['"]/.test(model.source)
     const next = model.lang === 'js' && isNextFile(model.path)
     this.#sources = model.lang === 'py' ? PY_SOURCES : next ? [...JS_SOURCES, ...JS_NEXT_SOURCES] : JS_SOURCES
@@ -222,6 +292,7 @@ export class Expr {
       const param = fn.params.find(p => p.names.includes(name))
       if (!param) continue
       if (this.model.lang === 'py' && this.#flaskSafeParams(fn).has(name)) return true
+      if (fn.name !== undefined && this.#scalarParams?.get(fn.name)?.has(name)) return true
       const ann = (param.annotation ?? '').replace(/\s+/g, '')
       return /^(?:int|float|bool|number|boolean|bigint|Decimal|UUID|uuid\.UUID|Optional\[(?:int|float|bool)\]|(?:int|float|bool|number|boolean)\|None|(?:number|boolean)\|(?:undefined|null))$/.test(
         ann,
@@ -437,7 +508,7 @@ export class Expr {
       if (chain.hasCall) {
         const pure = this.model.lang === 'py' ? PY_PURE_CALLEES : JS_PURE_CALLEES
         // A pure helper is constant when its arguments are: keep scanning into them.
-        if (chain.calls.length === 1 && pure.test(chain.calls[0]!.callee)) continue
+        if (chain.calls.length === 1 && this.#matchesCallee(pure, chain.calls[0]!.callee)) continue
       }
       if (chain.parts === 1 && !chain.hasCall && this.#isScalarParam(t.value, at)) continue
       if (chain.parts === 1 && !chain.hasCall && depth < 2) {
@@ -564,6 +635,12 @@ export class Expr {
 
   /** Branch spans of a top-level conditional expression in tokens `[a, b)`. */
   #ternaryBranches(a: number, b: number): Span[] | undefined {
+    const parts = this.#ternaryParts(a, b)
+    return parts ? [this.#span(parts.yes[0], parts.yes[1]), this.#span(parts.no[0], parts.no[1])] : undefined
+  }
+
+  /** Condition and branches of a top-level conditional expression in tokens `[a, b)`. */
+  #ternaryParts(a: number, b: number): TernaryParts | undefined {
     const skip = (k: number): number => {
       const t = this.tokens[k]!
       if (t.type === 'punct' && (t.sub === 'open' || (t.sub === undefined && /^[([{]$/.test(t.value)))) {
@@ -586,7 +663,7 @@ export class Expr {
         if (t.value === 'lambda' || t.value === 'for') return undefined
         if (t.value === 'if' && ifAt < 0 && k > a) ifAt = k
         else if (t.value === 'else' && ifAt >= 0 && k + 1 < b) {
-          return [this.#span(a, ifAt), this.#span(k + 1, b)]
+          return { cond: [ifAt + 1, k], yes: [a, ifAt], no: [k + 1, b] }
         }
       }
       return undefined
@@ -608,7 +685,7 @@ export class Expr {
         else nested++
       } else if (t.value === ':' && question >= 0) {
         if (nested > 0) nested--
-        else if (k > question + 1 && k + 1 < b) return [this.#span(question + 1, k), this.#span(k + 1, b)]
+        else if (k > question + 1 && k + 1 < b) return { cond: [a, question], yes: [question + 1, k], no: [k + 1, b] }
         else return undefined
       }
     }
@@ -680,6 +757,7 @@ export class Expr {
     if (k >= b || this.tokens[k]!.type !== 'ident') return undefined
     const chain = this.#chain(k, b)
     if (chain.end !== b) return undefined
+    if (this.#nonStringChain(chain)) return undefined
     const src = this.#matchSource(chain.norm)
     if (src) return src
     if (chain.hasCall) return undefined
@@ -718,41 +796,317 @@ export class Expr {
     return undefined
   }
 
-  #scan(a: number, b: number, state: ScopeState): Taint | undefined {
+  /**
+   * First taint reaching the value of tokens `[a, b)`. Only the branches of a conditional count (and not a
+   * branch the condition restricts to an allow-list), comprehension elements carry the taint of their loop
+   * variables only, and numbers or booleans derived from input (`items.length`, `x === 'a'`, `ids.map(Number)`)
+   * are not tainted text. A taint that passed an allow-list guard is returned only when nothing unguarded is found.
+   */
+  #scan(a: number, b: number, state: ScopeState, depth = 0): Taint | undefined {
+    if (depth < MAX_SCAN_DEPTH) {
+      const parts = this.#ternaryParts(a, b)
+      if (parts) return this.#scanTernary(parts, state, depth + 1)
+      if (this.model.lang === 'py') {
+        const comprehension = this.#scanComprehension(a, b, state, depth + 1)
+        if (comprehension !== false) return comprehension
+      }
+    }
     const tokens = this.tokens
+    let guarded: Taint | undefined
     for (let k = a; k < b; k++) {
       const t = tokens[k]!
+      if (
+        depth < MAX_SCAN_DEPTH &&
+        t.type === 'punct' &&
+        (t.sub === 'open' || (t.sub === undefined && (t.value === '(' || t.value === '[' || t.value === '{')))
+      ) {
+        // Groupings, literals and substitutions are scanned as expressions of their own.
+        const m = this.model.match[k]!
+        if (m > k + 1 && m < b) {
+          const inner = this.#scan(k + 1, m, state, depth + 1)
+          if (inner && !inner.guard) return inner
+          guarded = mergeGuarded(guarded, inner)
+          k = m
+          continue
+        }
+      }
       if (t.type !== 'ident' || this.#isMemberName(k)) continue
       if (this.#keywords.has(t.value) && t.value !== 'this') continue
       const chain = this.#chain(k, b)
+      if (this.#nonStringChain(chain) || this.#nonStringOperand(k, chain.end)) {
+        k = chain.end - 1
+        continue
+      }
       const src = this.#matchSource(chain.norm)
-      if (src) return src
+      if (src) {
+        const guard = this.#guardAt(subjectText(this.model, k, chain.end), t.start)
+        if (!guard) return src
+        guarded = mergeGuarded(guarded, { ...src, guard })
+        k = chain.end - 1
+        continue
+      }
       const alias = state.aliases.get(t.value)
       if (alias && !this.#isCalledDirectly(k)) {
         if (!(this.model.lang === 'js' && this.#isPunct(k + 1, ':') && this.#isObjectKey(k))) {
           if (!(this.model.lang === 'py' && this.#isPunct(k + 1, '=') && !this.#isPunct(k + 2, '='))) {
-            return { ...alias, direct: false }
+            const here = this.#guardAt(t.value, t.start)
+            const guard = here && alias.guard ? anyOf(here, alias.guard) : (here ?? alias.guard)
+            if (!guard) return { ...alias, direct: false }
+            guarded = mergeGuarded(guarded, { ...alias, direct: false, guard })
+            k = chain.end - 1
+            continue
           }
         }
       }
       for (const call of chain.calls) {
         if (this.#isTransparent(call.callee, call.method)) {
-          const inner = this.#scan(call.open + 1, call.close, state)
-          if (inner) return inner
+          const inner = this.#scan(call.open + 1, call.close, state, depth + 1)
+          if (inner && !inner.guard) return inner
+          guarded = mergeGuarded(guarded, inner)
         }
       }
       k = chain.end - 1
     }
+    return guarded
+  }
+
+  /** Taint of a conditional's branches, leaving out a branch its condition restricts to an allow-list. */
+  #scanTernary(parts: TernaryParts, state: ScopeState, depth: number): Taint | undefined {
+    const allowed = this.#allowListTest(parts.cond[0], parts.cond[1], state)
+    let guarded: Taint | undefined
+    for (const [range, whenTrue] of [
+      [parts.yes, true],
+      [parts.no, false],
+    ] as const) {
+      if (allowed && allowed.negated !== whenTrue && this.#textOf(range[0], range[1]) === allowed.subject) continue
+      const found = this.#scan(range[0], range[1], state, depth)
+      if (found && !found.guard) return found
+      guarded = mergeGuarded(guarded, found)
+    }
+    return guarded
+  }
+
+  /**
+   * A condition that holds only when `subject` is one of a list of values not taken from the input:
+   * `LIST.includes(x)`, `SET.has(x)`, `LIST.indexOf(x) !== -1`, `x in OBJ` (JS keys or a Python
+   * collection), or `x === 'a' || x === 'b'` (`or` in Python). `negated` for a leading `!`/`not`
+   * or Python `not in`.
+   */
+  #allowListTest(a: number, b: number, state: ScopeState): { subject: string; negated: boolean } | undefined {
+    const py = this.model.lang === 'py'
+    let negated = false
+    let s = a
+    let e = b
+    for (let guard = 0; guard < 8; guard++) {
+      if (this.#isPunct(s, '!') || (py && this.tokens[s]?.type === 'ident' && this.tokens[s]!.value === 'not')) {
+        negated = !negated
+        s++
+        continue
+      }
+      if (this.#isPunct(s, '(') && this.model.match[s] === e - 1) {
+        s++
+        e--
+        continue
+      }
+      break
+    }
+    if (e <= s) return undefined
+    const clean = (x: number, y: number): boolean => y > x && !this.#scan(x, y, state, MAX_SCAN_DEPTH)
+    // Equality chains: `x === 'a' || x === 'b'`.
+    const alternatives = this.#splitTopOn(s, e, py ? 'or' : '||')
+    const equalities = alternatives.map(([x, y]) => this.#equalitySubject(x, y))
+    if (equalities.every(Boolean) && new Set(equalities).size === 1) return { subject: equalities[0]!, negated }
+    if (alternatives.length > 1) return undefined
+    // Membership: `x in LIST` (`not in` negates).
+    for (let k = s + 1; k < e - 1; k++) {
+      const t = this.tokens[k]!
+      if (t.type === 'punct' && (t.value === '(' || t.value === '[' || t.value === '{')) {
+        const m = this.model.match[k]!
+        if (m < 0) return undefined
+        k = m
+        continue
+      }
+      if (t.type !== 'ident' || t.value !== 'in') continue
+      const not = py && this.tokens[k - 1]?.type === 'ident' && this.tokens[k - 1]!.value === 'not'
+      const subjectEnd = not ? k - 1 : k
+      if (!clean(k + 1, e) || subjectEnd <= s) return undefined
+      return { subject: this.#textOf(s, subjectEnd), negated: not ? !negated : negated }
+    }
+    if (py) return undefined
+    // `LIST.includes(x)`, `SET.has(x)`, `LIST.indexOf(x) !== -1`.
+    let end = e
+    let call = e - 1
+    const cmp = this.tokens[e - 2]
+    const last = this.tokens[e - 1]
+    if (
+      cmp?.type === 'punct' &&
+      ['!==', '!=', '>', '>='].includes(cmp.value) &&
+      (last?.type === 'num' || last?.value === '1')
+    ) {
+      const negative = this.#isPunct(e - 3, '-') && last.value === '1'
+      const valid =
+        ((cmp.value === '!==' || cmp.value === '!=' || cmp.value === '>') && negative) ||
+        (cmp.value === '>=' && last.value === '0')
+      if (!valid) return undefined
+      end = negative ? e - 3 : e - 2
+      call = end - 1
+    }
+    if (!this.#isPunct(call, ')')) return undefined
+    const open = this.model.match[call]!
+    const method = this.tokens[open - 1]
+    if (open < s + 2 || method?.type !== 'ident' || !this.#isPunct(open - 2, '.')) return undefined
+    const indexOf = end !== e
+    if (indexOf ? method.value !== 'indexOf' : method.value !== 'includes' && method.value !== 'has') return undefined
+    if (!clean(s, open - 2) || open + 1 >= call) return undefined
+    return { subject: this.#textOf(open + 1, call), negated }
+  }
+
+  /** `x === 'lit'`, `'lit' == x` (Python `==` too): the non-literal side, or undefined. */
+  #equalitySubject(a: number, b: number): string | undefined {
+    for (let k = a + 1; k < b - 1; k++) {
+      const t = this.tokens[k]!
+      if (t.type !== 'punct' || !['===', '=='].includes(t.value)) continue
+      const literal = (x: number, y: number) => y === x + 1 && this.literal(this.#span(x, y)) !== undefined
+      if (literal(k + 1, b)) return this.#textOf(a, k)
+      if (literal(a, k)) return this.#textOf(k + 1, b)
+      return undefined
+    }
     return undefined
+  }
+
+  /** Token ranges of `[a, b)` split at a top-level operator (`||`, Python `or`). */
+  #splitTopOn(a: number, b: number, op: string): [number, number][] {
+    const out: [number, number][] = []
+    let s = a
+    for (let k = a; k < b; k++) {
+      const t = this.tokens[k]!
+      if (t.type === 'punct' && (t.sub === 'open' || t.value === '(' || t.value === '[' || t.value === '{')) {
+        const m = this.model.match[k]!
+        if (m < 0 || m >= b) return [[a, b]]
+        k = m
+        continue
+      }
+      if (t.value === op && (t.type === 'punct' || t.type === 'ident')) {
+        out.push([s, k])
+        s = k + 1
+      }
+    }
+    out.push([s, b])
+    return out
+  }
+
+  /**
+   * Python comprehensions and generator expressions in `[a, b)`: the element carries the taint of the loop
+   * variables (bound to their iterables), not of the iterables themselves, so
+   * `','.join(str(int(i)) for i in ids)` is clean. `false` when `[a, b)` is not a comprehension.
+   */
+  #scanComprehension(a: number, b: number, state: ScopeState, depth: number): Taint | undefined | false {
+    const fors: number[] = []
+    for (let k = a + 1; k < b; k++) {
+      const t = this.tokens[k]!
+      if (t.type === 'punct' && (t.sub === 'open' || t.value === '(' || t.value === '[' || t.value === '{')) {
+        const m = this.model.match[k]!
+        if (m < 0 || m >= b) return false
+        k = m
+        continue
+      }
+      if (t.type === 'ident' && t.value === 'for') fors.push(k)
+    }
+    if (fors.length === 0) return false
+    const loop = new Map<string, Taint | undefined>()
+    const view: ScopeState = {
+      aliases: { get: name => (loop.has(name) ? loop.get(name) : state.aliases.get(name)) },
+      wholeBody: state.wholeBody,
+    }
+    for (const [i, f] of fors.entries()) {
+      const limit = fors[i + 1] ?? b
+      let inAt = -1
+      for (let k = f + 1; k < limit; k++) {
+        if (this.tokens[k]!.type === 'ident' && this.tokens[k]!.value === 'in') {
+          inAt = k
+          break
+        }
+      }
+      if (inAt < 0) return false
+      let iterableEnd = limit
+      for (let k = inAt + 1; k < limit; k++) {
+        const t = this.tokens[k]!
+        if (t.type === 'punct' && (t.value === '(' || t.value === '[' || t.value === '{')) {
+          const m = this.model.match[k]!
+          if (m > k) k = m
+          continue
+        }
+        if (t.type === 'ident' && t.value === 'if') {
+          iterableEnd = k
+          break
+        }
+      }
+      const taint = inAt + 1 < iterableEnd ? this.#scan(inAt + 1, iterableEnd, view, depth) : undefined
+      for (let k = f + 1; k < inAt; k++) {
+        const t = this.tokens[k]!
+        if (t.type === 'ident') loop.set(t.value, taint ? { ...taint, direct: false } : undefined)
+      }
+    }
+    return this.#scan(a, fors[0]!, view, depth)
+  }
+
+  /** The chain's value is a number or a boolean: `.length`, `.includes(x)`, or a `.map(Number)` step. */
+  #nonStringChain(chain: ChainInfo): boolean {
+    if (this.model.lang === 'py') return PY_NON_STRING_TAIL.test(chain.norm)
+    if (JS_NON_STRING_TAIL.test(chain.norm)) return true
+    return chain.calls.some(
+      call =>
+        (call.method === 'map' || call.method === 'flatMap') &&
+        call.close > call.open + 1 &&
+        NUMERIC_MAPPER.test(this.#textOf(call.open + 1, call.close)),
+    )
+  }
+
+  /** The operand ending before token `end` (starting at `k`) is converted to a number or compared. */
+  #nonStringOperand(k: number, end: number): boolean {
+    const py = this.model.lang === 'py'
+    const ops = py ? PY_NUMERIC_OPERATORS : JS_NUMERIC_OPERATORS
+    const before = this.tokens[k - 1]
+    const after = this.tokens[end]
+    if (after?.type === 'punct' && after.sub === undefined && ops.has(after.value)) return true
+    if (after?.type === 'ident' && (py ? /^(?:in|is|not)$/ : /^(?:instanceof|in)$/).test(after.value)) return true
+    if (!before) return false
+    if (before.type === 'ident') return py ? before.value === 'not' : /^(?:typeof|void|delete)$/.test(before.value)
+    if (before.type !== 'punct' || before.sub !== undefined) return false
+    if (before.value === '!' || before.value === '~' || before.value === '-') return true
+    if (!py && before.value === '+') {
+      // Unary plus converts to a number; binary plus concatenates.
+      const prev = this.tokens[k - 2]
+      return !prev || (prev.type === 'punct' && !/^(?:\)|\]|\}|\+\+|--)$/.test(prev.value)) || prev.value === 'return'
+    }
+    return ops.has(before.value) && before.value !== '-'
+  }
+
+  /** Allow-list guard on `subject` holding at offset `at`. */
+  #guardAt(subject: string, at: number): Charset | undefined {
+    this.#guards ??= findGuards(this.model)
+    return this.#guards.length === 0 ? undefined : guardAt(this.model, this.#guards, subject, at)
+  }
+
+  /** Whitespace-free source text of tokens `[a, b)`. */
+  #textOf(a: number, b: number): string {
+    return subjectText(this.model, a, b)
   }
 
   #isTransparent(callee: string, method: string | undefined): boolean {
     if (this.model.lang === 'py') {
-      if (PY_TRANSPARENT_CALLEES.test(callee)) return true
+      if (this.#matchesCallee(PY_TRANSPARENT_CALLEES, callee)) return true
       return method !== undefined && PY_TRANSPARENT_METHODS.has(method)
     }
-    if (JS_TRANSPARENT_CALLEES.test(callee)) return true
+    if (this.#matchesCallee(JS_TRANSPARENT_CALLEES, callee)) return true
     return method !== undefined && JS_TRANSPARENT_METHODS.has(method)
+  }
+
+  /** The callee as written or as qualified through the file's imports matches `re`. */
+  #matchesCallee(re: RegExp, callee: string): boolean {
+    if (re.test(callee)) return true
+    const qualified = this.#qualify?.(callee)
+    return qualified !== undefined && qualified !== callee && re.test(qualified)
   }
 
   /** Reuse the per-function cursor for increasing offsets; backward queries rebuild exact state.
@@ -889,12 +1243,13 @@ export class Expr {
     if (this.model.lang === 'js') {
       for (const param of fn.params) {
         const dec = param.decorators.find(d =>
-          /^(?:Body|Query|Param|Params|Headers|Req|Request|UploadedFiles?|Cookies)$/.test(d.replace(/^.*\./, '')),
+          /^(?:Body|Query|Param|Params|Headers|Req|Request|UploadedFiles?|Cookies|Args?)$/.test(d.replace(/^.*\./, '')),
         )
         if (!dec) continue
         if (/Parse(?:Int|Float|Bool|UUID|Enum|Array)Pipe/.test(this.text(param))) continue
         for (const name of param.names) out.set(name, { source: `@${dec}() ${name}`, direct: false, origin: 'request' })
       }
+      for (const [name, source] of this.#apiArguments(fn)) out.set(name, { source, direct: false, origin: 'request' })
     } else {
       const route = fn.decorators.some(d => PY_ROUTE_DECORATOR.test(d.name))
       const converters = this.#flaskSafeParams(fn)
@@ -913,6 +1268,7 @@ export class Expr {
         const baseType = ann.replace(/^Annotated\[\s*([^,\]]+).*$/s, '$1').trim()
         if (SAFE_PY_PARAM_TYPES.test(baseType)) continue
         if (converters.has(param.name)) continue
+        if (fn.name !== undefined && this.#scalarParams?.get(fn.name)?.has(param.name)) continue
         out.set(param.name, {
           source: djangoView ? `URL parameter '${param.name}'` : `route parameter '${param.name}'`,
           direct: false,
@@ -922,6 +1278,52 @@ export class Expr {
     }
     this.#paramTaint.set(fn, out)
     return out
+  }
+
+  /**
+   * Client-chosen arguments of API frameworks that are not request objects: a tRPC procedure's `input`
+   * (`.input(z.object({ q: z.string() })).query(({ input }) => …)`, when the schema admits text) and the
+   * arguments of a GraphQL resolver in a `Query`/`Mutation`/`Subscription` map (`user: (_, args) => …`).
+   */
+  #apiArguments(fn: FnFact): [string, string][] {
+    if (fn.params[0]?.names.includes('input')) {
+      // The innermost call taking `fn` as an argument (not `router({ … })` around it).
+      const call = this.model.calls.findLast(c => c.args.some(a => a.start <= fn.start && fn.end <= a.end))
+      if (call && /^(?:query|mutation|subscription)$/.test(call.name) && /[pP]rocedure\b/.test(call.receiver)) {
+        const schema = /\.input\((.*)\)$/s.exec(call.receiver)?.[1]
+        const text = schema !== undefined && /\bz\.(?:string|any|unknown|record)\(|\bstring\(\)/.test(schema)
+        return text ? [['input', 'tRPC input']] : []
+      }
+    }
+    const args = fn.params[1]
+    if (!args || args.names.length === 0 || !this.#inResolverMap(fn)) return []
+    return args.names.map(name => [name, `GraphQL argument '${name}'`])
+  }
+
+  /** `fn` is a property of an object literal under a `Query:`/`Mutation:`/`Subscription:` key. */
+  #inResolverMap(fn: FnFact): boolean {
+    const { tokens, match } = this.model
+    for (let k = tokenAt(tokens, fn.start) - 1, steps = 0; k > 1 && steps < 2000; k--, steps++) {
+      const t = tokens[k]!
+      if (t.type !== 'punct') continue
+      if (t.value === ')' || t.value === ']' || t.value === '}') {
+        const open = match[k]!
+        if (open < 0) return false
+        k = open
+        continue
+      }
+      if (t.value === '(' || t.value === '[') return false
+      if (t.value === '{') {
+        const key = tokens[k - 2]!
+        return (
+          tokens[k - 1]!.type === 'punct' &&
+          tokens[k - 1]!.value === ':' &&
+          key.type === 'ident' &&
+          /^(?:Query|Mutation|Subscription)$/.test(key.value)
+        )
+      }
+    }
+    return false
   }
 
   /** Flask `<int:id>`-style converters make a parameter numeric. */
