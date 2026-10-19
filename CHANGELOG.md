@@ -8,6 +8,15 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-19
+
+### Fixed
+
+- The new-scan estimate names each reason a file is left out (binary, symlink, unreadable, gitignore, your exclude rules, and the size limits) instead of describing every exclusion as an exclude rule. Counts include exclusions past the 5,000-path list.
+- Secret findings and the built-in "Review … in <path>" task titles are translated in the UI from stored arguments. English, JSON, and SARIF report text is unchanged, and a 0.4.1 database is read without a migration. A 0.4.1 secret finding is translated when its rule id and English sentences can be recovered; otherwise the stored English is shown.
+- The sidebar and settings section titles follow the plugin language after it loads, including Japanese.
+- Compact token estimates keep each number and its unit on one line at a narrow width.
+
 ## [0.4.1] - 2026-10-20
 
 ### Fixed
@@ -320,7 +329,8 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.2...v0.3.0

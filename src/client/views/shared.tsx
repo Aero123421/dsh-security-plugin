@@ -12,6 +12,7 @@ import { useController, useSecurity, useT } from '../context.tsx'
 import { DASH, formatDateTime } from '../format.ts'
 import { useScanAvailability } from '../hooks.ts'
 import { errorText } from '../i18n.ts'
+import { findingTitle } from '../localized.ts'
 import { IconDownload, IconRefresh } from '../icons.tsx'
 import { ModeCards } from './NewScanDialog.tsx'
 
@@ -169,8 +170,8 @@ export const FindingRow = memo(function FindingRow(props: {
         <SeverityBadge severity={f.severity} />
       </span>
       <span className="dshsec-frow-main">
-        <span className="dshsec-frow-title" title={typeof f.title === 'string' ? f.title : undefined}>
-          {typeof f.title === 'string' && f.title ? f.title : DASH}
+        <span className="dshsec-frow-title" title={findingTitle(tr, f)}>
+          {findingTitle(tr, f) || DASH}
         </span>
         <span className="dshsec-frow-meta">
           <VerificationBadge verification={f.verification} withTitle={false} />

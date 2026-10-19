@@ -838,6 +838,7 @@ export class ScanJob {
       id: run.id,
       role: task.role,
       title: task.title,
+      ...(task.titleCopy ? { titleCopy: task.titleCopy } : {}),
       model: `${route.provider}/${route.model}`,
       state: 'running',
       turns: 0,
@@ -971,6 +972,7 @@ export class ScanJob {
       kind: planned.kind,
       role: planned.role,
       title: planned.title,
+      ...(planned.titleCopy ? { titleCopy: planned.titleCopy } : {}),
       status: 'pending',
       priority: planned.priority,
       input: planned.input,
@@ -982,6 +984,7 @@ export class ScanJob {
         input: planned.input,
         priority: planned.priority,
         title: planned.title,
+        ...(planned.titleCopy ? { titleCopy: planned.titleCopy } : {}),
       })
       return this.capAttempts(refreshed)
     }

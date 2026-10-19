@@ -324,6 +324,8 @@ describe('takeSnapshot', () => {
     await Promise.all(Array.from({ length: 5100 }, (_, i) => writeFile(join(dir, 'imgs', `${i}.png`), '')))
     const snapshot = await takeSnapshot(dir, LIMITS)
     expect(snapshot.excluded.length).toBe(5000)
+    expect(snapshot.excludedCount).toBe(5100)
+    expect(snapshot.excludedByReason?.binary).toBe(5100)
   })
 
   it('flags test and generated files', async () => {

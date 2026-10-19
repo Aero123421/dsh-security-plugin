@@ -62,8 +62,15 @@ export function buildJsonReport(input: ReportInput): JsonReport {
       notices: scan.notices,
     },
     counts: countFindings(input.findings),
-    findings: orderedFindings(input.findings),
+    // `copy` is a display aid. JSON reports keep the stored English sentences.
+    findings: orderedFindings(input.findings).map(withoutDisplayCopy),
   }
+}
+
+function withoutDisplayCopy(finding: FindingDetail): FindingDetail {
+  if (finding.copy === undefined) return finding
+  const { copy: _copy, ...rest } = finding
+  return rest
 }
 
 /** Pretty-printed JSON report with a trailing newline. */

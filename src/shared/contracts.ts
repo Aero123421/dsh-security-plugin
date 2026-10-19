@@ -23,6 +23,8 @@ import type {
   TriageState,
   Verification,
 } from './domain.ts'
+import type { SecretCopy } from './secret-copy.ts'
+import type { TaskTitleCopy } from './task-title.ts'
 import type { ModelRef, SecuritySettings, SettingsPatch } from './settings.ts'
 
 /** Endpoint prefix under the shared `/api` channel. */
@@ -232,6 +234,8 @@ export interface WorkerView {
   readonly id: string
   readonly role: RoleName
   readonly title: string
+  /** Present for the two built-in `Review … in <path>` tasks. The `title` stays English. */
+  readonly titleCopy?: TaskTitleCopy
   readonly model: string
   readonly state: WorkerState
   readonly turns: number
@@ -274,12 +278,39 @@ export interface ThreatModelView {
   readonly trustBoundaries: readonly string[]
 }
 
+/** Why a path is left out of a snapshot. Order is the estimate display order. */
+export const EXCLUDE_REASONS = [
+  'default-ignore',
+  'gitignore',
+  'user-exclude',
+  'binary',
+  'too-large',
+  'symlink',
+  'outside-root',
+  'limit-files',
+  'limit-bytes',
+  'limit-entries',
+  'unreadable',
+] as const
+
+export type ExcludeReason = (typeof EXCLUDE_REASONS)[number]
+
+export interface ExcludedReasonCount {
+  readonly reason: ExcludeReason
+  readonly count: number
+}
+
 export interface ScanEstimate {
   /** Supported dependency manifest/lock files; absent on older Hosts. */
   readonly dependencyManifests?: number
   readonly files: number
   readonly bytes: number
   readonly excluded: number
+  /**
+   * Exclusion counts by reason. Sums every visited exclusion, including ones
+   * past the capped path list. Absent on hosts that only sent `excluded`.
+   */
+  readonly excludedByReason?: readonly ExcludedReasonCount[]
   readonly languages: readonly { readonly language: string; readonly files: number }[]
   readonly frameworks: readonly string[]
   readonly endpoints: number
@@ -313,6 +344,12 @@ export interface FindingSummary {
   readonly triage: TriageState
   /** Not present in the previous completed scan of the same effective scan root. */
   readonly isNew: boolean
+  /**
+   * Built-in secret arguments for client translation. Reports keep the English
+   * `title` / `summary` / `recommendation`. Absent when those sentences are not
+   * the built-in secret template (including 0.4.1 rows that cannot be recovered).
+   */
+  readonly copy?: SecretCopy
 }
 
 export interface EvidenceView {

@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { AnalyzerId } from '../../shared/contracts.ts'
+import { type SecretCopy, secretCopyFromUnknown } from '../../shared/secret-copy.ts'
 import {
   type CodeRef,
   type FindingCategory,
@@ -147,6 +148,7 @@ export function recordSignalFindings(
         store.insertEvidence(evidence)
         return evidence.id
       })
+      const copy = secretCopyOf(signal)
       const finding: FindingRecord = {
         id: newId(),
         scanId,
@@ -176,6 +178,7 @@ export function recordSignalFindings(
           },
         ],
         recommendation: clip(signal.recommendation ?? ''),
+        ...(copy ? { copy } : {}),
         limitations: signalLimitations(signal),
         references: [...(signal.references ?? [])].slice(0, 8),
         createdBy: { role: 'analyzer', analyzer: signal.analyzer },
@@ -658,6 +661,18 @@ function mergeHunterFinding(
           limitations: existing.limitations.filter(l => !l.startsWith('Found by a pattern rule')),
         }
       : {}),
+  })
+}
+
+function secretCopyOf(signal: Signal): SecretCopy | undefined {
+  if (signal.analyzer !== 'secrets') return undefined
+  const metadata = signal.metadata
+  return secretCopyFromUnknown({
+    kind: 'secret',
+    ruleId: signal.ruleId,
+    description: metadata?.description,
+    preview: metadata?.preview,
+    inTest: metadata?.inTest,
   })
 }
 

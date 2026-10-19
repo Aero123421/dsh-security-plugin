@@ -127,6 +127,7 @@ const TASK_PATCH_KEYS: PatchKeys<TaskPatch> = {
   input: true,
   priority: true,
   title: true,
+  titleCopy: true,
   status: true,
   attempts: true,
   error: true,

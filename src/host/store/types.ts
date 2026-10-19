@@ -57,7 +57,16 @@ export type ScanPatch = Partial<
 export type TaskPatch = Partial<
   Pick<
     TaskRecord,
-    'status' | 'attempts' | 'error' | 'outcome' | 'startedAt' | 'finishedAt' | 'input' | 'priority' | 'title'
+    | 'status'
+    | 'attempts'
+    | 'error'
+    | 'outcome'
+    | 'startedAt'
+    | 'finishedAt'
+    | 'input'
+    | 'priority'
+    | 'title'
+    | 'titleCopy'
   >
 >
 

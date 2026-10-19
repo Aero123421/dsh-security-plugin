@@ -17,6 +17,7 @@ import { MUTATING_METHODS } from '../analysis/routes/signals.ts'
 import type { Endpoint, Signal, Snapshot } from '../analysis/types.ts'
 import type { FindingRecord, TaskInput, TaskKind } from '../core/model.ts'
 import type { RoleName } from '../../shared/domain.ts'
+import { reviewEndpointsTitle, reviewSensitiveTitle, type TaskTitleCopy } from '../../shared/task-title.ts'
 import { signalFingerprint } from './findings.ts'
 import { hasVisibleEvidence } from './privacy.ts'
 
@@ -25,6 +26,7 @@ export interface PlannedTask {
   readonly kind: TaskKind
   readonly role: RoleName
   readonly title: string
+  readonly titleCopy?: TaskTitleCopy
   readonly priority: number
   readonly input: TaskInput
 }
@@ -204,7 +206,8 @@ function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[
         key: `endpoints:${path}#${index}`,
         kind: 'hunt-endpoints' as const,
         role: 'hunter' as const,
-        title: `Review ${part.length} endpoint${part.length === 1 ? '' : 's'} in ${path}`,
+        title: reviewEndpointsTitle(part.length, path),
+        titleCopy: { kind: 'review-endpoints', count: part.length, path },
         priority: 50 + unguarded * 4 + mutating * 3 + Math.min(params, 6) * 2 + weight(fileSignals),
         input: {
           targetPaths: unique([path, ...declarationPaths]),
@@ -280,7 +283,8 @@ function planSensitiveFiles(
       key: `file:${f.path}`,
       kind: 'hunt-file' as const,
       role: 'hunter' as const,
-      title: `Review security-sensitive logic in ${f.path}`,
+      title: reviewSensitiveTitle(f.path),
+      titleCopy: { kind: 'review-sensitive', path: f.path },
       priority: 45,
       input: { targetPaths: [f.path], focus: ['authn', 'authz', 'business-logic', 'crypto'] as FindingCategory[] },
     }))

@@ -278,7 +278,7 @@ const TASK_COLUMNS = ['id', 'scanId', 'key', 'status', 'priority', 'createdAt'] 
 
 const TASK_DATA: DataShape = {
   required: { kind: 'string', role: 'string', title: 'string', input: 'object', attempts: 'number' },
-  optional: { error: 'object', outcome: 'object', startedAt: 'string', finishedAt: 'string' },
+  optional: { error: 'object', outcome: 'object', startedAt: 'string', finishedAt: 'string', titleCopy: 'object' },
 }
 
 export function taskParams(task: TaskRecord): [string, string, string, string, number, string, string] {
@@ -395,7 +395,7 @@ const FINDING_DATA: DataShape = {
     createdAt: 'string',
     updatedAt: 'string',
   },
-  optional: { cwe: 'string', ruleId: 'string', location: 'object', review: 'object' },
+  optional: { cwe: 'string', ruleId: 'string', location: 'object', review: 'object', copy: 'object' },
 }
 
 export function findingParams(finding: FindingRecord): [string, string, string, string, string, string] {

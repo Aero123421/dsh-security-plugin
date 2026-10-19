@@ -19,7 +19,9 @@ import type {
   TriageState,
   Verification,
 } from '../../shared/domain.ts'
+import type { SecretCopy } from '../../shared/secret-copy.ts'
 import type { ModelRef, ScanBudget, SecuritySettings } from '../../shared/settings.ts'
+import type { TaskTitleCopy } from '../../shared/task-title.ts'
 
 /** Role or deterministic analyzer that produced a record. */
 export type Origin = RoleName | 'analyzer'
@@ -115,6 +117,8 @@ export interface TaskRecord {
   readonly kind: TaskKind
   readonly role: RoleName
   readonly title: string
+  /** Set for `Review … in <path>` tasks. Absent on rows written before 0.4.2. */
+  readonly titleCopy?: TaskTitleCopy
   readonly status: TaskStatus
   /** Higher runs first. */
   readonly priority: number
@@ -215,6 +219,8 @@ export interface FindingRecord {
   readonly preconditions: readonly string[]
   readonly attackPath: readonly AttackStepRecord[]
   readonly recommendation: string
+  /** Built-in secret arguments. Absent on 0.4.1 rows and on non-secret findings. */
+  readonly copy?: SecretCopy
   readonly limitations: readonly string[]
   readonly references: readonly string[]
   readonly review?: FindingReview

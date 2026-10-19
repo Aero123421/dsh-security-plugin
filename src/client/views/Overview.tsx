@@ -32,6 +32,7 @@ import {
 } from '../format.ts'
 import { useNow, useWatchScan, useWorkspaceScans } from '../hooks.ts'
 import { activityText, analyzerReasonText, diagnosticText, errorText, noticeText, type Translator } from '../i18n.ts'
+import { workerTitle } from '../localized.ts'
 import { IconPause, IconPlay, IconRefresh, IconStop } from '../icons.tsx'
 import { overviewFocus } from '../selectors.ts'
 import { AvailabilityGate, ExportButtons, FindingRow, FirstRun, LoadError, Loading, ViewingBanner } from './shared.tsx'
@@ -371,8 +372,8 @@ function WorkersTable(props: { readonly detail: ScanDetail }) {
               {shown.map(w => (
                 <tr key={w.id}>
                   <td>{tr.lookup(`role.${w.role}`) ?? text(w.role)}</td>
-                  <td className="dshsec-cell-wrap" title={typeof w.title === 'string' ? w.title : undefined}>
-                    {text(w.title)}
+                  <td className="dshsec-cell-wrap" title={workerTitle(tr, w)}>
+                    {workerTitle(tr, w)}
                   </td>
                   <td
                     className="dshsec-cell-mono dshsec-col-opt"

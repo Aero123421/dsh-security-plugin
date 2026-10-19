@@ -51,7 +51,9 @@ export function apply(ctx: DshClientContext): void {
   )
 
   ctx.slots.inject('sidebar.panellist', () =>
-    ctx.slots.register({ name: 'sidebar.panellist', id: SECURITY_SLOT_ID, order: 20, label }, SecurityPanelIcon),
+    bindLanguageSlot(controller.store, () =>
+      ctx.slots.register({ name: 'sidebar.panellist', id: SECURITY_SLOT_ID, order: 20, label }, SecurityPanelIcon),
+    ),
   )
 
   ctx.slots.inject('main', () =>
@@ -59,11 +61,39 @@ export function apply(ctx: DshClientContext): void {
   )
 
   ctx.slots.inject('settings.section', () =>
-    ctx.slots.register(
-      { name: 'settings.section', id: SECURITY_SLOT_ID, order: 40, label, inject: () => ({ controller }) },
-      SettingsSection,
+    bindLanguageSlot(controller.store, () =>
+      ctx.slots.register(
+        { name: 'settings.section', id: SECURITY_SLOT_ID, order: 40, label, inject: () => ({ controller }) },
+        SettingsSection,
+      ),
     ),
   )
+}
+
+/**
+ * Re-register one slot when the plugin language changes. DSH resolves `label`
+ * only when the slot ledger or the DSH locale changes, so a language that
+ * arrives after bootstrap would otherwise stay on the first English label.
+ * The previous registration is removed before the next one is added.
+ */
+function bindLanguageSlot(
+  store: { getState(): { readonly language: string }; subscribe(listener: () => void): () => void },
+  register: () => () => unknown,
+): () => void {
+  let dispose = register()
+  let language = store.getState().language
+  const unsubscribe = store.subscribe(() => {
+    const next = store.getState().language
+    if (next === language) return
+    language = next
+    const previous = dispose
+    previous()
+    dispose = register()
+  })
+  return () => {
+    unsubscribe()
+    dispose()
+  }
 }
 
 function safeLocale(ctx: DshClientContext): string {
