@@ -49,6 +49,7 @@ import { type AnalysisContext, type AnalysisStep, analyzeWorkspace } from './ana
 import { affordableHuntTasks, type PhaseBudget, phaseCeilings, ScanBudgetGate } from './budget.ts'
 import {
   applySkepticOutput,
+  applyUnreviewedDismissals,
   isReportableSignal,
   markNewFindings,
   newId,
@@ -518,6 +519,7 @@ export class ScanJob {
     this.phase('review')
     const route = this.route('skeptic')
     if (!route) {
+      this.settleUnreviewedDismissals()
       this.skipPhases('review')
       return
     }
@@ -539,7 +541,29 @@ export class ScanJob {
         `${pool.skipped} finding(s) did not get an independent review because the budget ran out.`,
       )
     }
+    this.settleUnreviewedDismissals()
     this.finishPhase('review')
+  }
+
+  /**
+   * A hunter's verified dismissal of a rule hit waits for the independent
+   * review; when that review did not complete (budget, failure, review cap),
+   * the dismissal applies as it would without a reviewer: `inconclusive`.
+   */
+  private settleUnreviewedDismissals(): void {
+    const reviewed = new Set(
+      this.deps.store
+        .listTasks(this.scan.id, ['done'])
+        .flatMap(task => (task.kind === 'review' && task.input.findingId ? [task.input.findingId] : [])),
+    )
+    const disputed = applyUnreviewedDismissals(this.deps.store, this.scan.id, this.analysis.quoteSource, reviewed)
+    if (disputed > 0) {
+      this.event(
+        'info',
+        'hunter-dismissals-applied',
+        `${disputed} rule hit(s) that an AI hunter called false positives with verified code stay open as inconclusive, because their independent review did not run.`,
+      )
+    }
   }
 
   private async chain(): Promise<void> {
