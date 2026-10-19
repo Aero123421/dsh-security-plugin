@@ -36,8 +36,9 @@ API, and starts one scan per project at the same moment. Checks:
 | Foreign paths | project | a finding cites a file of another project |
 | Queue | run | more scans ran at once than `maxConcurrentScans`, or none waited in the queue |
 
-The command exits 1 when a check fails and 2 on usage errors; `--json` prints the result for scripts. It does not
-open a browser. Use the manual pass below to look at the Security page.
+The command exits 1 when a check fails and 2 on usage errors; `--json` prints the result for scripts. CI runs it
+against the DSH `alpha` and `next` dist-tags. It does not open a browser. Use the manual pass below to look at the
+Security page.
 
 ## 1. Scratch DSH install
 

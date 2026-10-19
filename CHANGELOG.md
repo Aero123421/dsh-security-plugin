@@ -12,8 +12,8 @@ changes; they are called out explicitly.
 
 - `pnpm e2e` runs every fixture app as its own project in a scratch DSH with the scripted model, scans them at
   the same time, and checks each report (completion, AI tasks, recall, negative controls, discarded fabricated
-  claims, no file paths from another project) and the shared scan queue. The scripted model now answers per
-  fixture app, so several fixture projects can share one DSH.
+  claims, no file paths from another project) and the shared scan queue. CI runs it against the DSH `alpha` and
+  `next` dist-tags. The scripted model now answers per fixture app, so several fixture projects can share one DSH.
 - The project picker shows each project's state: scanning, queued, paused, or the open findings of its last scan.
   A queued scan names the project whose scan it waits for and links to it. While any scan is queued or running,
   the page polls the active scans of all projects (every 5 seconds, 10 seconds while the tab is hidden).

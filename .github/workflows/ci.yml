@@ -56,6 +56,9 @@ jobs:
       # Resolves the npm dist-tag "alpha", checks the peer range the way DSH boots plugins,
       # typechecks against that SDK, and boots a scratch web profile. See scripts/check-dsh-alpha.mjs.
       - run: pnpm check:dsh --dsh-version=${{ matrix.dsh }}
+      # Scans every fixture app as its own project in that DSH with the scripted model, then checks each
+      # report and the shared scan queue. See docs/e2e-testing.md.
+      - run: pnpm e2e --dsh-version=${{ matrix.dsh }}
 
   test-os:
     name: ${{ matrix.os }} · Node 22
