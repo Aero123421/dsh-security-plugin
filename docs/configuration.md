@@ -44,7 +44,8 @@ from starting, and the reason is written to the DSH log.
 | `osvEndpoint` | URL | `https://api.osv.dev` | valid URL | OSV API base, for example an internal mirror. Requests go to `<osvEndpoint>/v1/querybatch` and `/v1/vulns/<id>`. |
 | `semgrepConfig` | path | unset | absolute path to a file or directory | Local Semgrep rules. Without it Semgrep never runs, even if installed. Registry rules (`--config auto`, `p/…`) are never used. |
 | `externalTimeoutMs` | integer (ms) | `600000` (10 min) | 1 ms–24 h | Timeout for one Gitleaks / OSV-Scanner / Semgrep run. The process tree is killed when it expires. |
-| `llmIdleTimeoutMs` | integer (ms) | `120000` (2 min) | 1 s–1 h | A model request whose stream sends nothing for this long (the wait for the first chunk included) is abandoned and retried with backoff as a transient `TIMEOUT` (at most 4 attempts per turn). Raise it for slow reasoning models that stay silent for long stretches. |
+| `llmFirstChunkTimeoutMs` | integer (ms) | `600000` (10 min) | 1 s–1 h | How long a model request may wait for its first stream chunk. Providers can hold queued requests for minutes under load. When it expires the request is abandoned and retried with backoff as a transient `TIMEOUT` (at most 4 attempts per turn). Never shorter than `llmIdleTimeoutMs`. |
+| `llmIdleTimeoutMs` | integer (ms) | `120000` (2 min) | 1 s–1 h | Once a model request's stream has started, the longest gap between chunks. A longer gap abandons the request as a transient `TIMEOUT`, retried like above. Raise it for slow reasoning models that stay silent for long stretches mid-answer. |
 | `disableAstGrep` | boolean | `false` | | Never load the native `@ast-grep/napi` engine and always use the built-in tokenizer. |
 
 ### Overriding operator config
@@ -149,7 +150,8 @@ retain their separate four-attempts-per-turn bound. Crash recovery does not rese
 failed tasks remain completed with gaps; start a new scan to review them again.
 
 Pending tasks are replanned with current inputs/priority, including after a plugin version change. Tasks whose
-files/endpoints disappeared are skipped without a model request. Done/running task records are never rewritten;
+files/endpoints disappeared are skipped without a model request; a Planner hypothesis whose files disappeared still
+runs, starting with a search. Done/running task records are never rewritten;
 new endpoints in an already-completed group get a separate task. Only one queued/running scan is allowed per
 canonical workspace, including when resuming a different scan.
 
@@ -165,11 +167,19 @@ These defaults apply when no budget has been saved. Updating the plugin does not
 change them in Settings to use the new values. Each model reply may execute up to 48 tool calls;
 further calls receive an error result. Concurrency and retry limits are independent of these budgets.
 
+The AI phases share one budget, so hunting stops early enough to leave a reserve: about 6 AI requests for each
+finding that will get an independent review (at most 30% of the AI requests in Deep, 35% in Research, none in
+Quick), 12 for the Research attack-chain run (at most 5%), and 2 per reviewer working at once so that a reviewer
+the budget stops mid-task can still submit what it found (at most 5%). Tokens and minutes are reserved in the same
+proportion. Hunt tasks that do not fit are skipped with a notice and run after **Add budget**, and
+Deep and Research schedule low-priority file sweeps only as far as the remaining hunt budget pays for (about 12
+requests each).
+
 Token usage is charged at the reported uncached input, cache writes and output at full rate, and cache reads at a
 tenth, approximating typical provider cache pricing; the usage figures shown for a scan use the same charge. When a
 scan ends with work skipped because a budget ran out, its results page names that budget and offers **Add budget**
-(+50%, +100% or +300%): the scan's own budget grows by the chosen percentage of whichever dimensions ran out (still clamped to
-`maxTokensPerScan` / `maxLlmCallsPerScan`), and the skipped work continues in the same scan. Settings budgets for
+(+50%, +100% or +300%): the scan's own budget grows by the chosen percentage of whichever dimensions ran out
+(still clamped to `maxTokensPerScan` / `maxLlmCallsPerScan`), and the skipped work continues in the same scan. Settings budgets for
 future scans are not changed by extending one scan.
 
 Clamping happens when settings are read and written. A stored value above a lowered operator ceiling is reduced the

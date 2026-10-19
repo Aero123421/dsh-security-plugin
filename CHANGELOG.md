@@ -17,6 +17,9 @@ changes; they are called out explicitly.
 - The project picker shows each project's state: scanning, queued, paused, or the open findings of its last scan.
   A queued scan names the project whose scan it waits for and links to it. While any scan is queued or running,
   the page polls the active scans of all projects (every 5 seconds, 10 seconds while the tab is hidden).
+- Operator setting `llmFirstChunkTimeoutMs` (default 10 minutes): how long a model request may wait for its first
+  stream chunk. `llmIdleTimeoutMs` (default 2 minutes) now applies only once the stream has started, so queued
+  requests at busy providers are no longer abandoned after 2 minutes.
 
 ### Changed
 
@@ -33,12 +36,64 @@ changes; they are called out explicitly.
 - Adding a project folder from the header selects it without opening New scan.
 - Offer **Add budget** only when a budget limit stopped scheduled AI work, not for every incomplete review.
 - Tasks skipped because their target file no longer exists no longer count as unfinished AI review work.
+- Deep and Research scans keep part of the budget for the independent review. Hunting stops at a ceiling that
+  reserves about 6 AI requests per finding awaiting review (at most 30% in Deep, 35% in Research), the Research
+  attack-chain run, and one wrap-up request per running reviewer. Lower-priority hunt tasks that do not fit are
+  skipped with the notice `hunt-budget-reserved` and run after **Add budget**; low-priority file
+  sweeps are planned only as far as the budget pays for them. Before, hunters could spend the whole budget and
+  leave most findings without a review (8 of 56 reviewed in a Deep probe; 46 of 56 now).
+- A reviewer stopped by the budget mid-task now gets one wrap-up request to submit what it found, instead of
+  losing all of its work. On its last request, a submission is accepted with what verifies, list entries that do
+  not fit the schema are dropped, and other tool calls are refused with a note instead of discarding the run. A
+  missed last turn gets one grace request.
+- Workers see the same tool list on every request (stable prompt cache), are reminded to submit at 75% of their
+  turns, and are told how many replies a task allows. Plain-text replies end a run only when three come in a row,
+  not three over the whole run.
+- Quote verification undoes harmless copy mistakes before matching: line-number prefixes of other formats
+  (`12: `, `12 | `, `12→`, `L12: `, `cat -n`, `path:12: `), code fences, escaped or typographic quotes, HTML
+  entities, full-width punctuation, a trailing `;`, and `...`/`…` for skipped lines (every fragment of 12 or more
+  characters must occur in order in the cited window). The stored quote and snippet are always the file's own span.
+  Rejected citations now come back with where the quote stops matching and the file's actual lines. In a probe of
+  313 realistic citation variants, 275 verify instead of 149.
+- A cited range much wider than its quote is no longer rejected outright: it verifies when the quote occurs once in
+  the file. A quote that repeats in the file is bound only to the copy on the cited lines; a few lines off, it is
+  reported as ambiguous with the candidate lines instead of being bound to a nearby identical line.
+- Hunter submissions keep their verified findings across resubmissions (up to 3), ask once for missing rule-hit
+  verdicts, and send back an empty submission made before reading any code once. The unused `confidence`,
+  `reviewed_paths` and `notes` fields were removed from `submit_findings`; models that still send them are accepted.
+  Submit tools accept common argument mistakes (`null`, JSON-encoded strings, numeric strings, enum spelling, camelCase
+  keys) instead of rejecting the whole submission.
+- The Planner's hypotheses beyond the mode's limit are dropped instead of sending the whole threat model back. Its
+  target paths are resolved against the snapshot (directories, near matches, symbol names), a hypothesis with no
+  existing file is asked about once with suggestions and otherwise still runs as a search, and hypothesis tasks are
+  no longer skipped as stale. Hunters now receive the threat model's actors and trust boundaries, Planner priorities
+  rank tasks up, and rule hits in a hypothesis's files are attached to it.
+- `search_code` runs a pattern that looks like a regular expression as one when a literal search finds nothing,
+  within the same per-call limits, and says so.
+- Workers ask for temperature 0.2 when the model's details show it is not a reasoning model; a provider that
+  rejects it is retried without one.
+- When a planned independent review did not complete (budget, failure, review cap), a hunter's verified-code
+  dismissal of a rule hit now makes it `inconclusive`, as it already did without a reviewer.
 
 ### Fixed
 
 - Closing a dialog no longer moves focus back to its opener when another dialog has already taken focus. Escape
   closes the topmost dialog even when focus has left it.
 - The folder browser's breadcrumb has its own accessible name instead of repeating "Folder path".
+- In Deep and Research, rule hits beyond the 12 attached to an endpoint file's first task were never assigned to a
+  hunter. They now get their own tasks.
+- Planner hypotheses whose paths were slightly off (a missing directory, a directory, a symbol name) were skipped as
+  stale; in a probe 7 of 8 were lost.
+- Tool calls of a reply cut off at the output limit were parsed from partial arguments and replayed. They are now
+  dropped, and the model is told which calls to resend.
+- Context compaction kept only the last two tool results, including in the middle of the latest reply's batch. It
+  now elides the oldest results first, never the latest reply's, names the elided call, and runs before a request
+  would exceed a known context window.
+- A model route that answers without ever calling a tool no longer burns every task: after two such tasks in a row
+  its remaining tasks are skipped with the notice `model-no-tools`.
+- Tool schemas no longer carry meaningless `minimum`/`maximum` bounds of ±(2^53 − 1) on integer fields.
+- Skeptic task messages label host-checked excerpts as "quote found in the repository (not a verdict)", and the
+  reviewer is told that a SQL string alone or a search without callers does not refute a finding.
 
 ## [0.4.0] - 2026-10-18
 
