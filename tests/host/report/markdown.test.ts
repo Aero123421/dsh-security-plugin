@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { Coverage } from '../../../src/shared/contracts.ts'
 import { renderMarkdown } from '../../../src/host/report/markdown.ts'
 import { codeSpan, fencedCode, inline, paragraphs } from '../../../src/host/report/markdown-escape.ts'
 import { finding, reportInput, scanDetail } from './fixtures.ts'
@@ -360,5 +361,63 @@ describe('Markdown escaping of untrusted text', () => {
     expect(codeSpan('`x`')).toBe('`` `x` ``')
     expect(codeSpan('a|b', true)).toBe('`a\\|b`')
     expect(codeSpan('   ')).toBe('')
+  })
+})
+
+describe('renderMarkdown coverage ledger', () => {
+  const base = scanDetail().coverage!
+  const ledger: Coverage = {
+    ...base,
+    unassignedFiles: 3,
+    units: [
+      {
+        id: 'u1',
+        title: 'Order API',
+        surface: 'GET /orders/:id',
+        focus: ['authz'],
+        paths: ['src/orders.ts'],
+        status: 'finding',
+        findings: 2,
+        origin: 'recon',
+      },
+      {
+        id: 'u2',
+        title: 'Webhooks',
+        focus: ['ssrf'],
+        paths: ['src/hooks.go', 'src/client.go', 'src/retry.go'],
+        status: 'blocked',
+        findings: 0,
+        reason: { code: 'needs-runtime', params: { note: 'Depends on the egress proxy.' }, fallback: 'x' },
+        origin: 'critic',
+      },
+      {
+        id: 'unassigned',
+        title: '3 source files not assigned to any review unit',
+        focus: [],
+        paths: ['a.php', 'b.php', 'c.php'],
+        status: 'not-run',
+        findings: 0,
+        reason: { code: 'budget', params: { count: 3 }, fallback: 'x' },
+        origin: 'gap',
+      },
+    ],
+  }
+
+  it('lists what was and was not examined, unexamined first', () => {
+    const md = renderMarkdown(reportInput({ scan: scanDetail({}, { coverage: ledger }) }))
+    expect(md).toContain('**Review units**')
+    expect(md).toContain('0 examined without findings · 1 with findings · 1 undecided · 1 not examined')
+    expectInOrder(md, [
+      '| Not examined | Source files in no review unit (3) · added from the analyzers | a.php, b.php, … | The scan budget ran out. |',
+      '| Undecided | Webhooks · coverage check | src/hooks.go, src/client.go, … | Depends on runtime or deployment the source does not show. Depends on the egress proxy. |',
+      '| Findings (2) | Order API · review plan | GET /orders/:id |   |',
+    ])
+  })
+
+  it('is localized, and absent without a ledger', () => {
+    const md = renderMarkdown(reportInput({ scan: scanDetail({}, { coverage: ledger }), language: 'ja' }))
+    expect(md).toContain('**レビュー単位**')
+    expect(md).toContain('| 未確認 | どのレビュー単位にも入らなかったソースファイル (3) · アナライザーから追加 |')
+    expect(renderMarkdown(reportInput())).not.toContain('Review units')
   })
 })

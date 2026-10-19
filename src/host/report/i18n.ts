@@ -4,7 +4,7 @@
  * English ids.
  */
 
-import type { ReportLanguage } from '../../shared/contracts.ts'
+import type { CoverageUnit, CoverageUnitStatus, ReportLanguage } from '../../shared/contracts.ts'
 import type {
   Closure,
   FindingSource,
@@ -87,6 +87,21 @@ export interface ReportLabels {
     readonly noGaps: string
     readonly notices: string
     readonly missing: string
+    /** The coverage ledger: what the AI review set out to examine and what became of each part. */
+    readonly units: string
+    readonly unitsLine: (covered: string, finding: string, blocked: string, notRun: string) => string
+    readonly unitColumns: {
+      readonly status: string
+      readonly unit: string
+      readonly where: string
+      readonly note: string
+    }
+    readonly unitStatus: Readonly<Record<CoverageUnitStatus, string>>
+    readonly unitOrigin: Readonly<Record<CoverageUnit['origin'], string>>
+    /** Reason texts by `CoverageUnit.reason.code`; unknown codes use the Host's fallback text. */
+    readonly unitReasons: Readonly<Record<string, string>>
+    readonly unassignedFiles: string
+    readonly unitsMore: (count: number) => string
   }
 
   readonly threatModel: {
@@ -246,6 +261,25 @@ const EN: ReportLabels = {
     noGaps: 'No coverage gaps were recorded.',
     notices: 'Scan notices',
     missing: 'Coverage was not recorded for this scan (it may not have finished).',
+    units: 'Review units',
+    unitsLine: (covered, finding, blocked, notRun) =>
+      `${covered} examined without findings · ${finding} with findings · ${blocked} undecided · ${notRun} not examined`,
+    unitColumns: { status: 'Status', unit: 'Unit', where: 'Where', note: 'Note' },
+    unitStatus: { covered: 'Examined', finding: 'Findings', blocked: 'Undecided', 'not-run': 'Not examined' },
+    unitOrigin: { recon: 'review plan', critic: 'coverage check', gap: 'added from the analyzers' },
+    unitReasons: {
+      budget: 'The scan budget ran out.',
+      'task-limit': 'Beyond the task limit for this mode.',
+      failed: 'The review did not finish.',
+      'consent-revoked': 'Sending code to models was turned off.',
+      'provider-rejected': 'The model provider rejected the request.',
+      'no-tools': 'The model answered without calling tools.',
+      'stale-target': 'Its files or endpoints no longer exist.',
+      'needs-runtime': 'Depends on runtime or deployment the source does not show.',
+      partial: 'The reviewer could not finish this part.',
+    },
+    unassignedFiles: 'Source files in no review unit',
+    unitsMore: count => `${count} more units are listed in the JSON report.`,
   },
 
   threatModel: {
@@ -421,6 +455,25 @@ const JA: ReportLabels = {
     noGaps: '記録された抜け漏れはありません。',
     notices: 'スキャン中の通知',
     missing: 'このスキャンのカバレッジは記録されていません（完了していない可能性があります）。',
+    units: 'レビュー単位',
+    unitsLine: (covered, finding, blocked, notRun) =>
+      `検出なしで確認 ${covered} · 検出あり ${finding} · 判断保留 ${blocked} · 未確認 ${notRun}`,
+    unitColumns: { status: '状態', unit: 'レビュー単位', where: '対象', note: '補足' },
+    unitStatus: { covered: '確認済み', finding: '検出あり', blocked: '判断保留', 'not-run': '未確認' },
+    unitOrigin: { recon: 'レビュー計画', critic: 'カバレッジ確認', gap: 'アナライザーから追加' },
+    unitReasons: {
+      budget: 'スキャンの予算を使い切りました。',
+      'task-limit': 'このモードのタスク上限を超えました。',
+      failed: 'レビューが完了しませんでした。',
+      'consent-revoked': 'モデルへのコード送信がオフにされました。',
+      'provider-rejected': 'モデルのプロバイダーがリクエストを拒否しました。',
+      'no-tools': 'モデルがツールを呼ばずに回答しました。',
+      'stale-target': '対象のファイルやエンドポイントがなくなりました。',
+      'needs-runtime': 'ソースからは分からない実行環境やデプロイ設定に依存します。',
+      partial: 'レビュー担当がこの部分を最後まで確認できませんでした。',
+    },
+    unassignedFiles: 'どのレビュー単位にも入らなかったソースファイル',
+    unitsMore: count => `ほか ${count} 件のレビュー単位は JSON レポートにあります。`,
   },
 
   threatModel: {
@@ -596,6 +649,25 @@ const ZH: ReportLabels = {
     noGaps: '没有记录到覆盖缺口。',
     notices: '扫描提示',
     missing: '本次扫描未记录覆盖范围（扫描可能尚未完成）。',
+    units: '审查单元',
+    unitsLine: (covered, finding, blocked, notRun) =>
+      `已审查且无发现 ${covered} · 有发现 ${finding} · 无法判定 ${blocked} · 未审查 ${notRun}`,
+    unitColumns: { status: '状态', unit: '审查单元', where: '位置', note: '说明' },
+    unitStatus: { covered: '已审查', finding: '有发现', blocked: '无法判定', 'not-run': '未审查' },
+    unitOrigin: { recon: '审查计划', critic: '覆盖检查', gap: '根据分析器补充' },
+    unitReasons: {
+      budget: '扫描预算已用完。',
+      'task-limit': '超出了此模式的任务上限。',
+      failed: '审查未完成。',
+      'consent-revoked': '已关闭向模型发送代码。',
+      'provider-rejected': '模型提供方拒绝了请求。',
+      'no-tools': '模型没有调用工具就作答了。',
+      'stale-target': '相关文件或接口已不存在。',
+      'needs-runtime': '取决于源代码中看不到的运行时或部署配置。',
+      partial: '审查者未能完成这一部分。',
+    },
+    unassignedFiles: '未纳入任何审查单元的源文件',
+    unitsMore: count => `其余 ${count} 个审查单元见 JSON 报告。`,
   },
 
   threatModel: {
