@@ -78,7 +78,7 @@ fingerprint is retained for matching across scans. Different credentials, even o
 | `azure-storage-key` | Azure storage or service-bus key | critical | high |
 | `jwt` | JSON Web Token | medium | medium |
 | `database-url` | DB / broker URL with inline password, including driver schemes such as `postgresql+asyncpg://` (placeholder and default passwords dropped or downgraded) | high | high |
-| `generic-secret` | Hard-coded password / token / API key assignment | medium | low |
+| `generic-secret` | Hard-coded password / token / API key assignment (keys with `password`, `pass`, `pwd`, `secret`, `api_key`, `token`, `private_key` or `credentials`) | medium | low |
 | `env-secret` | Secret value in an `.env`-style file, or an unquoted upper-case environment setting in YAML (compose `environment:`, CI `env:`, Kubernetes Secret data) | medium | medium |
 
 ## Pattern rules (SAST, `src/host/analysis/sast/`)

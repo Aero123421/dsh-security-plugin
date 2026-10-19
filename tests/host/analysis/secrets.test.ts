@@ -156,6 +156,16 @@ describe('secret rules', () => {
     expect(scanOne(text, 'app/config.py').map(m => m.ruleId)).toEqual(['database-url'])
   })
 
+  it('reads a `pass` key (nodemailer `auth: { user, pass }`, `smtpPass`) but not `passport`-like words', () => {
+    const pass = j('Mg-Smtp-', '9xK2mL4pN6')
+    expect(scanOne(`auth: { user: 'postmaster@mg.acme.dev', pass: '${pass}' }`).map(m => m.ruleId)).toEqual([
+      'generic-secret',
+    ])
+    expect(scanOne(`const smtpPass = '${pass}'`).map(m => m.ruleId)).toEqual(['generic-secret'])
+    expect(scanOne(`passThrough: '${pass}'`)).toEqual([])
+    expect(scanOne(`passenger: '${pass}'`)).toEqual([])
+  })
+
   it.each([
     ['a Mailgun key', `apiKey: '${j('key-', '7d2c9f4a1e8b3d6f0a5c2e9b4d7f1a3c')}'`],
     ['a secret that names itself and carries a number', "secretOrKey: 'nest-app-jwt-secret-2024'"],
@@ -188,6 +198,7 @@ describe('secret rules', () => {
       '    environment:',
       `      POSTGRES_PASSWORD: ${j('Pg-Pr0d-', 'S3cret-2024')}`,
       '      MYSQL_ROOT_PASSWORD: postgres',
+      '      POSTGRES_PASSWORD: mysecretpassword',
       '      MYSQL_PASSWORD: changeme-in-production',
       '      API_TOKEN_HEADER: X-Api-Token',
       '      SECRET_KEY: !vault |',
@@ -202,12 +213,14 @@ describe('secret rules', () => {
       '      TOKEN_AUDIENCE: billing.api.internal',
       '      TOKEN_EXPIRED: Your session token has expired',
       '      password: Xk29dLm4Qp7Zr8Wv',
+      `      REDIS_PASSWORD: ${j('Pg-Acme-', '2024-x9')}`,
     ]
     const matches = scanFileContent('docker-compose.yml', lines.join('\n'), { language: 'yaml' })
     expect(matches.map(m => [m.ruleId, m.line])).toEqual([
       ['env-secret', 5],
       ['env-secret', 6],
       ['env-secret', 11],
+      ['env-secret', 28],
     ])
     // Windows line endings, and only in YAML.
     const crlf = lines.slice(0, 6).join('\r\n')

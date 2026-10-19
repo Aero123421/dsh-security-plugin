@@ -295,7 +295,7 @@ const RULES: readonly SecretRule[] = [
     id: 'generic-secret',
     description: 'Hard-coded password, token, or API key',
     pattern:
-      /(?<kw>pass(?:word|wd|phrase)|pwd|secret|api[_-]?key|token|private[_-]?key|credentials?)(?<suffix>[A-Za-z0-9_-]{0,40})["']?\s*(?::=|=>|===?|:|=)\s*(?<q>["'`])(?<secret>[^"'`\s\\]{12,256})\k<q>/dgi,
+      /(?<kw>pass(?:word|wd|phrase)|pass(?![a-z])|pwd|secret|api[_-]?key|token|private[_-]?key|credentials?)(?<suffix>[A-Za-z0-9_-]{0,40})["']?\s*(?::=|=>|===?|:|=)\s*(?<q>["'`])(?<secret>[^"'`\s\\]{12,256})\k<q>/dgi,
     severity: 'medium',
     confidence: 'low',
     keywords: ['pass', 'pwd', 'secret', 'api_key', 'apikey', 'api-key', 'token', 'private', 'credential'],
@@ -333,7 +333,7 @@ const RULES: readonly SecretRule[] = [
     severity: 'medium',
     confidence: 'medium',
     keywords: ['pass', 'pwd', 'secret', 'key', 'token', 'credential'],
-    minEntropy: 3.5,
+    minEntropy: 3,
     generic: true,
     languages: ['yaml'],
     refine: ({ secret, groups }) => refineSetting(secret, groups.key ?? ''),
@@ -356,6 +356,15 @@ const PLACEHOLDER_PASSWORDS: ReadonlySet<string> = new Set([
   'dbpassword',
   'db_password',
   'user:password',
+])
+/** Passwords from container image documentation (`POSTGRES_PASSWORD: mysecretpassword`), not real credentials. */
+const IMAGE_EXAMPLE_PASSWORDS: ReadonlySet<string> = new Set([
+  'mysecretpassword',
+  'my-secret-pw',
+  'my_secret_pw',
+  'secretpassword',
+  'example',
+  'rootpassword',
 ])
 const WEAK_DEFAULT_PASSWORDS: ReadonlySet<string> = new Set([
   'postgres',
@@ -895,6 +904,7 @@ function isIdentifierValue(value: string): boolean {
  */
 function refineSetting(secret: string, key: string): SecretConfidence | false | undefined {
   if (KEY_NAME_EXCLUDE.test(key) || EXISTING_SECRET_KEY.test(key)) return false
+  if (PLACEHOLDER_PASSWORDS.has(secret.toLowerCase()) || IMAGE_EXAMPLE_PASSWORDS.has(secret.toLowerCase())) return false
   if (/_(?:HEADER|COOKIE|ISSUER|AUDIENCE|SCOPES?|REF|PROVIDER|BACKEND)$/.test(key)) return false
   if (/^(?:true|false|yes|no|on|off|null|none|~)$/i.test(secret) || /^[\d.,:_-]+$/.test(secret)) return false
   if (secret.includes('://') || /^(?:ENC\[|arn:|vault:)/i.test(secret)) return false

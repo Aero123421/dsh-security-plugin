@@ -37,7 +37,8 @@ changes; they are called out explicitly.
 - Scan unquoted upper-case environment settings in YAML for secrets (`- JWT_SECRET=…` and `POSTGRES_PASSWORD: …`
   in docker-compose, CI `env:` blocks, Kubernetes Secret data), reported as `env-secret`. These values are now
   also redacted when a compose file or manifest is shown to the AI review. Values that only point at a secret
-  (`${VAR}`, YAML anchors and tags, SOPS `ENC[…]`, ARNs and secret-manager paths) are ignored.
+  (`${VAR}`, YAML anchors and tags, SOPS `ENC[…]`, ARNs and secret-manager paths) and the example passwords of
+  container image docs (`mysecretpassword`) are ignored.
 
 ### Changed
 
@@ -168,9 +169,10 @@ changes; they are called out explicitly.
   Next.js `cookies()`, or from a same-file helper that reads the `Authorization` header or a cookie
   (`jwt.decode(getBearer(req))`). Only functions that read the `Authorization` header themselves were checked,
   so admin checks on a decoded cookie token were missed.
-- Find hard-coded secrets that were dropped: database URLs with a driver scheme (`postgresql+asyncpg://`), and
+- Find hard-coded secrets that were dropped: database URLs with a driver scheme (`postgresql+asyncpg://`),
   Mailgun `key-…` keys and hand-written secrets such as `app-jwt-secret-2024`, which the identifier filter took
-  for names. Helm `existingSecret` references are ignored.
+  for names, and passwords under a `pass` key (nodemailer `auth: { user, pass }`, `smtpPass`). Helm
+  `existingSecret` references are ignored.
 - Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
   and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
 
