@@ -159,35 +159,75 @@ export function describeUnresolved(unresolved: UnitResolution['unresolved'], too
   return `Some units name no file that exists in this repository:\n${lines.join('\n')}\nUse workspace-relative paths as list_files shows them; a directory stands for its files and a function or class name for the file that defines it. Call ${tool} again with corrected target_paths for these units (resend the whole submission). Units whose files still cannot be found are dropped.`
 }
 
+/** What a planner's reason text claims; the Host still has to see it in the files. */
 const EXCLUSION_REASONS: readonly [RegExp, ExcludedReason][] = [
-  [/vendor|third[\s_-]?party|external|bundled/i, 'vendored'],
-  [/generat|compiled|minif|build output|dist\b/i, 'generated'],
+  [/vendor|third[\s_-]?party|bundled|upstream/i, 'vendored'],
+  [/generat|compiled|minif|build output|\bdist\b/i, 'generated'],
   [/fixture|sample|example|mock|test data/i, 'fixtures'],
-  [/\bdoc/i, 'docs'],
+  [/\bdoc(?:s|umentation)?\b/i, 'docs'],
 ]
 
+const VENDOR_DIR =
+  /(?:^|\/)(?:vendor|vendors|vendored|third[_-]?party|external|deps|node_modules|bower_components|Pods)(?:\/|$)/i
+/** Directories and file names that code generators use. */
+const GENERATED_PATH =
+  /(?:^|\/)(?:generated|__generated__|gen|autogen)\/|\.(?:pb|pb\.gw|g|gen|generated|min)\.[^/.]+$|_pb2(?:_grpc)?\.py$/i
+const DOCS_DIR = /(?:^|\/)(?:docs?|documentation)\//i
+const DOC_FILE = /\.(?:md|mdx|markdown|rst|adoc|txt)$/i
+/** Fixture and example directories (not test directories: whether tests are reviewed is the user's setting). */
+const FIXTURE_DIR =
+  /(?:^|\/)(?:fixtures|__fixtures__|testdata|test[_-]data|examples?|samples?|__mocks__|mocks|stubs)\//i
+
+/** Exclusion reasons the Host can see in a file's path or content itself. */
+function hostExclusionReasons(file: SnapshotFile): Set<ExcludedReason> {
+  const reasons = new Set<ExcludedReason>()
+  if (VENDOR_DIR.test(file.path)) reasons.add('vendored')
+  if (file.isGenerated || GENERATED_PATH.test(file.path)) reasons.add('generated')
+  if (DOCS_DIR.test(file.path) || DOC_FILE.test(file.path) || file.language === 'markdown') reasons.add('docs')
+  if (FIXTURE_DIR.test(file.path)) reasons.add('fixtures')
+  return reasons
+}
+
+export interface ExclusionContext {
+  /** Snapshot files a model may see. */
+  readonly files: readonly SnapshotFile[]
+  /** Files with detected endpoints or rule hits: never excluded. */
+  readonly protectedPaths: ReadonlySet<string>
+}
+
 /**
- * Reconnaissance exclusions with a valid reason (vendored, generated, docs,
- * fixtures), cleaned to workspace-relative files or directories that exist
- * in the snapshot. The workspace root itself can never be excluded.
+ * The planner's exclusions the Host can corroborate. The reason text must
+ * claim vendored, generated, docs or fixtures, and every snapshot file under
+ * the path must carry such a marker itself: a vendor or third-party
+ * directory, generated content or a generator's directory or file name, a
+ * documentation directory or file type, or a fixture/example directory. A
+ * path holding a detected endpoint or rule hit is never excluded, nor is the
+ * workspace root. The stored reason is the claimed one when every file bears
+ * it out, otherwise the Host's most common one. At most 50 are kept.
  */
 export function validExclusions(
   raw: readonly { readonly path: string; readonly reason: string }[],
-  paths: readonly string[],
+  context: ExclusionContext,
 ): { readonly path: string; readonly reason: ExcludedReason }[] {
   const out = new Map<string, ExcludedReason>()
   for (const entry of raw) {
-    const reason = EXCLUSION_REASONS.find(([pattern]) => pattern.test(entry.reason))?.[1]
+    const claimed = EXCLUSION_REASONS.find(([pattern]) => pattern.test(entry.reason))?.[1]
     const path = cleanModelPath(entry.path)?.replace(/\/+$/, '')
-    if (!reason || !path || path === '.' || out.has(path)) continue
-    if (!paths.some(file => file === path || file.startsWith(`${path}/`))) continue
-    out.set(path, reason)
+    if (!claimed || !path || path === '.' || out.has(path)) continue
+    const under = context.files.filter(file => file.path === path || file.path.startsWith(`${path}/`))
+    if (under.length === 0 || under.some(file => context.protectedPaths.has(file.path))) continue
+    const reasons = under.map(hostExclusionReasons)
+    if (reasons.some(set => set.size === 0)) continue
+    out.set(path, reasons.every(set => set.has(claimed)) ? claimed : mostCommon(reasons))
   }
   return [...out.entries()].slice(0, 50).map(([path, reason]) => ({ path, reason }))
 }
 
-const VENDOR_DIR =
-  /(?:^|\/)(?:vendor|vendors|third[_-]?party|external|deps|node_modules|bower_components|Pods)(?:\/|$)/i
+function mostCommon(reasons: readonly ReadonlySet<ExcludedReason>[]): ExcludedReason {
+  const counts = new Map<ExcludedReason, number>()
+  for (const set of reasons) for (const reason of set) counts.set(reason, (counts.get(reason) ?? 0) + 1)
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'generated'
+}
 
 /**
  * A bounded directory overview for reconnaissance: one row per directory

@@ -41,7 +41,7 @@ const POLYGLOT: Record<string, string> = {
   'app/Http/Controllers/UserController.php': '<?php\nclass UserController { public function show($id) { } }\n',
   'internal/api/handlers.go': 'package api\n\nfunc Export(w http.ResponseWriter, r *http.Request) {}\n',
   'cmd/server/main.go': 'package main\n\nfunc main() {}\n',
-  'tools/upstream/lib.go': 'package upstream\n\nfunc Helper() {}\n',
+  'third_party/upstream/lib.go': 'package upstream\n\nfunc Helper() {}\n',
   'docs/architecture.md': '# Architecture\n',
 }
 
@@ -135,7 +135,11 @@ const polyglotPlan = () => ({
     unit('User admin', 'app/Http/Controllers/UserController.php', { surface: 'GET /users/{id}' }),
     unit('Export API', 'internal/api/handlers.go', { component: 'export' }),
   ],
-  excluded: [{ path: 'tools/upstream', reason: 'vendored copy of an upstream tool' }],
+  excluded: [
+    { path: 'third_party/upstream', reason: 'vendored copy of an upstream tool' },
+    // Hand-written code the planner calls generated stays in the review.
+    { path: 'cmd/server', reason: 'generated code' },
+  ],
 })
 
 async function scan(
@@ -179,7 +183,8 @@ describe('reconnaissance units in any language', () => {
         paths: expect.arrayContaining(['src/main/java/com/shop/OrderController.java']),
       },
     ])
-    expect(record?.threatModel?.excluded).toEqual([{ path: 'tools/upstream', reason: 'vendored' }])
+    expect(record?.threatModel?.excluded).toEqual([{ path: 'third_party/upstream', reason: 'vendored' }])
+    expect(h.events(id).some(e => e.type === 'plan-exclusions-refused')).toBe(true)
     const units = h.store.listTasks(id).filter(t => t.kind === 'hunt-unit')
     expect(units).toHaveLength(3)
     expect(units.every(t => t.status === 'done')).toBe(true)
@@ -199,7 +204,9 @@ describe('reconnaissance units in any language', () => {
     const swept = ledger.filter(u => u.origin === 'gap').flatMap(u => u.paths)
     expect(swept.sort()).toEqual(['cmd/server/main.go', 'src/main/java/com/shop/AuthFilter.java'])
     expect(record?.coverage?.unassignedFiles).toBe(0)
-    expect(record?.coverage?.gapDetails).toContainEqual(expect.objectContaining({ code: 'excluded-by-plan' }))
+    expect(record?.coverage?.gapDetails).toContainEqual(
+      expect.objectContaining({ code: 'excluded-by-plan', params: { count: 1, paths: 'third_party/upstream' } }),
+    )
     // Quick has no critic; Deep runs one pass.
     expect(h.store.listTasks(id).filter(t => t.kind === 'critic')).toHaveLength(mode === 'quick' ? 0 : 1)
   })
@@ -417,6 +424,8 @@ describe('resume', () => {
                 hypotheses: [
                   { title: 'Order IDOR', category: 'authz', targetPaths: ['src/routes/orders.ts'], rationale: 'r' },
                 ],
+                // Stored before the Host checked exclusions: checked again on resume.
+                excluded: [{ path: 'src/middleware', reason: 'generated' }],
               },
             }
           : {}),
@@ -456,6 +465,8 @@ describe('resume', () => {
     const ledger = h.store.getScan('old-deep')?.coverage?.units ?? []
     expect(ledger.find(u => u.id === 'hypothesis:0123456789abcdef')).toMatchObject({ origin: 'recon' })
     expect(ledger.find(u => u.id === 'file:src/middleware/auth.ts')).toMatchObject({ origin: 'gap' })
+    expect(h.store.getScan('old-deep')?.coverage?.gapDetails?.some(g => g.code === 'excluded-by-plan')).toBe(false)
+    expect(ledger.flatMap(u => u.paths)).toContain('src/middleware/auth.ts')
     expect(h.store.listTasks('old-quick').find(t => t.key === 'endpoints:src/routes/orders.ts#0')?.status).toBe('done')
   })
 })

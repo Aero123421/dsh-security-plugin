@@ -90,6 +90,7 @@ import {
   CRITIC_UNITS,
   coverageLedger,
   directoryTree,
+  type ExclusionContext,
   HUNT_TASK_KINDS,
   RECON_UNITS,
   type RawUnit,
@@ -196,6 +197,8 @@ export class ScanJob {
   private criticPassesLeft = 0
   /** What limited the source sweep of this run's hunt plan (for the ledger's unassigned files). */
   private sweepLimit: 'task-limit' | 'budget' | undefined
+  /** The stored plan's exclusions the Host confirmed in this run (see `planExclusions`). */
+  private exclusions: string[] | undefined
   private analysis!: AnalysisContext
   private scan: ScanRecord
   private discarded = 0
@@ -523,10 +526,16 @@ export class ScanJob {
           paths: [...new Set(component.paths.flatMap(path => resolve(path).paths))].slice(0, 10),
         })),
         units: out.units,
-        excluded: validExclusions(
-          out.excluded,
-          visibleFiles.map(f => f.path),
-        ),
+        excluded: validExclusions(out.excluded, this.exclusionContext()),
+      }
+      const refused = out.excluded.length - (threatModel.excluded?.length ?? 0)
+      if (refused > 0) {
+        this.event(
+          'info',
+          'plan-exclusions-refused',
+          `${refused} path(s) the review plan wanted to leave out stay in the review: the Host could not confirm them as vendored, generated, documentation or fixture code, or they hold endpoints or rule hits.`,
+          { refused },
+        )
       }
       this.scan = this.deps.store.updateScan(this.scan.id, { threatModel })
       this.completeTask(task, { units: out.units.length, dropped: out.dropped })
@@ -578,7 +587,7 @@ export class ScanJob {
       endpoints: this.modelEndpoints(),
       signals: this.analysis.signals,
       units: threatModel?.units ?? [],
-      excluded: [...(threatModel?.excluded ?? []).map(entry => entry.path)],
+      excluded: this.planExclusions(),
       targeted: new Set(storedTargets),
       includeTests: this.scan.settings.scan.includeTests,
       // Task slots for the critic's units stay free (at most a fifth of the task limit).
@@ -669,7 +678,7 @@ export class ScanJob {
       ...store.listAgentRuns(this.scan.id).flatMap(run => run.filesRead),
       ...queued.flatMap(t => t.input.targetPaths),
     ])
-    const excluded = (this.scan.threatModel?.excluded ?? []).map(entry => entry.path)
+    const excluded = this.planExclusions()
     const unread = sweepCandidates(snapshot, path => this.inScope(path) && !isExcludedPath(path, excluded), read)
     const reviewed = new Set(
       [...hunts.filter(t => t.status === 'done'), ...queued].flatMap(t => t.input.endpointIds ?? []),
@@ -1585,12 +1594,43 @@ export class ScanJob {
    * In-scope, hand-written source files no hunt task targets (whatever became
    * of the task), except those the review plan excluded with a valid reason.
    */
-  private unassignedFiles(tasks: readonly TaskRecord[]): { readonly paths: string[]; readonly excluded: number } {
+  private unassignedFiles(tasks: readonly TaskRecord[]): {
+    readonly paths: string[]
+    readonly excluded: number
+    /** Plan exclusions that left out at least one such file. */
+    readonly excludedBy: string[]
+  } {
     const targeted = new Set(tasks.filter(t => HUNT_TASK_KINDS.has(t.kind)).flatMap(t => t.input.targetPaths))
-    const excluded = (this.scan.threatModel?.excluded ?? []).map(entry => entry.path)
+    const excluded = this.planExclusions()
     const candidates = sweepCandidates(this.analysis.snapshot, path => this.inScope(path), targeted)
     const paths = candidates.filter(f => !isExcludedPath(f.path, excluded)).map(f => f.path)
-    return { paths, excluded: candidates.length - paths.length }
+    const left = candidates.filter(f => isExcludedPath(f.path, excluded))
+    const excludedBy = excluded.filter(entry => left.some(f => isExcludedPath(f.path, [entry])))
+    return { paths, excluded: left.length, excludedBy }
+  }
+
+  /** What the Host checks a plan exclusion against: the files a model may see, and those it must review. */
+  private exclusionContext(): ExclusionContext {
+    const { snapshot, privacy, endpoints, signals } = this.analysis
+    return {
+      files: [...snapshot.files.values()].filter(f => !privacy.isWithheld(f.path)),
+      protectedPaths: new Set([
+        ...endpoints.flatMap(e => [e.declaredAt.path, ...(e.handler ? [e.handler.path] : [])]),
+        ...signals.filter(s => s.kind !== 'dependency' && s.kind !== 'info').map(s => s.location.path),
+      ]),
+    }
+  }
+
+  /**
+   * The stored plan's exclusions, checked again against this run's snapshot
+   * (a resumed scan's files may have changed, and plans stored by earlier
+   * versions were not checked by the Host).
+   */
+  private planExclusions(): string[] {
+    const stored = this.scan.threatModel?.excluded ?? []
+    if (stored.length === 0) return []
+    this.exclusions ??= validExclusions(stored, this.exclusionContext()).map(entry => entry.path)
+    return this.exclusions
   }
 
   private inScopeEndpoints() {
@@ -1703,8 +1743,8 @@ export class ScanJob {
     if (unassigned && unassigned.excluded > 0) {
       gap(
         'excluded-by-plan',
-        `${unassigned.excluded} source file(s) were left out of the AI review as vendored, generated, documentation or fixture code by the review plan.`,
-        { count: unassigned.excluded },
+        `${unassigned.excluded} source file(s) were left out of the AI review as vendored, generated, documentation or fixture code by the review plan: ${excludedList(unassigned.excludedBy)}.`,
+        { count: unassigned.excluded, paths: excludedList(unassigned.excludedBy) },
       )
     }
     for (const analyzer of this.maskedAnalyzers()) {
@@ -1892,6 +1932,12 @@ function withTimeout<V>(promise: Promise<V>, ms: number): Promise<V | undefined>
       },
     )
   })
+}
+
+/** Plan exclusions for a diagnostic: the first ten paths, then how many more. */
+function excludedList(paths: readonly string[]): string {
+  const shown = paths.slice(0, 10).join(', ')
+  return paths.length > 10 ? `${shown} (+${paths.length - 10} more)` : shown
 }
 
 function numberOf(value: string | number | boolean | undefined): number {
