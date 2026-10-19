@@ -668,7 +668,7 @@ export class ScanJob {
         known,
         frameworks: this.analysis.inventory.frameworks,
       }),
-      submit: hunterSubmitTool(this.analysis.quoteSource),
+      submit: hunterSubmitTool(this.analysis.quoteSource, { signalIds: [...signalIds.keys()] }),
       maxTurns: this.scan.budget.maxTurnsPerWorker,
     })
     if (result.status !== 'submitted' || !result.output) {

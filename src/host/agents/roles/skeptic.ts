@@ -19,6 +19,7 @@ import {
   describeMismatches,
   isVerifiedCode,
   severitySchema,
+  submitCoercion,
   systemPreamble,
   type VerifiedCitation,
   verifyCitation,
@@ -39,10 +40,12 @@ const verdictSchema = z.object({
   counterevidence: z
     .array(citationSchema)
     .max(6)
+    .default([])
     .describe('Required for "refuted": the exact code of the defense or of what makes the path unreachable.'),
   supporting_evidence: z
     .array(citationSchema)
     .max(6)
+    .default([])
     .describe('For "confirmed": code you checked that shows the path is reachable and undefended.'),
   severity: severitySchema
     .optional()
@@ -52,7 +55,7 @@ const verdictSchema = z.object({
   missing_information: z
     .array(z.string().min(1).max(300))
     .max(6)
-    .optional()
+    .default([])
     .describe('For "inconclusive": facts outside the repository that decide the outcome.'),
   localized: localizedSchema.optional(),
 })
@@ -118,9 +121,11 @@ export function skepticSubmitTool(source: QuoteSource, maxRejections = 2): Worke
     name: 'submit_verdict',
     description: 'Submit your verdict on the reported issue. This ends your work.',
     input: verdictSchema,
+    coerce: submitCoercion(verdictSchema),
     terminal: {
-      validate: args => {
-        if (args.verdict !== 'refuted') return undefined
+      validate: (args, context) => {
+        // On the last request the verdict is kept; the host downgrades an unsupported refutation itself.
+        if (args.verdict !== 'refuted' || context.final) return undefined
         const verified = args.counterevidence.map(c => verifyCitation(source, c))
         if (verified.some(isVerifiedCode)) return undefined
         if (rejections >= maxRejections) {
@@ -140,7 +145,7 @@ export function skepticSubmitTool(source: QuoteSource, maxRejections = 2): Worke
         counterevidence: args.counterevidence.map(c => verifyCitation(source, c)),
         supporting: args.supporting_evidence.map(c => verifyCitation(source, c)),
         ...(args.severity ? { severity: args.severity } : {}),
-        missingInformation: args.missing_information ?? [],
+        missingInformation: args.missing_information,
         ...(args.localized ? { localized: args.localized } : {}),
       }),
     },

@@ -46,7 +46,6 @@ function hunter(attackPath: readonly VerifiedCitation[]): HunterFinding {
     category: 'authz',
     cwe: 'CWE-639',
     severity: 'high',
-    confidence: 'high',
     summary: 'Missing ownership.',
     impact: 'Reads private data.',
     preconditions: [],
@@ -56,7 +55,7 @@ function hunter(attackPath: readonly VerifiedCitation[]): HunterFinding {
     references: [],
   }
 }
-const output = (findings: HunterFinding[]) => ({ findings, assessments: [], reviewedPaths: [] })
+const output = (findings: HunterFinding[]) => ({ findings, assessments: [] })
 const review = (overrides: Partial<SkepticOutput> = {}): SkepticOutput => ({
   verdict: 'confirmed',
   reasoning: 'Reviewed.',

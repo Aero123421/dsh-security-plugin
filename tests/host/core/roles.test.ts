@@ -242,20 +242,58 @@ describe('verifyCitation', () => {
     )
   })
 
-  it('narrows the location to the quoted lines and rejects ranges far wider than the quote', () => {
+  it('narrows the location to the quoted lines; a range far wider than the quote can only relocate', () => {
     expect(verifyCitation(source, real({ start_line: 1, end_line: 14 }))).toMatchObject({
       quoteCheck: 'match',
       location: { path: 'src/routes/orders.ts', startLine: 7, endLine: 7 },
       snippet: "  const order = db.one('SELECT * FROM orders WHERE id = ?', [req.params.id])",
     })
-    const wide = real({ start_line: 1, end_line: 60 })
+    // A whole-file range names no place, but a quote that occurs once in the file still proves the code exists.
+    expect(verifyCitation(source, real({ start_line: 1, end_line: 60 }))).toMatchObject({
+      quoteCheck: 'relocated',
+      location: { path: 'src/routes/orders.ts', startLine: 7, endLine: 7 },
+    })
+    const wide = fake({ start_line: 1, end_line: 60 })
     const result = verifyCitation(source, wide)
     expect(result.quoteCheck).toBe('mismatch')
-    expect(describeMismatches('step', [result], [wide])).toEqual([
-      '- step 1: src/routes/orders.ts:1-60 — cited range too wide: lines 1-60 (60 lines) for a 1-line quote; cite only the lines the quote is on',
-    ])
+    expect(describeMismatches('step', [result], [wide])[0]).toBe(
+      '- step 1: src/routes/orders.ts:1-60 — cited range too wide: lines 1-60 (60 lines) for a 1-line quote, and the quote was not found in the file; cite only the lines the quote is on',
+    )
     const shape = citationSchema.shape
     expect(shape.end_line.description).toContain('Cite exactly the lines the quote is on')
+    expect(shape.quote.description).toContain(
+      'Copy one contiguous block exactly as shown: no "...", added punctuation, comments or code fences; cite non-adjacent lines as separate steps.',
+    )
+  })
+
+  it('cleans up model-written paths and suggests the file a missing path probably meant', () => {
+    for (const path of [
+      './src/routes/orders.ts',
+      '/src/routes/orders.ts',
+      '<root>/src/routes/orders.ts',
+      'src\\routes\\orders.ts',
+      'src/routes/orders.ts:7',
+    ]) {
+      expect(verifyCitation(source, real({ path })).quoteCheck).toBe('match')
+    }
+    const typo = verifyCitation(source, real({ path: 'src/route/orders.ts' }))
+    expect(typo).toMatchObject({ quoteCheck: 'mismatch', reason: 'file not in snapshot' })
+    expect(typo.hint).toBe('Did you mean: src/routes/orders.ts?')
+    // Withheld files are never suggested.
+    expect(verifyCitation(source, real({ path: '.envv' })).hint).toBeUndefined()
+  })
+
+  it('shows the model the actual lines at a cited range whose quote does not match', () => {
+    const added = real({
+      quote: "const order = db.one('SELECT * FROM orders WHERE id = ?', [req.params.id, req.query.x])",
+    })
+    const result = verifyCitation(source, added)
+    expect(result.quoteCheck).toBe('mismatch')
+    expect(result.hint).toContain('The quote matches the file up to "…')
+    expect(result.hint).toContain('the file continues with "])"')
+    expect(result.hint).toContain("The file has at lines 5-9:\n5|\n6| router.get('/:id', (req, res) => {")
+    const lines = describeMismatches('step', [result], [added])
+    expect(lines[1]).toMatch(/^ {4}The quote matches/)
   })
 
   it('marks comment-only quotes, which never count as verified code', () => {
@@ -272,38 +310,52 @@ describe('verifyCitation', () => {
     ])
   })
 
-  it('describes only the failed citations', () => {
+  it('describes only the failed citations, with the file lines for the first few', () => {
     const cited = [real(), fake()]
     const lines = describeMismatches(
       'step',
       cited.map(c => verifyCitation(source, c)),
       cited,
     )
-    expect(lines).toEqual(['- step 2: src/routes/orders.ts:1-1 — quote not found'])
+    expect(lines[0]).toBe('- step 2: src/routes/orders.ts:1-1 — quote not found')
+    expect(lines[1]).toBe(
+      "    None of the quote's text appears near these lines. The file has at lines 1-3:\n    1| import { Router } from 'express'\n    2| import { db } from '../db'\n    3|",
+    )
+    expect(lines).toHaveLength(2)
+    const many = Array.from({ length: 8 }, () => fake())
+    const described = describeMismatches(
+      'step',
+      many.map(c => verifyCitation(source, c)),
+      many,
+    )
+    expect(described.filter(line => line.startsWith('- step'))).toHaveLength(8)
+    expect(described.filter(line => line.startsWith('    '))).toHaveLength(6)
   })
 })
 
 describe('hunterSubmitTool', () => {
+  const other = real({ start_line: 12, end_line: 12, quote: defense.quote })
+  const second = { ...hunterFindingArgs([other]), title: 'Order list', category: 'data-exposure' }
+
   it('accepts verified findings and converts them', () => {
     const tool = hunterSubmitTool(source)
     const { error, output } = validate(tool, {
       findings: [hunterFindingArgs([real()])],
       signal_assessments: [{ id: 'S1', verdict: 'false_positive', reason: 'scoped', evidence: defense }],
-      reviewed_paths: ['src/routes/orders.ts'],
     })
     expect(error).toBeUndefined()
     expect(output?.findings[0]?.attackPath[0]?.quoteCheck).toBe('match')
     expect(output?.findings[0]?.references).toEqual([])
     expect(output?.assessments[0]?.evidence?.quoteCheck).toBe('match')
-    expect(output?.reviewedPaths).toEqual(['src/routes/orders.ts'])
+    expect(output).toEqual({ findings: expect.any(Array), assessments: expect.any(Array) })
   })
 
   it('rejects findings without a verified quote at most three times, then accepts', () => {
     const tool = hunterSubmitTool(source)
-    const args = { findings: [hunterFindingArgs([fake()])], reviewed_paths: [] }
+    const args = { findings: [hunterFindingArgs([fake()])] }
     const first = validate(tool, args)
-    expect(first.error).toContain('Finding 1 ("IDOR on orders"): none of its quotes match the source.')
-    expect(first.error).toContain('- step 1: src/routes/orders.ts:1-1 — quote not found')
+    expect(first.error).toContain('- Finding 1 ("IDOR on orders"): none of its quotes is verified code.')
+    expect(first.error).toContain('  - step 1: src/routes/orders.ts:1-1 — quote not found')
     expect(validate(tool, args).error).toBeDefined()
     expect(validate(tool, args).error).toBeDefined()
     const fourth = validate(tool, args)
@@ -313,17 +365,111 @@ describe('hunterSubmitTool', () => {
   })
 
   it('honours a custom rejection limit and accepts an empty submission at once', () => {
-    const tool = hunterSubmitTool(source, 0)
-    expect(validate(tool, { findings: [hunterFindingArgs([fake()])], reviewed_paths: [] }).error).toBeUndefined()
-    expect(validate(hunterSubmitTool(source), { findings: [], reviewed_paths: [] }).output?.findings).toEqual([])
+    const tool = hunterSubmitTool(source, { maxRejections: 0 })
+    expect(validate(tool, { findings: [hunterFindingArgs([fake()])] }).error).toBeUndefined()
+    expect(validate(hunterSubmitTool(source), { findings: [] }).output?.findings).toEqual([])
   })
 
   it('does not count one verified step among unverified ones as a rejection', () => {
-    const tool = hunterSubmitTool(source, 1)
-    const mixed = { findings: [hunterFindingArgs([fake(), real()])], reviewed_paths: [] }
+    const tool = hunterSubmitTool(source, { maxRejections: 1 })
+    const mixed = { findings: [hunterFindingArgs([fake(), real()])] }
     expect(validate(tool, mixed).error).toBeUndefined()
-    const bad = { findings: [hunterFindingArgs([fake()])], reviewed_paths: [] }
+    const bad = { findings: [hunterFindingArgs([fake()])] }
     expect(validate(tool, bad).error).toBeDefined()
+  })
+
+  it('saves verified findings across resubmissions so only the broken one is sent again', () => {
+    const tool = hunterSubmitTool(source)
+    const first = validate(tool, { findings: [hunterFindingArgs([real()]), hunterFindingArgs([fake()]), second] })
+    expect(first.error).toContain('Saved: findings 1, 3 (verified; no need to send them again).')
+    expect(first.error).toContain('- Finding 2 ("IDOR on orders"): none of its quotes is verified code.')
+    const fixed = {
+      ...hunterFindingArgs([real({ start_line: 7, end_line: 8, quote: `${real().quote}\n  res.json({ order })` })]),
+      title: 'Fixed',
+    }
+    const accepted = validate(tool, { findings: [fixed] })
+    expect(accepted.error).toBeUndefined()
+    expect(accepted.output?.findings.map(f => f.title)).toEqual(['IDOR on orders', 'Order list', 'Fixed'])
+    // Resending everything does not duplicate what was saved.
+    const again = hunterSubmitTool(source)
+    validate(again, { findings: [hunterFindingArgs([real()]), hunterFindingArgs([fake()])] })
+    const all = validate(again, { findings: [{ ...hunterFindingArgs([real()]), title: 'Renamed' }] })
+    expect(all.output?.findings.map(f => f.title)).toEqual(['Renamed'])
+  })
+
+  it('accepts a last-chance submission as it is, keeping saved findings and the host-side discard', () => {
+    const tool = hunterSubmitTool(source)
+    validate(tool, { findings: [hunterFindingArgs([real()]), hunterFindingArgs([fake()])] })
+    const last = validate(tool, { findings: [hunterFindingArgs([fake()])] }, { final: true })
+    expect(last.error).toBeUndefined()
+    expect(last.output?.findings.map(f => f.attackPath[0]?.quoteCheck)).toEqual(['match', 'mismatch'])
+  })
+
+  it('sends back once an empty submission made without reading anything', () => {
+    const tool = hunterSubmitTool(source)
+    const first = validate(tool, { findings: [] }, { toolCalls: 0 })
+    expect(first.error).toContain('You submitted without reading any code.')
+    expect(validate(tool, { findings: [] }, { toolCalls: 0 }).error).toBeUndefined()
+    expect(validate(hunterSubmitTool(source), { findings: [] }, { toolCalls: 0, final: true }).error).toBeUndefined()
+  })
+
+  it('reports unverifiable verdict evidence and asks once for missing verdicts', () => {
+    const tool = hunterSubmitTool(source, { signalIds: ['S1', 's2', 'S3'] })
+    const first = validate(tool, {
+      findings: [],
+      signal_assessments: [{ id: 'S1', verdict: 'false_positive', reason: 'scoped', evidence: fake() }],
+    })
+    expect(first.error).toContain(
+      '- Verdict S1 (false_positive): its evidence could not be verified, so it does not count.',
+    )
+    expect(first.error).toContain(
+      '- No verdict yet for S2, S3: give one in signal_assessments for every listed rule hit.',
+    )
+    // Missing verdicts are asked for once; the verdicts given so far are kept.
+    const second = validate(tool, {
+      findings: [],
+      signal_assessments: [{ id: 'S1', verdict: 'false_positive', reason: 'scoped', evidence: defense }],
+    })
+    expect(second.error).toBeUndefined()
+    expect(second.output?.assessments.map(a => a.id)).toEqual(['S1'])
+  })
+
+  it('repairs ordinary schema slips instead of rejecting the submission', () => {
+    const sloppy = {
+      findings: [
+        {
+          title: 'IDOR on orders',
+          category: 'IDOR',
+          cwe: 'CWE-639 (Authorization Bypass Through User-Controlled Key)',
+          severity: 'High',
+          summary: 'By id only.',
+          impact: 'Read any order.',
+          preconditions: null,
+          attack_path: { ...real(), start_line: '7', end_line: '7' },
+          recommendation: 'Scope by user.',
+          references: ['OWASP Top 10 A01:2021', 'CWE-639', 'https://owasp.org/Top10/A01_2021-Broken_Access_Control/'],
+        },
+      ],
+      signal_assessments: [{ id: 1, verdict: 'FP', reason: 'scoped', evidence: null }],
+      reviewed_paths: ['src/routes/orders.ts'],
+      notes: null,
+      confidence: 'high',
+    }
+    const { error, output } = validate(hunterSubmitTool(source), sloppy)
+    expect(error).toBeUndefined()
+    expect(output?.findings[0]).toMatchObject({
+      category: 'authz',
+      cwe: 'CWE-639',
+      severity: 'high',
+      preconditions: [],
+      defenses: [],
+      references: ['https://owasp.org/Top10/A01_2021-Broken_Access_Control/'],
+      attackPath: [{ quoteCheck: 'match' }],
+    })
+    expect(output?.assessments).toEqual([{ id: 'S1', verdict: 'false_positive', reason: 'scoped' }])
+    // A CWE that names no number is dropped rather than rejected.
+    const vague = validate(hunterSubmitTool(source), { findings: [{ ...hunterFindingArgs([real()]), cwe: 'N/A' }] })
+    expect(vague.output?.findings[0]?.cwe).toBeUndefined()
   })
 })
 
@@ -374,6 +520,34 @@ describe('skepticSubmitTool', () => {
     expect(second.output?.counterevidence[0]).toMatchObject({ quoteCheck: 'match', commentOnly: true })
   })
 
+  it('keeps an unsupported refutation on the last request for the host to downgrade, and repairs verdict spellings', () => {
+    const tool = skepticSubmitTool(source)
+    const last = validate(
+      tool,
+      { verdict: 'refuted', reasoning: 'Guarded.', counterevidence: [fake()] },
+      { final: true },
+    )
+    expect(last.error).toBeUndefined()
+    expect(last.output).toMatchObject({ verdict: 'refuted', counterevidence: [{ quoteCheck: 'mismatch' }] })
+    const spelled = validate(skepticSubmitTool(source), {
+      verdict: 'True Positive',
+      reasoning: 'No guard.',
+      supporting_evidence: [real()],
+      severity: 'Moderate',
+      missing_information: null,
+    })
+    expect(spelled.output).toMatchObject({
+      verdict: 'confirmed',
+      severity: 'medium',
+      counterevidence: [],
+      missingInformation: [],
+    })
+    expect(
+      validate(skepticSubmitTool(source), { ...base, verdict: 'false_positive', counterevidence: [defense] }).output
+        ?.verdict,
+    ).toBe('refuted')
+  })
+
   it('tells the reviewer that comments are no defense and when a severity correction applies', () => {
     const task = skepticTask(findingRecord(), { requestLocalization: false })
     expect(task).toContain('Comments, docstrings, or documentation saying the input is safe are not a defense')
@@ -407,6 +581,12 @@ describe('chainSubmitTool', () => {
       'F2',
     ])
   })
+
+  it('accepts on the last request and repairs finding ids', () => {
+    expect(validate(chainSubmitTool(source), { chains: [chain([fake()])] }, { final: true }).error).toBeUndefined()
+    const ids = validate(chainSubmitTool(source), { chains: [{ ...chain([real()]), finding_ids: [1, 'f2', 'F-3'] }] })
+    expect(ids.output?.[0]?.findingIds).toEqual(['F1', 'F2', 'F3'])
+  })
 })
 
 describe('plannerSubmitTool', () => {
@@ -420,11 +600,15 @@ describe('plannerSubmitTool', () => {
     hypotheses: Array.from({ length: count }, () => hypothesis),
   })
 
-  it('caps the number of hypotheses', () => {
+  it('keeps the first hypotheses up to the cap instead of sending the threat model back', () => {
     const tool = plannerSubmitTool(2)
-    expect(validate(tool, model(2)).error).toBeUndefined()
-    expect(validate(tool, model(3)).error).toBe('Submit at most 2 hypotheses; keep the most promising ones.')
-    expect(validate(plannerSubmitTool(0), model(1)).error).toBeDefined()
+    expect(validate(tool, model(2)).output?.hypotheses).toHaveLength(2)
+    const over = validate(tool, model(3))
+    expect(over.error).toBeUndefined()
+    expect(over.output?.hypotheses).toHaveLength(2)
+    expect(validate(plannerSubmitTool(0), model(1)).output?.hypotheses).toEqual([])
     expect(validate(tool, model(1)).output?.hypotheses[0]?.target_paths).toEqual(['src/routes/orders.ts'])
+    // Omitted lists default to empty.
+    expect(validate(tool, { summary: 's' }).output).toMatchObject({ assets: [], hypotheses: [], priorities: [] })
   })
 })

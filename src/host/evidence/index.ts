@@ -5,6 +5,7 @@
 
 export { commentMask, isCommentOnlyRange } from './comments.ts'
 export {
+  cleanModelPath,
   isWhitespace,
   type NormalizedText,
   normalizeForMatch,
@@ -16,6 +17,8 @@ export {
   checkStaleness,
   excerpt,
   MAX_EXTRA_CITED_LINES,
+  MAX_GAP_LINES,
+  MIN_GAP_FRAGMENT_CHARS,
   type QuoteSource,
   type QuoteVerification,
   SNIPPET_MAX_CHARS,

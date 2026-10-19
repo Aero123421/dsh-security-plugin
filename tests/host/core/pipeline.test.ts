@@ -888,13 +888,19 @@ describe('provider route rejection circuit breaker', () => {
       release = resolve
     })
     let started = 0
-    const llm = scriptedLlm(async function* () {
+    const llm = scriptedLlm(async function* (options) {
       if (++started === 1) {
         yield* failingStream('INVALID_REQUEST', rejection)
-      } else {
-        await held
-        yield* callReply('submit', 'submit_findings', { findings: [], reviewed_paths: [] })
+        return
       }
+      if (started === 2) await held
+      // Read something first and give the rule-hit verdict: an empty submission made without reading anything,
+      // or one missing verdicts, is sent back once.
+      const read = options.messages.some(message => message.role === 'tool')
+      const verdicts = [{ id: 'S1', verdict: 'uncertain', reason: 'Not checked in this test.' }]
+      yield* read
+        ? callReply('submit', 'submit_findings', { findings: [], signal_assessments: verdicts })
+        : callReply('ls', 'list_files', {})
     })
     const h = createHarness({
       llm,
@@ -906,7 +912,7 @@ describe('provider route rejection circuit breaker', () => {
     expect(h.store.listTasks(scan.id, ['running'])).toHaveLength(1)
     release()
     expect(await h.settle(scan.id)).toBe('completed')
-    expect(llm.calls).toHaveLength(2)
+    expect(llm.calls).toHaveLength(3)
     expect(h.store.listTasks(scan.id, ['done'])).toHaveLength(1)
   })
 

@@ -53,7 +53,6 @@ function hunterFinding(overrides: Partial<HunterFinding> = {}): HunterFinding {
     category: 'authz',
     cwe: 'CWE-639',
     severity: 'high',
-    confidence: 'high',
     summary: 'Orders are loaded by id only.',
     impact: 'Customers read other customers orders.',
     preconditions: ['attacker has an account'],
@@ -69,7 +68,7 @@ function hunterFinding(overrides: Partial<HunterFinding> = {}): HunterFinding {
 }
 
 function hunterOutput(findings: HunterFinding[], assessments: HunterOutput['assessments'] = []): HunterOutput {
-  return { findings, assessments, reviewedPaths: [] }
+  return { findings, assessments }
 }
 
 function hunterCtx(overrides: Partial<HunterRecordContext> = {}): HunterRecordContext {

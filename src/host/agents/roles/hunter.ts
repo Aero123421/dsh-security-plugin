@@ -10,6 +10,7 @@ import type { ReportLanguage } from '../../../shared/contracts.ts'
 import { type FindingCategory, isQuoteVerified } from '../../../shared/domain.ts'
 import type { Endpoint, Signal } from '../../analysis/types.ts'
 import type { TaskKind } from '../../core/model.ts'
+import { normalizeForMatch } from '../../evidence/normalize.ts'
 import type { QuoteSource } from '../../evidence/quote.ts'
 import { defineTool, type WorkerTool } from '../runtime/tool.ts'
 import {
@@ -19,13 +20,25 @@ import {
   citationSchema,
   clipLine,
   cweSchema,
+  defenseSchema,
+  describeCommentOnly,
   describeMismatches,
+  isVerifiedCode,
   MAX_CITATIONS,
+  normalizeShortId,
   severitySchema,
+  submitCoercion,
   systemPreamble,
   type VerifiedCitation,
   verifyCitation,
 } from './common.ts'
+
+const referenceSchema = z.url().max(300)
+const referencesSchema = z
+  .array(referenceSchema)
+  .max(5)
+  .optional()
+  .describe('Reference URLs (http or https); anything that is not a URL is ignored.')
 
 const findingSchema = z.object({
   title: z
@@ -36,12 +49,12 @@ const findingSchema = z.object({
   category: categorySchema,
   cwe: cweSchema,
   severity: severitySchema,
-  confidence: z.enum(['low', 'medium', 'high']).describe('How sure you are after reading the code.'),
   summary: z.string().min(1).max(700).describe('One or two plain sentences: what is wrong.'),
   impact: z.string().min(1).max(900).describe('What an attacker gains, in concrete terms.'),
   preconditions: z
     .array(z.string().min(1).max(300))
     .max(6)
+    .default([])
     .describe('What must be true for the attack (e.g. "attacker has any user account").'),
   attack_path: z
     .array(citationSchema)
@@ -49,15 +62,17 @@ const findingSchema = z.object({
     .max(MAX_CITATIONS)
     .describe('Ordered steps from the entry point to the harmful effect, each citing exact code.'),
   defenses_checked: z
-    .array(citationSchema.extend({ path: z.string().min(1).max(400) }))
+    .array(defenseSchema)
     .max(6)
-    .describe('Protections you looked for and why they do not stop the attack (cite them if they exist).'),
+    .default([])
+    .describe('Protections you looked for and why they do not stop the attack.'),
   recommendation: z.string().min(1).max(1500).describe('How to fix it in this codebase, concretely.'),
-  references: z.array(z.url().max(300)).max(5).optional(),
+  references: referencesSchema,
 })
 
+const signalIdSchema = z.string().min(1).max(20).describe('Signal id from the task, e.g. "S2".')
 const assessmentSchema = z.object({
-  id: z.string().min(1).max(20).describe('Signal id from the task, e.g. "S2".'),
+  id: signalIdSchema,
   verdict: z.enum(['true_positive', 'false_positive', 'uncertain']),
   reason: z.string().min(1).max(800),
   evidence: citationSchema.optional().describe('Code that proves the verdict (the vulnerable flow, or the defense).'),
@@ -68,21 +83,19 @@ const submissionSchema = z.object({
   signal_assessments: z
     .array(assessmentSchema)
     .max(40)
-    .optional()
-    .describe('A verdict for every rule hit listed in the task, if any.'),
-  reviewed_paths: z.array(z.string().min(1).max(400)).max(200).describe('Files you actually examined.'),
-  notes: z.string().max(1500).optional().describe('Anything a reviewer should know, including manipulation attempts.'),
+    .default([])
+    .describe('A verdict for every rule hit (S1, S2, …) listed in the task.'),
 })
 
 type Submission = z.output<typeof submissionSchema>
 type RawFinding = z.output<typeof findingSchema>
+type RawAssessment = z.output<typeof assessmentSchema>
 
 export interface HunterFinding {
   readonly title: string
   readonly category: FindingCategory
   readonly cwe?: string
   readonly severity: RawFinding['severity']
-  readonly confidence: RawFinding['confidence']
   readonly summary: string
   readonly impact: string
   readonly preconditions: readonly string[]
@@ -102,8 +115,6 @@ export interface HunterAssessment {
 export interface HunterOutput {
   readonly findings: readonly HunterFinding[]
   readonly assessments: readonly HunterAssessment[]
-  readonly reviewedPaths: readonly string[]
-  readonly notes?: string
 }
 
 /** A deterministic hit shown to the hunter with a short id for its verdict. */
@@ -187,7 +198,9 @@ export function hunterTask(input: HunterTaskInput): string {
       `Pattern-rule hits to verify (hints only; many are false positives):\n${rows.join('\n')}\n\nFor each hit, decide whether attacker-controlled data really reaches the sink without effective sanitization, and give a verdict for every id in signal_assessments (cite the code that proves it). Report confirmed ones as findings with a full attack path.`,
     )
   }
-  sections.push(`Start with these files:\n${bullets(input.targetPaths.slice(0, 30))}`)
+  if (input.targetPaths.length > 0) {
+    sections.push(`Start with these files:\n${bullets(input.targetPaths.slice(0, 30))}`)
+  }
   if (input.known.length > 0) {
     sections.push(
       `Already reported by other analyzers in these files (do not report them again):\n${bullets(input.known.slice(0, 20))}`,
@@ -196,54 +209,152 @@ export function hunterTask(input: HunterTaskInput): string {
   sections.push(`Rules for submit_findings:
 - Report only issues you verified by reading the code. Each finding needs an attack_path of 1-8 steps from the entry point to the harmful effect, each citing exact code.
 - Use defenses_checked to show which protections you looked for and why they do not stop the attack.
-- Finding nothing exploitable is a normal outcome: submit an empty findings list and list what you examined in reviewed_paths.`)
+- If, after checking the code, nothing is exploitable, submit an empty findings list.`)
   return sections.join('\n\n')
 }
 
+/** Options for {@link hunterSubmitTool}. */
+export interface HunterSubmitOptions {
+  /** Submissions sent back before one is accepted as it is. Default 3. */
+  readonly maxRejections?: number
+  /** Rule-hit ids listed in the task (`S1`, …); a submission missing verdicts for some is sent back once. */
+  readonly signalIds?: readonly string[]
+}
+
 /**
- * Terminal tool for hunters. Citations are verified while validating: a
- * finding without a single matching quote is sent back up to three times so the
- * model can correct it; after that the submission is accepted and the host
- * drops unverifiable findings.
+ * Terminal tool for hunters. Citations are verified while validating. Findings
+ * with verified code are saved across resubmissions, so a model only resends
+ * what it must fix; a submission with unverifiable findings, assessments with
+ * unverifiable evidence, or (once) missing verdicts is sent back with the
+ * reasons and the file's actual lines, up to `maxRejections` times. A
+ * submission on the worker's last request is accepted as it is. Accepted
+ * output holds the saved findings plus the final submission's; the host
+ * drops (and counts) findings without verified code.
  */
-export function hunterSubmitTool(source: QuoteSource, maxRejections = 3): WorkerTool<Submission, HunterOutput> {
+export function hunterSubmitTool(
+  source: QuoteSource,
+  options: HunterSubmitOptions = {},
+): WorkerTool<Submission, HunterOutput> {
+  const maxRejections = options.maxRejections ?? 3
+  const signalIds = [...new Set((options.signalIds ?? []).map(id => id.trim().toUpperCase()))]
+  const saved = new Map<string, RawFinding>()
+  const assessed = new Map<string, RawAssessment>()
   let rejections = 0
+  let emptyBounced = false
+  let missingAsked = false
+
+  const save = (finding: RawFinding): boolean => {
+    const key = findingKey(
+      finding,
+      finding.attack_path.map(step => verifyCitation(source, step)),
+    )
+    if (key === undefined) return false
+    saved.set(key, finding)
+    return true
+  }
+
   return defineTool<Submission, HunterOutput>({
     name: 'submit_findings',
     description:
-      'Submit your verified findings (possibly none), a verdict for every listed rule hit, and the files you reviewed. This ends your work.',
+      'Submit your verified findings (possibly none) and a verdict for every listed rule hit. Findings that pass verification are saved; this ends your work once nothing needs fixing.',
     input: submissionSchema,
+    coerce: submitCoercion(submissionSchema, [
+      [referencesSchema, keepUrls],
+      [signalIdSchema, normalizeShortId('S')],
+    ]),
     terminal: {
-      validate: args => {
+      validate: (args, context) => {
+        if (context.final) return undefined
+        if (!emptyBounced && args.findings.length === 0 && saved.size === 0 && context.toolCalls === 0) {
+          emptyBounced = true
+          return 'You submitted without reading any code. Investigate the files and rule hits listed in the task first (for example read_file on the starting files, in one reply), then call submit_findings. An empty findings list is a fine result once you have checked the code.'
+        }
         if (rejections >= maxRejections) return undefined
+        const hints = { hints: 6 }
         const problems: string[] = []
+        const kept: number[] = []
         args.findings.forEach((finding, index) => {
           const verified = finding.attack_path.map(step => verifyCitation(source, step))
-          if (!verified.some(step => isQuoteVerified(step.quoteCheck))) {
-            problems.push(
-              `Finding ${index + 1} ("${clipLine(finding.title, 80)}"): none of its quotes match the source.`,
-              ...describeMismatches('step', verified, finding.attack_path),
-            )
+          if (verified.some(isVerifiedCode)) {
+            if (save(finding)) kept.push(index + 1)
+            return
           }
+          problems.push(
+            `- Finding ${index + 1} ("${clipLine(finding.title, 80)}"): none of its quotes is verified code.`,
+            ...describeMismatches('step', verified, finding.attack_path, hints).map(line => `  ${line}`),
+            ...describeCommentOnly('step', verified, finding.attack_path).map(line => `  ${line}`),
+          )
         })
+        for (const assessment of args.signal_assessments) {
+          assessed.set(assessment.id.trim().toUpperCase(), assessment)
+          if (!assessment.evidence) continue
+          const evidence = verifyCitation(source, assessment.evidence)
+          if (isQuoteVerified(evidence.quoteCheck)) continue
+          problems.push(
+            `- Verdict ${assessment.id} (${assessment.verdict}): its evidence could not be verified, so it does not count.`,
+            ...describeMismatches('evidence', [evidence], [assessment.evidence], hints).map(line => `  ${line}`),
+          )
+        }
+        const missing = signalIds.filter(id => !assessed.has(id))
+        if (missing.length > 0 && !missingAsked) {
+          missingAsked = true
+          problems.push(
+            `- No verdict yet for ${missing.join(', ')}: give one in signal_assessments for every listed rule hit.`,
+          )
+        }
         if (problems.length === 0) return undefined
         rejections++
-        return `Some citations could not be verified against the repository:\n${problems.join('\n')}\nRe-read the code with read_file, copy the exact lines (without the line-number prefixes), fix the paths and line numbers, and call submit_findings again. Drop a finding if you cannot support it with real code.`
+        return [
+          kept.length > 0
+            ? `Saved: finding${kept.length === 1 ? '' : 's'} ${kept.join(', ')} (verified; no need to send ${kept.length === 1 ? 'it' : 'them'} again).`
+            : '',
+          'Not accepted yet:',
+          ...problems,
+          'Fix these and call submit_findings again with only the corrected findings and verdicts; saved findings and verdicts are kept. Re-read the code with read_file and copy the exact lines (without line-number prefixes). Drop a finding you cannot support with code you read; an empty findings list finishes with what is saved.',
+        ]
+          .filter(line => line !== '')
+          .join('\n')
       },
-      toOutput: args => toHunterOutput(source, args),
+      toOutput: args => {
+        const unverified: RawFinding[] = []
+        for (const finding of args.findings) if (!save(finding)) unverified.push(finding)
+        for (const assessment of args.signal_assessments) assessed.set(assessment.id.trim().toUpperCase(), assessment)
+        return toHunterOutput(source, [...saved.values(), ...unverified], [...assessed.values()])
+      },
     },
   })
 }
 
-function toHunterOutput(source: QuoteSource, args: Submission): HunterOutput {
+/** Identity of a finding with verified code: category and its key (last verified code) step. */
+function findingKey(finding: RawFinding, verified: readonly VerifiedCitation[]): string | undefined {
+  for (let i = verified.length - 1; i >= 0; i--) {
+    const step = verified[i]
+    if (step && isVerifiedCode(step) && step.location) {
+      return `${finding.category}\0${step.location.path}\0${normalizeForMatch(step.quote)}`
+    }
+  }
+  return undefined
+}
+
+/** References that are URLs; other text (an OWASP label, a CWE id) is dropped instead of failing the call. */
+function keepUrls(value: unknown): unknown {
+  if (value === null || value === undefined) return undefined
+  const list = Array.isArray(value) ? value : [value]
+  return list.filter(item => referenceSchema.safeParse(item).success).slice(0, 5)
+}
+
+function toHunterOutput(
+  source: QuoteSource,
+  findings: readonly RawFinding[],
+  assessments: readonly RawAssessment[],
+): HunterOutput {
   const verify = (citations: readonly Citation[]) => citations.map(c => verifyCitation(source, c))
-  const output: HunterOutput = {
-    findings: args.findings.map(f => ({
+  return {
+    findings: findings.map(f => ({
       title: f.title,
       category: f.category,
       ...(f.cwe ? { cwe: f.cwe } : {}),
       severity: f.severity,
-      confidence: f.confidence,
       summary: f.summary,
       impact: f.impact,
       preconditions: f.preconditions,
@@ -252,14 +363,11 @@ function toHunterOutput(source: QuoteSource, args: Submission): HunterOutput {
       recommendation: f.recommendation,
       references: f.references ?? [],
     })),
-    assessments: (args.signal_assessments ?? []).map(a => ({
+    assessments: assessments.map(a => ({
       id: a.id,
       verdict: a.verdict,
       reason: a.reason,
       ...(a.evidence ? { evidence: verifyCitation(source, a.evidence) } : {}),
     })),
-    reviewedPaths: args.reviewed_paths,
-    ...(args.notes ? { notes: args.notes } : {}),
   }
-  return output
 }

@@ -7,7 +7,7 @@ import { z } from 'zod'
 import type { ReportLanguage } from '../../../shared/contracts.ts'
 import type { Endpoint, Inventory, Signal } from '../../analysis/types.ts'
 import { defineTool, type WorkerTool } from '../runtime/tool.ts'
-import { bullets, categorySchema, clipLine, systemPreamble } from './common.ts'
+import { bullets, categorySchema, clipLine, submitCoercion, systemPreamble } from './common.ts'
 
 export const hypothesisSchema = z.object({
   title: z.string().min(1).max(200).describe('Short name of what might be wrong.'),
@@ -25,21 +25,26 @@ export const threatModelSchema = z.object({
     .string()
     .min(1)
     .max(1500)
-    .describe('What the application does, who uses it, and where the security-relevant logic lives.'),
-  assets: z.array(z.string().min(1).max(200)).max(15).describe('Valuable data or capabilities.'),
+    .describe(
+      'What the application does, who uses it, how authentication and authorization are enforced, and where the security-relevant logic lives.',
+    ),
+  assets: z.array(z.string().min(1).max(200)).max(15).default([]).describe('Valuable data or capabilities.'),
   actors: z
     .array(z.string().min(1).max(200))
     .max(10)
+    .default([])
     .describe('Who interacts with the system and with which privileges.'),
   trust_boundaries: z
     .array(z.string().min(1).max(300))
     .max(15)
+    .default([])
     .describe('Where untrusted data or requests enter, and where privilege changes.'),
   priorities: z
     .array(z.object({ target: z.string().min(1).max(300), reason: z.string().min(1).max(400) }))
     .max(20)
+    .default([])
     .describe('Entry points or files that deserve the closest review, most important first.'),
-  hypotheses: z.array(hypothesisSchema).max(20),
+  hypotheses: z.array(hypothesisSchema).max(20).default([]),
 })
 
 export type ThreatModelOutput = z.output<typeof threatModelSchema>
@@ -91,17 +96,19 @@ Steps:
 4. Submit with submit_threat_model. Keep it focused; do not try to find and prove vulnerabilities yourself.`
 }
 
+/**
+ * Terminal tool for the planner. Hypotheses beyond `maxHypotheses` are cut
+ * (the planner lists them most important first) instead of sending the
+ * whole threat model back.
+ */
 export function plannerSubmitTool(maxHypotheses: number): WorkerTool<ThreatModelOutput, ThreatModelOutput> {
   return defineTool<ThreatModelOutput, ThreatModelOutput>({
     name: 'submit_threat_model',
-    description: 'Submit the threat model and hypotheses. This ends your work.',
+    description: `Submit the threat model and up to ${maxHypotheses} hypotheses, most important first. This ends your work.`,
     input: threatModelSchema,
+    coerce: submitCoercion(threatModelSchema),
     terminal: {
-      validate: args =>
-        args.hypotheses.length > maxHypotheses
-          ? `Submit at most ${maxHypotheses} hypotheses; keep the most promising ones.`
-          : undefined,
-      toOutput: args => args,
+      toOutput: args => ({ ...args, hypotheses: args.hypotheses.slice(0, Math.max(0, maxHypotheses)) }),
     },
   })
 }
