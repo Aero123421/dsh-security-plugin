@@ -35,6 +35,7 @@ import { activityText, analyzerReasonText, diagnosticText, errorText, noticeText
 import { IconPause, IconPlay, IconRefresh, IconStop, IconWarn } from '../icons.tsx'
 import { queueAhead } from '../projects.ts'
 import { overviewFocus } from '../selectors.ts'
+import { LedgerList, LedgerRows } from './CoverageLedger.tsx'
 import { AvailabilityGate, ExportMenu, FindingRow, FirstRun, LoadError, Loading, ViewingBanner } from './shared.tsx'
 
 const NO_EVENTS: readonly ScanEvent[] = []
@@ -1038,6 +1039,7 @@ function CoverageSection(props: {
             </dd>
           </div>
         ) : null}
+        <LedgerRows coverage={coverage} tr={tr} />
         {unavailable.length ? (
           <div className="dshsec-kv-row">
             <dt>{tr.t('coverage.unavailable')}</dt>
@@ -1057,6 +1059,7 @@ function CoverageSection(props: {
           </div>
         ) : null}
       </dl>
+      <LedgerList coverage={coverage} tr={tr} />
       {knownGaps.length || unknownGapCount || props.infos.length ? (
         <div className="dshsec-stack-sm">
           <h4 className="dshsec-h4">{tr.t('coverage.gaps')}</h4>

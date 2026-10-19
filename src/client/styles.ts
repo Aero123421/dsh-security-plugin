@@ -612,6 +612,22 @@ const overview = /* css */ `
 .dshsec-sevsum-item:not(.has-value) .dshsec-sev-dot { background: var(--dshsec-track); }
 .dshsec-sevsum .dshsec-meta { margin-top: 0; }
 .dshsec-coverage .dshsec-kv { gap: 8px; }
+/* Coverage ledger: hairline rows, one small dot per part, details in muted text. */
+.dshsec-units { display: grid; gap: 14px; min-width: 0; margin-top: 14px; }
+.dshsec-units--rest { margin-top: 10px; }
+.dshsec-unit-group { min-width: 0; }
+.dshsec-unit-list { list-style: none; margin: 0; padding: 0; }
+.dshsec-unit { display: grid; grid-template-columns: 7px minmax(0, 1fr); column-gap: 10px; padding: 7px 0; border-top: 1px solid var(--dshsec-line); }
+.dshsec-unit:last-child { border-bottom: 1px solid var(--dshsec-line); }
+.dshsec-unit-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 8px; box-sizing: border-box; background: var(--dshsec-text3); }
+.dshsec-unit.is-covered .dshsec-unit-dot { background: var(--dshsec-ok); }
+.dshsec-unit.is-finding .dshsec-unit-dot { background: var(--dshsec-text); }
+.dshsec-unit.is-not-run .dshsec-unit-dot { background: var(--dshsec-warn); }
+.dshsec-unit.is-blocked .dshsec-unit-dot { background: transparent; border: 1.5px solid var(--dshsec-warn); }
+.dshsec-unit-body { display: grid; gap: 1px; min-width: 0; }
+.dshsec-unit-title { overflow-wrap: anywhere; }
+.dshsec-unit-meta { display: flex; flex-wrap: wrap; gap: 0 14px; font-size: 12.5px; color: var(--dshsec-text3); min-width: 0; }
+.dshsec-unit-meta > span { overflow-wrap: anywhere; min-width: 0; }
 `
 
 const findings = /* css */ `
