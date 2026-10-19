@@ -268,6 +268,10 @@ describe('coverageLedger', () => {
       title: 'Review 1 endpoint in src/routes/orders.ts',
     })
     expect(byId['hypothesis:abc']?.origin).toBe('recon')
+    expect(byId['hypothesis:abc']?.kind).toBe('legacy')
+    expect(byId['endpoints:src/routes/orders.ts#0']?.kind).toBe('endpoints')
+    expect(byId['unit:found']?.kind).toBe('plan')
+    expect(byId.unassigned?.kind).toBeUndefined()
     expect(byId['clean:refresh:0123']?.status).toBe('covered')
     expect(new Set(units.map(u => u.id)).size).toBe(units.length)
     expect(byId.unassigned).toMatchObject({
@@ -279,5 +283,32 @@ describe('coverageLedger', () => {
     // Planner, reviewer and chain tasks are not coverage units.
     expect(units.some(u => u.id === 'threat-model' || u.id === 'review:x')).toBe(false)
     expect(units.every(u => u.reason === undefined || u.reason.fallback.length > 0)).toBe(true)
+  })
+
+  it('tells what produced each Host-made unit, so the UI can localize its title', () => {
+    const made = (key: string, kind: TaskRecord['kind']) =>
+      task(key, { kind, input: { targetPaths: ['src/app.ts'], focus: ['authz'], origin: 'gap' } })
+    const units = coverageLedger({
+      tasks: [
+        made('endpoints:src/app.ts#0', 'hunt-endpoints'),
+        made('signals:src/app.ts#0', 'hunt-signals'),
+        made('triage:src/app.ts#0', 'triage-signals'),
+        made('sweep:0123456789abcdef', 'hunt-file'),
+        made('file:src/app.ts', 'hunt-file'),
+        made('hypothesis:abc', 'hunt-hypothesis'),
+      ],
+      findings: [],
+      evidence: [],
+      endpoints: new Map(),
+      unassigned: { paths: [], reason: 'task-limit' },
+    })
+    expect(units.map(u => [u.id, u.kind])).toEqual([
+      ['endpoints:src/app.ts#0', 'endpoints'],
+      ['signals:src/app.ts#0', 'signals'],
+      ['triage:src/app.ts#0', 'triage'],
+      ['sweep:0123456789abcdef', 'sweep'],
+      ['file:src/app.ts', 'file'],
+      ['hypothesis:abc', 'legacy'],
+    ])
   })
 })

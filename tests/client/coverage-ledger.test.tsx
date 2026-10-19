@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createController, type SecurityController } from '../../src/client/controller.ts'
 import { DICTIONARIES } from '../../src/client/i18n.ts'
 import { SecurityPage } from '../../src/client/views/SecurityPage.tsx'
-import type { Coverage, CoverageUnit, ScanDetail } from '../../src/shared/contracts.ts'
+import type { Coverage, CoverageUnit, ScanDetail, ScanEvent } from '../../src/shared/contracts.ts'
 import {
   fakeApi,
   flush,
@@ -68,7 +68,7 @@ function cleanup() {
 }
 afterEach(cleanup)
 
-async function render(value: Coverage, lang: 'en' | 'ja' | 'zh' = 'en') {
+async function render(value: Coverage, lang: 'en' | 'ja' | 'zh' = 'en', events: ScanEvent[] = []) {
   cleanup()
   const detail: ScanDetail = makeDetail({}, { models, coverage: value })
   const api = fakeApi({
@@ -79,7 +79,7 @@ async function render(value: Coverage, lang: 'en' | 'ja' | 'zh' = 'en') {
     listToolkit: () => ok([]),
     getScan: () => ok(detail),
     listFindings: () => ok([makeFinding()]),
-    listEvents: () => ok([]),
+    listEvents: () => ok(events),
   })
   controller = createController({ api, storage: null, host: {}, dshLocale: lang })
   mounted = mount(<SecurityPage controller={controller} />)
@@ -205,6 +205,85 @@ describe('coverage ledger', () => {
     expect(rowOf(none, 'Unassigned files')).toBeUndefined()
   })
 
+  it('shows the unassigned files once, with the reason, and not as a part or a repeated gap', async () => {
+    const unassigned = unit('unassigned', 'not-run', {
+      title: '3 source files not assigned to any review unit',
+      reason: {
+        code: 'task-limit',
+        fallback: 'Not examined: beyond the task limit for this mode.',
+        params: { count: 3 },
+      },
+      origin: 'gap',
+    })
+    const value = coverage({
+      units: [...ledger(), unassigned],
+      unassignedFiles: 3,
+      gapDetails: [
+        {
+          code: 'unassigned-files',
+          fallback: '3 in-scope source file(s) were not part of any AI review unit (task limit).',
+          params: { count: 3, reason: 'task-limit' },
+        },
+        {
+          code: 'excluded-by-plan',
+          fallback: '5 source file(s) were left out of the AI review.',
+          params: { count: 5 },
+        },
+      ],
+    })
+    const section = await render(value)
+    // Not counted as a part, not listed as one.
+    expect(rowOf(section, 'Review plan')?.querySelector('dd')?.textContent).toBe(
+      '12 parts: 7 examined, 2 with findings, 1 undecided, 2 not examined',
+    )
+    expect(titles(section)).not.toContain(unassigned.title)
+    expect(rowOf(section, 'Unassigned files')?.querySelector('dd')?.textContent).toBe(
+      '3 source files were in no review part · The limit on review tasks was reached before this was reviewed.',
+    )
+    // The gap list repeats nothing, but still reports the plan's exclusions.
+    const gaps = [...section.querySelectorAll('.dshsec-list:not(.dshsec-technical) li')].map(li => li.textContent)
+    expect(gaps).toEqual(['5 source files were left out as vendored, generated, documentation or fixture code.'])
+    expect(section.textContent).not.toContain('in no review part.')
+    // Without the row (no count), the gap says it instead.
+    const bare = await render(coverage({ gapDetails: value.gapDetails }))
+    expect([...bare.querySelectorAll('.dshsec-list:not(.dshsec-technical) li')].map(li => li.textContent)).toContain(
+      '3 source files were in no review part.',
+    )
+  })
+
+  it('shows the Host sentence of the plan and critic events as detail', async () => {
+    const events: ScanEvent[] = [
+      {
+        seq: 1,
+        at: '2026-10-01T10:00:00Z',
+        level: 'info',
+        type: 'review-plan',
+        message: 'Review plan: 12 coverage unit(s).',
+      },
+      {
+        seq: 2,
+        at: '2026-10-01T10:05:00Z',
+        level: 'info',
+        type: 'coverage-critic',
+        message: 'Coverage check 1: 3 more coverage unit(s) planned.',
+      },
+    ]
+    await render(coverage(), 'ja', events)
+    const lines = [...document.querySelectorAll('.dshsec-feed-msg')].map(el => [
+      el.firstChild?.textContent,
+      el.querySelector('.dshsec-feed-detail')?.textContent,
+    ])
+    expect(lines).toEqual([
+      ['調査計画ができました。', 'Review plan: 12 coverage unit(s).'],
+      ['抜け漏れの確認が終わりました。', 'Coverage check 1: 3 more coverage unit(s) planned.'],
+    ])
+    await render(coverage(), 'en', events)
+    expect([...document.querySelectorAll('.dshsec-feed-msg')].map(el => el.textContent)).toEqual([
+      'Review plan: 12 coverage unit(s).',
+      'Coverage check 1: 3 more coverage unit(s) planned.',
+    ])
+  })
+
   it('renders exactly as before when the scan has no ledger', async () => {
     const plain = await render(coverage())
     const html = plain.innerHTML
@@ -221,6 +300,92 @@ describe('coverage ledger', () => {
     const section = await render(coverage({ units: [odd, unit('n', 'not-run')] }))
     expect(titles(section)).toEqual(['Part n'])
     expect(rowOf(section, 'Review plan')?.querySelector('dd')?.textContent).toBe('1 part: 1 not examined')
+  })
+})
+
+describe('titles of units the Host made', () => {
+  const hostUnits = (): CoverageUnit[] => [
+    unit('e', 'not-run', {
+      title: 'Review 2 endpoints in src/routes/auth.ts',
+      paths: ['src/routes/auth.ts', 'src/routes/index.ts'],
+      origin: 'gap',
+      kind: 'endpoints',
+    }),
+    unit('s', 'not-run', {
+      title: 'Trace 3 risky operations in src/db.ts',
+      paths: ['src/db.ts'],
+      origin: 'gap',
+      kind: 'signals',
+    }),
+    unit('t', 'not-run', {
+      title: 'Verify 2 rule hits in src/x.ts',
+      paths: ['src/x.ts'],
+      origin: 'gap',
+      kind: 'triage',
+    }),
+    unit('w', 'not-run', {
+      title: 'Sweep 4 otherwise-untargeted source files',
+      paths: ['a.go', 'b.go', 'c.go', 'd.go'],
+      origin: 'gap',
+      kind: 'sweep',
+    }),
+    unit('f', 'not-run', {
+      title: 'Check src/auth/token.ts',
+      paths: ['src/auth/token.ts'],
+      origin: 'gap',
+      kind: 'file',
+    }),
+    // Model-written titles and Hosts without a kind keep the title they sent.
+    unit('p', 'not-run', { title: 'Order API: read and update', origin: 'recon', kind: 'plan' }),
+    unit('c', 'not-run', { title: 'Webhook intake', origin: 'critic', kind: 'plan' }),
+    unit('l', 'not-run', { title: 'Hypothesis: IDOR in orders', origin: 'gap', kind: 'legacy' }),
+    unit('o', 'not-run', { title: 'Review 1 endpoint in src/old.ts', origin: 'gap' }),
+  ]
+
+  it.each([
+    [
+      'en',
+      [
+        'Endpoints in src/routes/auth.ts',
+        'Rule hits in src/db.ts',
+        'Triage of rule hits',
+        'Files no part covered (4)',
+        'File src/auth/token.ts',
+      ],
+    ],
+    [
+      'ja',
+      [
+        'src/routes/auth.ts のエンドポイント',
+        'src/db.ts のルール検出',
+        'ルール検出の確認',
+        'どの調査対象にも入らなかったファイル（4 件）',
+        'src/auth/token.ts',
+      ],
+    ],
+    [
+      'zh',
+      [
+        'src/routes/auth.ts 中的接口',
+        'src/db.ts 中的规则命中',
+        '规则命中的核实',
+        '未纳入任何审查部分的文件（4 个）',
+        '文件 src/auth/token.ts',
+      ],
+    ],
+  ] as const)('are rebuilt in %s from the unit kind and paths', async (lang, expected) => {
+    const section = await render(coverage({ units: hostUnits() }), lang)
+    expect(titles(section)).toEqual([
+      ...expected,
+      'Order API: read and update',
+      'Webhook intake',
+      'Hypothesis: IDOR in orders',
+      'Review 1 endpoint in src/old.ts',
+    ])
+    // The Host's own title stays available as a tooltip.
+    const tooltips = [...section.querySelectorAll<HTMLElement>('.dshsec-unit-title')].map(el => el.title)
+    expect(tooltips[0]).toBe('Review 2 endpoints in src/routes/auth.ts')
+    expect(tooltips[3]).toBe('Sweep 4 otherwise-untargeted source files')
   })
 })
 

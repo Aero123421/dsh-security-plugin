@@ -226,6 +226,13 @@ export interface CoverageUnit {
   readonly reason?: Diagnostic
   /** Who proposed it: the reconnaissance plan, the coverage critic, or the Host's gap filling. */
   readonly origin: 'recon' | 'critic' | 'gap'
+  /**
+   * What produced the unit: a plan unit from a model (`plan`), or a Host task
+   * for endpoints, rule hits, rule-hit triage, a source sweep or a single
+   * file (`legacy`: a task kind of older versions). The UI localizes the
+   * title of Host-made units from it. Absent on Hosts before this field.
+   */
+  readonly kind?: 'plan' | 'endpoints' | 'signals' | 'triage' | 'sweep' | 'file' | 'legacy'
 }
 
 export interface ReviewOutcome {

@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import type {
   AnalyzerStatus,
   Coverage,
+  Diagnostic,
   FindingSummary,
   RpcFailure,
   ScanDetail,
@@ -479,6 +480,8 @@ const DETAILED_EVENTS: ReadonlySet<string> = new Set([
   'run-failed',
   'notice',
   'evidence-discarded',
+  'review-plan',
+  'coverage-critic',
 ])
 
 /**
@@ -982,15 +985,19 @@ function CoverageSection(props: {
   const gaps = asArray(coverage.gaps).filter(g => typeof g === 'string' && g.trim())
   // Primary copy only carries diagnostics with a localized sentence; raw
   // Host text is collected once under a single technical-details disclosure.
+  // The "Unassigned files" row already says how many source files were in no part (and why), so that gap is not repeated.
+  const shownElsewhere = (gap: Diagnostic) =>
+    gap.code === 'analyzer-unavailable' ||
+    (gap.code === 'unassigned-files' && isFiniteNumber(coverage.unassignedFiles) && coverage.unassignedFiles > 0)
   const knownGaps = (coverage.gapDetails ?? []).filter(
-    gap => gap.code !== 'analyzer-unavailable' && tr.lookup(`diagnostic.gap.${gap.code}`) !== undefined,
+    gap => !shownElsewhere(gap) && tr.lookup(`diagnostic.gap.${gap.code}`) !== undefined,
   )
   const unknownGapCount = (coverage.gapDetails ?? []).filter(
-    gap => gap.code !== 'analyzer-unavailable' && tr.lookup(`diagnostic.gap.${gap.code}`) === undefined,
+    gap => !shownElsewhere(gap) && tr.lookup(`diagnostic.gap.${gap.code}`) === undefined,
   ).length
   const technical = [
     ...unavailable.filter(a => a.reason).map(a => `${analyzerLabel(tr, a)}: ${a.reason}`),
-    ...(coverage.gapDetails ?? []).filter(gap => gap.code !== 'analyzer-unavailable').map(gap => gap.fallback),
+    ...(coverage.gapDetails ?? []).filter(gap => !shownElsewhere(gap)).map(gap => gap.fallback),
   ]
   const files = coverage.files
   const endpoints = coverage.endpoints

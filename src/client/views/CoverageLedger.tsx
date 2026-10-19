@@ -19,11 +19,39 @@ const PLAN_PART: Readonly<Record<CoverageUnitStatus, MessageKey>> = {
   covered: 'coverage.plan.examined',
 }
 
-/** Units the UI can place; a Host newer than this client may send statuses it does not know. */
+/** Id of the ledger's own row for source files in no unit; the UI shows it as the "Unassigned files" row instead. */
+const UNASSIGNED_ID = 'unassigned'
+
+/**
+ * Titles of units the Host made itself, by what produced them. The Host
+ * writes English ("Review 2 endpoints in src/a.ts"), so these are rebuilt
+ * from the kind and the unit's paths in the UI language.
+ */
+const HOST_TITLE: Readonly<Record<string, MessageKey>> = {
+  endpoints: 'coverage.unit.title.endpoints',
+  signals: 'coverage.unit.title.signals',
+  triage: 'coverage.unit.title.triage',
+  sweep: 'coverage.unit.title.sweep',
+  file: 'coverage.unit.title.file',
+}
+
+/**
+ * Units the UI can place; a Host newer than this client may send statuses it
+ * does not know. The Host's own "unassigned" row is left out: the
+ * "Unassigned files" row says the same, with the reason.
+ */
 export function ledgerUnits(coverage: Coverage): readonly CoverageUnit[] {
   return asArray(coverage.units).filter(
-    unit => unit && typeof unit.title === 'string' && STATUS_ORDER.includes(unit.status),
+    unit => unit && typeof unit.title === 'string' && unit.id !== UNASSIGNED_ID && STATUS_ORDER.includes(unit.status),
   )
+}
+
+/** The title shown for a unit: localized for Host-made units, the reviewer's own words for plan and critic units. */
+export function unitTitle(tr: Translator, unit: CoverageUnit): string {
+  const key = unit.origin === 'gap' && unit.kind !== undefined ? HOST_TITLE[unit.kind] : undefined
+  const paths = asArray(unit.paths).filter(path => typeof path === 'string' && path)
+  if (!key || !paths.length) return unit.title
+  return tr.t(key, { file: paths[0] ?? '', count: formatNumber(paths.length, tr.intlLocale) })
 }
 
 /** "34 parts: 25 examined, 3 with findings, 2 undecided, 4 not examined", leaving out empty parts. */
@@ -46,11 +74,12 @@ export function unassignedText(tr: Translator, count: number): string {
     : tr.t('coverage.unassigned.value', { count: formatNumber(count, tr.intlLocale) })
 }
 
-/** Rows for "Review plan" and, when source files fell outside every part, "Unassigned files". */
+/** Rows for "Review plan" and, when source files fell outside every part, "Unassigned files" with the reason. */
 export function LedgerRows(props: { readonly coverage: Coverage; readonly tr: Translator }) {
   const { coverage, tr } = props
   const units = ledgerUnits(coverage)
   const unassigned = isFiniteNumber(coverage.unassignedFiles) ? coverage.unassignedFiles : 0
+  const reason = asArray(coverage.units).find(unit => unit?.id === UNASSIGNED_ID)?.reason
   return (
     <>
       {units.length ? (
@@ -62,7 +91,16 @@ export function LedgerRows(props: { readonly coverage: Coverage; readonly tr: Tr
       {unassigned > 0 ? (
         <div className="dshsec-kv-row">
           <dt>{tr.t('coverage.unassigned')}</dt>
-          <dd className="dshsec-num">{unassignedText(tr, unassigned)}</dd>
+          <dd className="dshsec-num">
+            {unassignedText(tr, unassigned)}
+            {reason ? (
+              // The Host's English sentence stays a tooltip; the visible copy is always localized.
+              <span className="dshsec-muted" title={reason.fallback || undefined}>
+                {' · '}
+                {coverageReasonText(tr, reason)}
+              </span>
+            ) : null}
+          </dd>
         </div>
       ) : null}
     </>
@@ -129,7 +167,9 @@ function LedgerUnit(props: { readonly unit: CoverageUnit; readonly tr: Translato
     <li className={`dshsec-unit is-${unit.status}`}>
       <span className="dshsec-unit-dot" aria-hidden="true" />
       <div className="dshsec-unit-body">
-        <span className="dshsec-unit-title">{unit.title}</span>
+        <span className="dshsec-unit-title" title={unit.title}>
+          {unitTitle(tr, unit)}
+        </span>
         <span className="dshsec-unit-meta">
           {unit.surface ? <span>{unit.surface}</span> : null}
           {paths.length ? (

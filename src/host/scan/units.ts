@@ -315,6 +315,7 @@ export function coverageLedger(input: LedgerInput): CoverageUnit[] {
         paths: task.input.targetPaths.slice(0, MAX_UNIT_FILES),
         findings,
         origin: task.input.origin ?? (task.kind === 'hunt-hypothesis' ? ('recon' as const) : ('gap' as const)),
+        kind: unitKind(task),
       }
       if (task.status === 'done') {
         if (findings > 0) return { ...base, status: 'finding' as const }
@@ -345,6 +346,24 @@ export function coverageLedger(input: LedgerInput): CoverageUnit[] {
     })
   }
   return units
+}
+
+/** What produced a hunt task's unit (see `CoverageUnit.kind`). */
+function unitKind(task: TaskRecord): NonNullable<CoverageUnit['kind']> {
+  switch (task.kind) {
+    case 'hunt-unit':
+      return 'plan'
+    case 'hunt-endpoints':
+      return 'endpoints'
+    case 'hunt-signals':
+      return 'signals'
+    case 'triage-signals':
+      return 'triage'
+    case 'hunt-file':
+      return task.key.startsWith('sweep:') ? 'sweep' : 'file'
+    default:
+      return 'legacy'
+  }
 }
 
 function reasonOf(task: TaskRecord): UnitReasonCode {
