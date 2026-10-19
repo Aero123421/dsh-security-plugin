@@ -89,12 +89,19 @@ export function compareGlibcVersion(left: readonly number[], right: readonly num
   return 0
 }
 
-/** True when `runtime` is at least the shipped file's GLIBC symbol version. */
-export function glibcSatisfiesPython(target: PythonLinuxTarget, runtime: string | undefined): boolean {
+/**
+ * True when `runtime` is at least `minimum`.
+ * `minimum` defaults to the shipped file's GLIBC symbol version.
+ */
+export function glibcSatisfiesPython(
+  target: PythonLinuxTarget,
+  runtime: string | undefined,
+  minimum: readonly number[] = PYTHON_LINUX_GLIBC_MIN[target],
+): boolean {
   if (runtime === undefined) return false
   const parsed = parseGlibcVersion(runtime)
   if (!parsed) return false
-  return compareGlibcVersion(parsed, PYTHON_LINUX_GLIBC_MIN[target]) >= 0
+  return compareGlibcVersion(parsed, minimum) >= 0
 }
 
 let hostLibc: LibcFamily | undefined
@@ -141,12 +148,15 @@ export const PYTHON_DYNAMIC_LANGUAGE = {
  * returns `undefined` even though a Linux file is in the package.
  * `glibcVersion` is compared only for Linux. An omitted version uses this
  * process's report, which is absent off Linux, so the Linux file is not selected.
+ * `glibcMinimum` replaces {@link PYTHON_LINUX_GLIBC_MIN} for this call.
+ * A minimum newer than the runtime returns `undefined`, the same as musl.
  */
 export function pythonPrebuildName(
   platform: string,
   arch: string,
   libc?: LibcFamily,
   glibcVersion?: string,
+  glibcMinimum?: readonly number[],
 ): string | undefined {
   const family = libc ?? (platform === 'linux' ? detectHostLibc() : 'other')
   if (platform === 'linux' && family !== 'glibc') return undefined
@@ -157,7 +167,8 @@ export function pythonPrebuildName(
   if (!(PYTHON_GRAMMAR_TARGETS as readonly string[]).includes(name)) return undefined
   if (platform === 'linux') {
     const target = linuxTarget(name)
-    if (!target || !glibcSatisfiesPython(target, glibcVersion ?? detectHostGlibcVersion())) return undefined
+    if (!target || !glibcSatisfiesPython(target, glibcVersion ?? detectHostGlibcVersion(), glibcMinimum))
+      return undefined
   }
   return name
 }
@@ -199,8 +210,9 @@ export function vendoredPythonLibrary(
   arch = process.arch,
   libc?: LibcFamily,
   glibcVersion?: string,
+  glibcMinimum?: readonly number[],
 ): string | undefined {
-  const target = pythonPrebuildName(platform, arch, libc, glibcVersion)
+  const target = pythonPrebuildName(platform, arch, libc, glibcVersion, glibcMinimum)
   const root = pluginPackageRoot()
   if (!target || !root) return undefined
   const path = join(root, 'vendor', 'tree-sitter-python', 'prebuilds', `prebuild-${target}`, 'parser.so')

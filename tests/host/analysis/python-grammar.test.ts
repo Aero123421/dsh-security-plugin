@@ -110,4 +110,36 @@ describe('vendored Python grammar', () => {
     expect(pythonPrebuildName('linux', 'arm64', 'musl', '2.39')).toBeUndefined()
     expect(pythonPrebuildName('darwin', 'arm64', 'glibc', '2.9')).toBe('macOS-ARM64')
   })
+
+  it('falls back when the required glibc is newer than the runtime', () => {
+    // Shipped floors stay at the measured symbol versions. Raising the floor
+    // above a runtime that meets those versions must not register parser.so.
+    const runtime = '2.39'
+    const raised = [2, 40]
+    expect(compareGlibcVersion(parseGlibcVersion(runtime)!, raised)).toBe(-1)
+    expect(glibcSatisfiesPython('Linux-X64', runtime, raised)).toBe(false)
+    expect(glibcSatisfiesPython('Linux-ARM64', runtime, raised)).toBe(false)
+    expect(pythonPrebuildName('linux', 'x64', 'glibc', runtime, raised)).toBeUndefined()
+    expect(pythonPrebuildName('linux', 'arm64', 'glibc', runtime, raised)).toBeUndefined()
+    expect(vendoredPythonLibrary('linux', 'x64', 'glibc', runtime, raised)).toBeUndefined()
+    expect(vendoredPythonLibrary('linux', 'arm64', 'glibc', runtime, raised)).toBeUndefined()
+    expect(pythonPrebuildName('linux', 'x64', 'glibc', runtime)).toBe('Linux-X64')
+    expect(pythonPrebuildName('linux', 'arm64', 'glibc', runtime)).toBe('Linux-ARM64')
+    // One step above each file's real symbol version. The runtime equals that version.
+    expect(pythonPrebuildName('linux', 'x64', 'glibc', '2.2.5', [2, 2, 6])).toBeUndefined()
+    expect(vendoredPythonLibrary('linux', 'x64', 'glibc', '2.2.5', [2, 2, 6])).toBeUndefined()
+    expect(pythonPrebuildName('linux', 'arm64', 'glibc', '2.17', [2, 18])).toBeUndefined()
+    expect(vendoredPythonLibrary('linux', 'arm64', 'glibc', '2.17', [2, 18])).toBeUndefined()
+    if (process.platform === 'linux') {
+      const actual = detectHostGlibcVersion()
+      const parts = actual ? parseGlibcVersion(actual) : undefined
+      expect(parts && parts.length > 0).toBe(true)
+      const above = parts!.slice()
+      const last = above[above.length - 1] ?? 0
+      above[above.length - 1] = last + 1
+      expect(pythonPrebuildName('linux', 'x64', 'glibc', actual, above)).toBeUndefined()
+      expect(pythonPrebuildName('linux', 'arm64', 'glibc', actual, above)).toBeUndefined()
+      expect(vendoredPythonLibrary('linux', process.arch, 'glibc', actual, above)).toBeUndefined()
+    }
+  })
 })
