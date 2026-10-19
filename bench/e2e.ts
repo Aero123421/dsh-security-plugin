@@ -171,7 +171,7 @@ async function main(): Promise<number> {
     }
     log(options, `started ${scanIds.size} scans (${options.mode})`)
 
-    const observed = await waitForScans(api, idOf, scanIds, options)
+    const observed = await waitForScans(api, scanIds, options)
     const limit = bootstrap.limits.maxConcurrentScans
 
     const rows: ScanRow[] = []
@@ -342,7 +342,6 @@ interface Observed {
 
 async function waitForScans(
   api: Api,
-  idOf: ReadonlyMap<string, string>,
   scanIds: ReadonlyMap<string, string>,
   options: Options,
 ): Promise<Observed> {
@@ -350,11 +349,12 @@ async function waitForScans(
   const deadline = Date.now() + options.timeoutMs
   const wanted = new Set(scanIds.values())
   for (;;) {
+    // One list across all projects is one store read, so the statuses below are a single instant. Asking per
+    // project would mix instants: a scan seen running before it finished and the next one seen running after
+    // it started would count as two at once.
     const statuses = new Map<string, string>()
-    for (const workspaceId of idOf.values()) {
-      const scans = (await api.plugin('listScans', { workspaceId, limit: 5 })) as { id: string; status: string }[]
-      for (const scan of scans) if (wanted.has(scan.id)) statuses.set(scan.id, scan.status)
-    }
+    const scans = (await api.plugin('listScans', { limit: 100 })) as { id: string; status: string }[]
+    for (const scan of scans) if (wanted.has(scan.id)) statuses.set(scan.id, scan.status)
     const running = [...statuses.values()].filter(s => s === 'running').length
     observed.maxRunning = Math.max(observed.maxRunning, running)
     for (const [id, status] of statuses) {
