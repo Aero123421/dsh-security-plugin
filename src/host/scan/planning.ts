@@ -53,6 +53,11 @@ export interface HuntPlanInput {
    */
   readonly budgetTasks?: number
   /**
+   * The planner's priority targets (files or `METHOD /route` entry points),
+   * most important first. Tasks covering one rank higher.
+   */
+  readonly priorities?: readonly string[]
+  /**
    * Paths that must never be shown to a model. No task is planned for work
    * whose only material is in such files, and they are left out of target
    * lists (a worker cannot read them anyway).
@@ -107,12 +112,14 @@ export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTa
           ...(input.hypotheses.length > 0
             ? planHypotheses(
                 resolveHypotheses(input.hypotheses, targetIndex(input.snapshot, inScope), visible, inScope),
+                steering,
               )
             : []),
         ]
   if (input.mode !== 'quick') {
     const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
     candidates.push(...planSensitiveFiles(input.snapshot, targeted, inScope))
+    boostPriorities(candidates, input.priorities ?? [], input.snapshot, endpoints, inScope)
   }
   // Quick stays within its configured task/request budgets: triage first,
   // then only the riskiest endpoint groups that fit. No hypotheses or sweep.
@@ -192,45 +199,62 @@ function planQuickEndpoints(endpoints: readonly Endpoint[], signals: readonly Si
     endpoints.filter(e => e.authHints.length === 0 && MUTATING_METHODS.has(e.method)).map(e => e.id),
   )
   const riskCount = (task: PlannedTask) => task.input.endpointIds?.filter(id => risky.has(id)).length ?? 0
-  const tasks = planEndpoints(endpoints, signals).sort(
+  const tasks = planEndpoints(endpoints, signals, false).sort(
     (a, b) => riskCount(b) - riskCount(a) || b.priority - a.priority || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
   )
   // Keep every endpoint below triage (priority >= 50), including in the worker queue.
   return tasks.map((task, index) => ({ ...task, priority: 49 - index / (tasks.length + 1) }))
 }
 
-function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[]): PlannedTask[] {
+function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[], spillSignals = true): PlannedTask[] {
   return groupByPath(endpoints, endpointPath).flatMap(([path, group]) => {
     const sorted = [...group].sort((a, b) => a.declaredAt.startLine - b.declaredAt.startLine)
     const fileSignals = signals.filter(s => s.location.path === path)
-    return chunk(sorted, ENDPOINTS_PER_TASK).map((part, index) => {
-      const unguarded = part.filter(e => e.authHints.length === 0).length
-      const mutating = part.filter(e => MUTATING_METHODS.has(e.method)).length
-      const params = part.reduce((n, e) => n + e.params.length, 0)
-      // Groups are keyed by the handler file; also start from the file that declares (mounts) the route.
-      const declarationPaths = part.flatMap(e => (e.declaredAt.path !== path ? [e.declaredAt.path] : []))
-      return {
-        key: `endpoints:${path}#${index}`,
-        kind: 'hunt-endpoints' as const,
-        role: 'hunter' as const,
-        title: `Review ${part.length} endpoint${part.length === 1 ? '' : 's'} in ${path}`,
-        priority: 50 + unguarded * 4 + mutating * 3 + Math.min(params, 6) * 2 + weight(fileSignals),
-        input: {
-          targetPaths: unique([path, ...declarationPaths]),
-          endpointIds: part.map(e => e.id),
-          ...(index === 0 && fileSignals.length > 0
-            ? { signalFingerprints: sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK).map(signalFingerprint) }
-            : {}),
-          focus: unique<FindingCategory>([
-            'authz',
-            'authn',
-            'injection',
-            'business-logic',
-            ...categoriesOf(fileSignals),
-          ]),
-        },
-      }
-    })
+    const attached = new Set(sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK))
+    // Rule hits beyond what the first endpoint task carries get signal tasks of their own, so none goes unassessed
+    // (Quick triages rule hits separately).
+    const spilled = spillSignals
+      ? sortSignals(fileSignals.filter(s => s.kind === 'vulnerability' && !attached.has(s)))
+      : []
+    const spill = chunk(spilled, SIGNALS_PER_TASK).map((part, index) => ({
+      key: `signals:${path}#${index}`,
+      kind: 'hunt-signals' as const,
+      role: 'hunter' as const,
+      title: `Trace ${part.length} more risky operation${part.length === 1 ? '' : 's'} in ${path}`,
+      priority: 40 + weight(part),
+      input: { targetPaths: [path], signalFingerprints: part.map(signalFingerprint), focus: categoriesOf(part) },
+    }))
+    return [
+      ...spill,
+      ...chunk(sorted, ENDPOINTS_PER_TASK).map((part, index) => {
+        const unguarded = part.filter(e => e.authHints.length === 0).length
+        const mutating = part.filter(e => MUTATING_METHODS.has(e.method)).length
+        const params = part.reduce((n, e) => n + e.params.length, 0)
+        // Groups are keyed by the handler file; also start from the file that declares (mounts) the route.
+        const declarationPaths = part.flatMap(e => (e.declaredAt.path !== path ? [e.declaredAt.path] : []))
+        return {
+          key: `endpoints:${path}#${index}`,
+          kind: 'hunt-endpoints' as const,
+          role: 'hunter' as const,
+          title: `Review ${part.length} endpoint${part.length === 1 ? '' : 's'} in ${path}`,
+          priority: 50 + unguarded * 4 + mutating * 3 + Math.min(params, 6) * 2 + weight(fileSignals),
+          input: {
+            targetPaths: unique([path, ...declarationPaths]),
+            endpointIds: part.map(e => e.id),
+            ...(index === 0 && fileSignals.length > 0
+              ? { signalFingerprints: sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK).map(signalFingerprint) }
+              : {}),
+            focus: unique<FindingCategory>([
+              'authz',
+              'authn',
+              'injection',
+              'business-logic',
+              ...categoriesOf(fileSignals),
+            ]),
+          },
+        }
+      }),
+    ]
   })
 }
 
@@ -282,20 +306,60 @@ function resolveHypotheses(
   })
 }
 
-function planHypotheses(hypotheses: readonly ResolvedHypothesis[]): PlannedTask[] {
-  return hypotheses.map(({ hypothesis: h, keyPaths, targets }, index) => ({
-    key: `hypothesis:${shortHash(`${h.title}\u0000${keyPaths.join('\u0000')}`)}`,
-    kind: 'hunt-hypothesis' as const,
-    role: 'hunter' as const,
-    title: h.title,
-    // Planner order expresses its own ranking.
-    priority: 70 - Math.min(index, 20),
-    input: {
-      targetPaths: unique(targets).slice(0, 6),
-      focus: [h.category],
-      hypothesis: `${h.title}\n${h.rationale}`,
-    },
-  }))
+function planHypotheses(hypotheses: readonly ResolvedHypothesis[], signals: readonly Signal[]): PlannedTask[] {
+  return hypotheses.map(({ hypothesis: h, keyPaths, targets }, index) => {
+    const targetPaths = unique(targets).slice(0, 6)
+    // Rule hits in the hypothesis's files are part of the same question: the hunter gives them verdicts too.
+    const overlapping = sortSignals(
+      signals.filter(s => s.kind === 'vulnerability' && targetPaths.includes(s.location.path)),
+    ).slice(0, SIGNALS_PER_TASK)
+    return {
+      key: `hypothesis:${shortHash(`${h.title}\u0000${keyPaths.join('\u0000')}`)}`,
+      kind: 'hunt-hypothesis' as const,
+      role: 'hunter' as const,
+      title: h.title,
+      // Planner order expresses its own ranking.
+      priority: 70 - Math.min(index, 20),
+      input: {
+        targetPaths,
+        ...(overlapping.length > 0 ? { signalFingerprints: overlapping.map(signalFingerprint) } : {}),
+        focus: [h.category],
+        hypothesis: `${h.title}\n${h.rationale}`,
+      },
+    }
+  })
+}
+
+/** Priority added to an endpoint, signal or file task that covers one of the planner's priorities. */
+const PLANNER_PRIORITY_BOOST = 6
+
+/**
+ * Rank up tasks covering what the planner named as deserving the closest
+ * review: a priority resolving to a file the task targets, or naming the
+ * route of one of its endpoints (`POST /orders/:id`). Hypothesis tasks
+ * already carry the planner's ranking. Mutates `tasks`.
+ */
+function boostPriorities(
+  tasks: PlannedTask[],
+  priorities: readonly string[],
+  snapshot: Snapshot,
+  endpoints: readonly Endpoint[],
+  inScope: (path: string) => boolean,
+): void {
+  if (priorities.length === 0) return
+  const index = targetIndex(snapshot, inScope)
+  const files = new Set(priorities.flatMap(target => resolveTargetPath(target, index, 50).paths))
+  const routes = new Set(
+    endpoints
+      .filter(e => priorities.some(target => target.includes(`${e.method} ${e.route}`) || target.trim() === e.route))
+      .map(e => e.id),
+  )
+  for (const [i, task] of tasks.entries()) {
+    if (task.kind === 'hunt-hypothesis') continue
+    const covers =
+      task.input.targetPaths.some(path => files.has(path)) || (task.input.endpointIds ?? []).some(id => routes.has(id))
+    if (covers) tasks[i] = { ...task, priority: task.priority + PLANNER_PRIORITY_BOOST }
+  }
 }
 
 /**

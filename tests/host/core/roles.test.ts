@@ -170,12 +170,16 @@ describe('task prompts', () => {
       ],
       hypothesis: 'Orders are not scoped\nCheck the query.',
       threatModelSummary: 'A shop.',
+      actors: ['customer (logged in)', 'admin'],
+      trustBoundaries: ['HTTP API'],
       known: ['Hard-coded secret (src/config.ts:3)'],
       frameworks: ['express'],
     })
     expect(task).toContain('IDOR (object access by id without ownership checks)')
     expect(task).toContain('Frameworks in use: express')
-    expect(task).toContain('Threat model summary:\nA shop.')
+    expect(task).toContain(
+      "Threat model summary:\nA shop.\nActors:\n- customer (logged in)\n- admin\nTrust boundaries:\n- HTTP API\n(The threat model is the planner's reading of the code, not verified facts.)",
+    )
     expect(task).toContain('Hypothesis from the planner (unverified — check it, do not assume it):')
     expect(task).toContain('GET /orders/:id  declared at src/routes/orders.ts:6')
     expect(task).toMatch(/^S1: js\.sql-injection — SQL injection at src\/routes\/orders\.ts:7-7/m)
@@ -183,7 +187,21 @@ describe('task prompts', () => {
     expect(task).toContain('routes.unguarded — No static auth hints')
     expect(task).not.toContain('S2:')
     expect(task).toContain('Start with these files:\n- src/routes/orders.ts')
-    expect(task).toContain('do not report them again):\n- Hard-coded secret (src/config.ts:3)')
+    expect(task).toContain(
+      'no need to report these same issues again; do report any other issue you find, also in the same code):\n- Hard-coded secret (src/config.ts:3)',
+    )
+    // Without targets (an unresolvable hypothesis) the hunter is not told to start anywhere in particular.
+    expect(
+      hunterTask({
+        kind: 'hunt-hypothesis',
+        focus: [],
+        targetPaths: [],
+        endpoints: [],
+        signals: [],
+        known: [],
+        frameworks: [],
+      }),
+    ).not.toContain('Start with these files')
   })
 
   it('skeptic marks verified steps and asks for localization only when requested', () => {
@@ -202,8 +220,11 @@ describe('task prompts', () => {
     })
     const task = skepticTask(finding, { requestLocalization: false })
     expect(task).toContain('- Location: src/routes/orders.ts:7')
-    expect(task).toContain('1. by id (src/routes/orders.ts:7; verified by host)')
-    expect(task).toContain('2. guess (location unknown; NOT verified)')
+    // The host only checked that the quote exists: the label must not read as a verdict.
+    expect(task).toContain('1. by id (src/routes/orders.ts:7; quote found in the repository (not a verdict))')
+    expect(task).toContain('2. guess (location unknown; quote NOT found in the repository)')
+    expect(task).toContain('Quote code, not only a string')
+    expect(task).toContain('a search that finds no callers is not proof by itself')
     expect(task).not.toContain('"localized"')
     expect(skepticTask(finding, { requestLocalization: true })).toContain('Also fill "localized"')
   })

@@ -139,6 +139,61 @@ describe('planHuntTasks — deep and research modes', () => {
     expect(tasks.some(t => t.kind === 'hunt-signals')).toBe(false)
   })
 
+  it('gives rule hits beyond the first endpoint task their own signal tasks, so every hit is assessed', () => {
+    const endpoints = [endpointOf('GET', '/r', 'src/routes/orders.ts', 1)]
+    // Six high steering sinks plus fourteen medium vulnerability hits in one endpoint file (audit repro).
+    const signals = [
+      ...Array.from({ length: 6 }, (_, i) =>
+        signalOf({ kind: 'sink', severity: 'high', ruleId: `sink${i}`, location: at('src/routes/orders.ts', 2 + i) }),
+      ),
+      ...Array.from({ length: 14 }, (_, i) =>
+        signalOf({ severity: 'medium', ruleId: `vuln${i}`, location: at('src/routes/orders.ts', 10 + i) }),
+      ),
+    ]
+    const { tasks } = plan({ endpoints, signals })
+    const assigned = new Set(tasks.flatMap(t => t.input.signalFingerprints ?? []))
+    const vulns = signals.filter(s => s.kind === 'vulnerability')
+    expect(vulns.every(s => assigned.has(signalFingerprint(s)))).toBe(true)
+    const spill = tasks.find(t => t.key === 'signals:src/routes/orders.ts#0')
+    expect(spill).toMatchObject({
+      kind: 'hunt-signals',
+      title: 'Trace 8 more risky operations in src/routes/orders.ts',
+    })
+    // Quick triages rule hits on its own and needs no spill tasks.
+    expect(plan({ mode: 'quick', endpoints, signals }).tasks.some(t => t.key.startsWith('signals:'))).toBe(false)
+  })
+
+  it('lets hypothesis tasks give verdicts on the rule hits in their files', () => {
+    const hit = signalOf({ location: at('src/routes/orders.ts', 3), severity: 'high' })
+    const elsewhere = signalOf({ location: at('src/lib/db.ts', 1), severity: 'high' })
+    const sink = signalOf({ location: at('src/routes/orders.ts', 5), kind: 'sink', severity: 'high' })
+    const hypotheses: Hypothesis[] = [
+      { title: 'Order IDOR', category: 'authz', targetPaths: ['src/routes/orders.ts'], rationale: 'by id' },
+    ]
+    const task = plan({ hypotheses, signals: [hit, elsewhere, sink] }).tasks.find(t => t.kind === 'hunt-hypothesis')
+    expect(task?.input.signalFingerprints).toEqual([signalFingerprint(hit)])
+  })
+
+  it('ranks tasks covering the planner priorities higher, by file or by route', () => {
+    const endpoints = [
+      endpointOf('GET', '/admin/users', 'src/routes/admin.ts', 1),
+      endpointOf('GET', '/orders', 'src/routes/orders.ts', 1),
+    ]
+    const base = plan({ endpoints }).tasks
+    const boosted = plan({ endpoints, priorities: ['./src/routes/admin.ts'] }).tasks
+    const priority = (tasks: typeof base, key: string) => tasks.find(t => t.key === key)?.priority ?? 0
+    expect(priority(boosted, 'endpoints:src/routes/admin.ts#0')).toBe(
+      priority(base, 'endpoints:src/routes/admin.ts#0') + 6,
+    )
+    expect(priority(boosted, 'endpoints:src/routes/orders.ts#0')).toBe(
+      priority(base, 'endpoints:src/routes/orders.ts#0'),
+    )
+    const byRoute = plan({ endpoints, priorities: ['GET /orders (lists every order)'] }).tasks
+    expect(priority(byRoute, 'endpoints:src/routes/orders.ts#0')).toBe(
+      priority(base, 'endpoints:src/routes/orders.ts#0') + 6,
+    )
+  })
+
   it('ranks unguarded and mutating endpoints higher', () => {
     const guarded = endpointOf('GET', '/users', 'src/routes/admin.ts', 1, {
       middleware: ['requireAuth'],

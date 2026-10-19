@@ -131,6 +131,10 @@ export interface HunterTaskInput {
   readonly signals: readonly TaskSignal[]
   readonly hypothesis?: string
   readonly threatModelSummary?: string
+  /** The planner's actors (who uses the system, with which privileges). */
+  readonly actors?: readonly string[]
+  /** The planner's trust boundaries. */
+  readonly trustBoundaries?: readonly string[]
   /** Issues already reported by analyzers in these files (to avoid duplicates). */
   readonly known: readonly string[]
   readonly frameworks: readonly string[]
@@ -169,7 +173,18 @@ export function hunterTask(input: HunterTaskInput): string {
     sections.push(`Focus areas:\n${bullets(input.focus.map(f => FOCUS_TEXT[f]))}`)
   }
   if (input.frameworks.length > 0) sections.push(`Frameworks in use: ${input.frameworks.join(', ')}`)
-  if (input.threatModelSummary) sections.push(`Threat model summary:\n${input.threatModelSummary}`)
+  if (input.threatModelSummary) {
+    const context = [`Threat model summary:\n${input.threatModelSummary}`]
+    if (input.actors && input.actors.length > 0) {
+      context.push(`Actors:\n${bullets(input.actors.slice(0, 8).map(actor => clipLine(actor, 160)))}`)
+    }
+    if (input.trustBoundaries && input.trustBoundaries.length > 0) {
+      context.push(
+        `Trust boundaries:\n${bullets(input.trustBoundaries.slice(0, 8).map(boundary => clipLine(boundary, 200)))}`,
+      )
+    }
+    sections.push(`${context.join('\n')}\n(The threat model is the planner's reading of the code, not verified facts.)`)
+  }
   if (input.hypothesis) {
     sections.push(`Hypothesis from the planner (unverified — check it, do not assume it):\n${input.hypothesis}`)
   }
@@ -203,7 +218,7 @@ export function hunterTask(input: HunterTaskInput): string {
   }
   if (input.known.length > 0) {
     sections.push(
-      `Already reported by other analyzers in these files (do not report them again):\n${bullets(input.known.slice(0, 20))}`,
+      `Already reported by other analyzers in these files (no need to report these same issues again; do report any other issue you find, also in the same code):\n${bullets(input.known.slice(0, 20))}`,
     )
   }
   sections.push(`Rules for submit_findings:

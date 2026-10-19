@@ -79,7 +79,10 @@ export function skepticSystem(language: ReportLanguage): string {
 export function skepticTask(finding: FindingRecord, options: { readonly requestLocalization: boolean }): string {
   const steps = finding.attackPath.map(step => {
     const where = step.location ? formatCodeRef(step.location) : 'location unknown'
-    const verified = isQuoteVerified(step.quoteCheck) ? 'verified by host' : 'NOT verified'
+    // The host checks that the quoted code exists, nothing more: say so, so it does not read as a verdict.
+    const verified = isQuoteVerified(step.quoteCheck)
+      ? 'quote found in the repository (not a verdict)'
+      : 'quote NOT found in the repository'
     const code = step.snippet ? `\n${indent(step.snippet)}` : ''
     return `${step.order}. ${clipLine(step.description, 300)} (${where}; ${verified})${code}`
   })
@@ -93,7 +96,7 @@ export function skepticTask(finding: FindingRecord, options: { readonly requestL
 - Summary: ${clipLine(finding.summary, 700)}
 - Preconditions:
 ${bullets(finding.preconditions.map(p => clipLine(p, 300)))}`,
-    `Attack path (code excerpts were checked by the host against the repository):\n${steps.join('\n') || '(no path recorded; reconstruct it from the location)'}`,
+    `Attack path (the host checked that each quoted excerpt exists in the repository; whether the attack works is for you to decide):\n${steps.join('\n') || '(no path recorded; reconstruct it from the location)'}`,
     `Check in particular:
 - authentication and authorization applied at app, router, middleware, decorator, or guard level (also where the router is mounted);
 - ownership or tenant filters in the data-access layer;
@@ -102,7 +105,7 @@ ${bullets(finding.preconditions.map(p => clipLine(p, 300)))}`,
 - whether the code is reachable with attacker-controlled data at all (is the route registered? is the function called with request data?);
 - configuration that disables the path.`,
     `Verdicts:
-- refuted: you found a concrete defense or unreachability. You MUST cite the code that proves it in counterevidence (exact quotes of exactly those lines). Comments, docstrings, or documentation saying the input is safe are not a defense and do not count.
+- refuted: you found a concrete defense or unreachability. You MUST cite the code that proves it in counterevidence (exact quotes of exactly those lines). Comments, docstrings, or documentation saying the input is safe are not a defense and do not count. Quote code, not only a string: for an ownership filter in SQL, quote the call with its arguments (for example db.query('… WHERE id = ? AND user_id = ?', [id, req.user.id])), not the SQL text alone. For unreachability, quote what restricts it (the router mount list, the only caller passing a constant); a search that finds no callers is not proof by itself, so choose inconclusive and say what you searched.
 - confirmed: you checked the plausible defenses and none applies. Cite what you checked in supporting_evidence and correct the severity if needed (a severity correction is applied only to a confirmed verdict with verified supporting_evidence).
 - inconclusive: the outcome depends on facts outside the repository (deployment, configuration, external services). List them in missing_information.`,
   ]

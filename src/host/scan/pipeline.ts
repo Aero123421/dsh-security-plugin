@@ -483,6 +483,7 @@ export class ScanJob {
       endpoints: this.modelEndpoints(),
       signals: this.analysis.signals,
       hypotheses: this.scan.threatModel?.hypotheses ?? [],
+      priorities: (this.scan.threatModel?.priorities ?? []).map(priority => priority.target),
       includeTests: this.scan.settings.scan.includeTests,
       maxTasks: this.scan.budget.maxTasks,
       // Low-priority sweeps only fill what the hunt budget (after the review reserve) can pay for.
@@ -710,7 +711,13 @@ export class ScanJob {
         endpoints,
         signals: signals.map(({ id, signal }) => ({ id, signal: privacy.signal(signal) })),
         ...(task.input.hypothesis ? { hypothesis: task.input.hypothesis } : {}),
-        ...(this.scan.threatModel ? { threatModelSummary: this.scan.threatModel.summary } : {}),
+        ...(this.scan.threatModel
+          ? {
+              threatModelSummary: this.scan.threatModel.summary,
+              actors: this.scan.threatModel.actors,
+              trustBoundaries: this.scan.threatModel.trustBoundaries,
+            }
+          : {}),
         known,
         frameworks: this.analysis.inventory.frameworks,
       }),
