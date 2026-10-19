@@ -8,8 +8,10 @@
  * built-in Python parser".
  *
  * The Linux files are glibc binaries (`NEEDED` `libc.so.6`). Loading one on
- * musl makes the native registrar abort the process, so Linux without
- * `process.report` `header.glibcVersionRuntime` does not get a path.
+ * musl, or on a glibc older than the file's versioned symbols, makes the
+ * native registrar abort the process. Linux without
+ * `process.report` `header.glibcVersionRuntime`, and Linux whose reported
+ * glibc is older than {@link PYTHON_LINUX_GLIBC_MIN}, does not get a path.
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -30,8 +32,21 @@ const ARCH: Readonly<Record<string, string>> = {
 /** Directory names under `prebuilds/`, without the `prebuild-` prefix. */
 export const PYTHON_GRAMMAR_TARGETS = ['Linux-X64', 'Linux-ARM64', 'macOS-X64', 'macOS-ARM64', 'Windows-X64'] as const
 
-/** glibc Linux can load the shipped Linux parser. musl must not. */
+/** glibc Linux can load the shipped Linux parser when it is new enough. musl must not. */
 export type LibcFamily = 'glibc' | 'musl' | 'other'
+
+/**
+ * Highest `GLIBC_` symbol version in each shipped Linux `parser.so`
+ * (`objdump -T` and `readelf -V` on `@ast-grep/lang-python` 0.0.6).
+ * Linux x64 needs 2.2.5. Linux arm64 needs 2.17. A runtime older than
+ * that must not load the file.
+ */
+export const PYTHON_LINUX_GLIBC_MIN = {
+  'Linux-X64': [2, 2, 5],
+  'Linux-ARM64': [2, 17],
+} as const
+
+export type PythonLinuxTarget = keyof typeof PYTHON_LINUX_GLIBC_MIN
 
 /**
  * `glibc` only when the Node diagnostic report names a glibc runtime.
@@ -45,21 +60,71 @@ export function libcFamilyFromReport(report: unknown): Exclude<LibcFamily, 'othe
   return typeof version === 'string' && version.length > 0 ? 'glibc' : 'musl'
 }
 
-let hostLibc: LibcFamily | undefined
+/** The report's `glibcVersionRuntime` when it is a non-empty string. */
+export function glibcVersionFromReport(report: unknown): string | undefined {
+  if (!isRecord(report) || !isRecord(report.header)) return undefined
+  const version = report.header.glibcVersionRuntime
+  return typeof version === 'string' && version.length > 0 ? version : undefined
+}
 
-/** This process's libc. Non-Linux is `other`. The result is cached. */
-export function detectHostLibc(): LibcFamily {
-  if (hostLibc) return hostLibc
+/**
+ * Numeric glibc components, or `undefined` when `value` is not a dotted
+ * list of integers. `2.17` is `[2, 17]`, which compares greater than `2.9`.
+ */
+export function parseGlibcVersion(value: string): number[] | undefined {
+  if (!/^\d+(?:\.\d+)*$/.test(value)) return undefined
+  const parts = value.split('.').map(part => Number(part))
+  if (parts.some(part => !Number.isSafeInteger(part))) return undefined
+  return parts
+}
+
+/** Negative when `left` is older. Missing components compare as 0, so `2.17` equals `2.17.0`. */
+export function compareGlibcVersion(left: readonly number[], right: readonly number[]): number {
+  const length = Math.max(left.length, right.length)
+  for (let i = 0; i < length; i++) {
+    const a = left[i] ?? 0
+    const b = right[i] ?? 0
+    if (a !== b) return a < b ? -1 : 1
+  }
+  return 0
+}
+
+/** True when `runtime` is at least the shipped file's GLIBC symbol version. */
+export function glibcSatisfiesPython(target: PythonLinuxTarget, runtime: string | undefined): boolean {
+  if (runtime === undefined) return false
+  const parsed = parseGlibcVersion(runtime)
+  if (!parsed) return false
+  return compareGlibcVersion(parsed, PYTHON_LINUX_GLIBC_MIN[target]) >= 0
+}
+
+let hostLibc: LibcFamily | undefined
+let hostGlibcVersion: string | undefined
+
+function readHostLibc(): void {
+  if (hostLibc) return
   if (process.platform !== 'linux') {
     hostLibc = 'other'
-    return hostLibc
+    return
   }
   try {
-    hostLibc = libcFamilyFromReport(process.report.getReport())
+    const report = process.report.getReport()
+    hostLibc = libcFamilyFromReport(report)
+    hostGlibcVersion = glibcVersionFromReport(report)
   } catch {
     hostLibc = 'musl'
   }
-  return hostLibc
+}
+
+/** This process's libc. Non-Linux is `other`. The result is cached. */
+export function detectHostLibc(): LibcFamily {
+  readHostLibc()
+  return hostLibc ?? 'musl'
+}
+
+/** This process's `glibcVersionRuntime`, when Linux reported one. Cached with {@link detectHostLibc}. */
+export function detectHostGlibcVersion(): string | undefined {
+  readHostLibc()
+  return hostGlibcVersion
 }
 
 /** Registration fields copied from `@ast-grep/lang-python` 0.0.6. `expandoChar` is U+00B5. */
@@ -71,17 +136,34 @@ export const PYTHON_DYNAMIC_LANGUAGE = {
 
 /**
  * `Linux-X64` and the like, or `undefined` when this plugin ships no grammar
- * for the pair. On Linux, `libc` defaults to this process. Anything other
- * than glibc returns `undefined` even though a Linux file is in the package.
+ * for the pair. On Linux, `libc` and `glibcVersion` default to this process.
+ * Anything other than glibc, and a glibc older than {@link PYTHON_LINUX_GLIBC_MIN},
+ * returns `undefined` even though a Linux file is in the package.
+ * `glibcVersion` is compared only for Linux. An omitted version uses this
+ * process's report, which is absent off Linux, so the Linux file is not selected.
  */
-export function pythonPrebuildName(platform: string, arch: string, libc?: LibcFamily): string | undefined {
+export function pythonPrebuildName(
+  platform: string,
+  arch: string,
+  libc?: LibcFamily,
+  glibcVersion?: string,
+): string | undefined {
   const family = libc ?? (platform === 'linux' ? detectHostLibc() : 'other')
   if (platform === 'linux' && family !== 'glibc') return undefined
   const os = PLATFORM[platform]
   const cpu = ARCH[arch]
   if (!os || !cpu) return undefined
   const name = `${os}-${cpu}`
-  return (PYTHON_GRAMMAR_TARGETS as readonly string[]).includes(name) ? name : undefined
+  if (!(PYTHON_GRAMMAR_TARGETS as readonly string[]).includes(name)) return undefined
+  if (platform === 'linux') {
+    const target = linuxTarget(name)
+    if (!target || !glibcSatisfiesPython(target, glibcVersion ?? detectHostGlibcVersion())) return undefined
+  }
+  return name
+}
+
+function linuxTarget(name: string): PythonLinuxTarget | undefined {
+  return name === 'Linux-X64' || name === 'Linux-ARM64' ? name : undefined
 }
 
 /**
@@ -116,8 +198,9 @@ export function vendoredPythonLibrary(
   platform = process.platform,
   arch = process.arch,
   libc?: LibcFamily,
+  glibcVersion?: string,
 ): string | undefined {
-  const target = pythonPrebuildName(platform, arch, libc)
+  const target = pythonPrebuildName(platform, arch, libc, glibcVersion)
   const root = pluginPackageRoot()
   if (!target || !root) return undefined
   const path = join(root, 'vendor', 'tree-sitter-python', 'prebuilds', `prebuild-${target}`, 'parser.so')

@@ -93,9 +93,11 @@ Python ASTs load these prebuilds by path. They are the platform files from
 built from [tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python)
 0.25.0 (tag v0.25.0). The plugin does not depend on either npm package.
 Targets: Linux x64, Linux arm64, macOS x64, macOS arm64, Windows x64.
-The Linux files need glibc (`libc.so.6`). Linux without `glibcVersionRuntime`
-in Node's process report, including musl, does not load them and uses the
-built-in Python parser. Settings and Coverage say so.
+The Linux files need glibc (`libc.so.6`): Linux x64 needs GLIBC 2.2.5 and
+Linux arm64 needs GLIBC 2.17. Linux without `glibcVersionRuntime` in Node's
+process report, including musl, and a reported glibc older than that file,
+does not load them and uses the built-in Python parser. Settings and Coverage
+say so.
 `@ast-grep/lang-python@0.0.6`'s package.json says `"license": "ISC"`. The
 LICENSE file in that tarball, copied here, is MIT. This notice follows the
 shipped MIT text. Tested with @ast-grep/napi 0.51.0. The same texts are next
