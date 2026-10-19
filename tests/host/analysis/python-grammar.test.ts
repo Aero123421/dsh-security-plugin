@@ -2,6 +2,8 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  detectHostLibc,
+  libcFamilyFromReport,
   pluginPackageRoot,
   PYTHON_DYNAMIC_LANGUAGE,
   PYTHON_GRAMMAR_TARGETS,
@@ -35,8 +37,33 @@ describe('vendored Python grammar', () => {
 
   it('returns undefined for platforms the package does not ship', () => {
     expect(pythonPrebuildName('freebsd', 'x64')).toBeUndefined()
-    expect(pythonPrebuildName('linux', 'ia32')).toBeUndefined()
+    expect(pythonPrebuildName('linux', 'ia32', 'glibc')).toBeUndefined()
     expect(vendoredPythonLibrary('freebsd', 'x64')).toBeUndefined()
     expect(vendoredPythonLibrary('win32', 'arm64')).toBeUndefined()
+  })
+
+  it('does not select a glibc Linux parser when glibcVersionRuntime is absent', () => {
+    expect(libcFamilyFromReport(undefined)).toBe('musl')
+    expect(libcFamilyFromReport({})).toBe('musl')
+    expect(libcFamilyFromReport({ header: {} })).toBe('musl')
+    expect(libcFamilyFromReport({ header: { glibcVersionRuntime: '' } })).toBe('musl')
+    expect(libcFamilyFromReport({ header: { glibcVersionRuntime: '2.39' } })).toBe('glibc')
+    expect(pythonPrebuildName('linux', 'x64', 'musl')).toBeUndefined()
+    expect(pythonPrebuildName('linux', 'arm64', 'musl')).toBeUndefined()
+    expect(vendoredPythonLibrary('linux', 'x64', 'musl')).toBeUndefined()
+    expect(vendoredPythonLibrary('linux', 'arm64', 'musl')).toBeUndefined()
+    expect(pythonPrebuildName('linux', 'x64', 'glibc')).toBe('Linux-X64')
+    expect(vendoredPythonLibrary('linux', 'x64', 'glibc')).toMatch(/prebuild-Linux-X64\/parser\.so$/)
+    // macOS and Windows files are not glibc objects. A musl label does not hide them.
+    expect(pythonPrebuildName('darwin', 'arm64', 'musl')).toBe('macOS-ARM64')
+    expect(vendoredPythonLibrary('darwin', 'arm64', 'musl')).toMatch(/prebuild-macOS-ARM64\/parser\.so$/)
+  })
+
+  it('treats this Linux process as glibc when Node reports a glibc runtime', () => {
+    if (process.platform !== 'linux') return
+    const report = process.report.getReport() as { header?: { glibcVersionRuntime?: string } }
+    expect(typeof report.header?.glibcVersionRuntime).toBe('string')
+    expect(detectHostLibc()).toBe('glibc')
+    expect(pythonPrebuildName('linux', process.arch)).toBe(process.arch === 'x64' ? 'Linux-X64' : 'Linux-ARM64')
   })
 })

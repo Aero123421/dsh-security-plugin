@@ -6,12 +6,17 @@ These files are the platform prebuilds from
 [tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python) 0.25.0.
 The plugin loads `prebuilds/prebuild-<OS>-<Arch>/parser.so` itself.
 There is no install script and no dependency on `@ast-grep/lang-python`.
+That package's `package.json` says `"license": "ISC"`. The `LICENSE` file
+it ships, copied here, is MIT. This plugin follows the shipped MIT text.
 
 `@ast-grep/napi` 0.51.0 registers the file as the dynamic language `python`
 with `languageSymbol` `tree_sitter_python` and `expandoChar` U+00B5.
 
 Shipped targets: Linux x64, Linux arm64, macOS x64, macOS arm64, Windows x64.
-Any other OS or CPU uses the built-in Python parser. Settings and Coverage
+The Linux files are glibc binaries (`NEEDED` `libc.so.6`). On Linux where
+Node's `process.report.getReport().header.glibcVersionRuntime` is absent,
+including musl (Alpine), the plugin does not load them. Any other OS, CPU,
+or that musl case uses the built-in Python parser. Settings and Coverage
 say so.
 
 Licenses:

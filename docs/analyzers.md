@@ -276,7 +276,8 @@ Builtin and external results for the same location and category are de-duplicate
 `@ast-grep/napi` (optional dependency) gives tree-sitter ASTs for JavaScript, TypeScript and TSX. Python ASTs use
 the tree-sitter-python 0.25.0 prebuilds in `vendor/tree-sitter-python` (Linux x64/arm64, macOS x64/arm64, Windows
 x64). Those files are loaded by path; the plugin does not depend on `@ast-grep/lang-python` and does not run a
-grammar build during install. Other platforms, and a missing or unreadable prebuild, use the built-in Python
-parser. Settings and Coverage say that explicitly (`python-fallback`) even though the JavaScript engine is still
-available. Files over 512 KiB, and files whose parse has large error regions, also use the tokenizer. Set
+grammar build during install. The Linux prebuilds are glibc binaries. On Linux where
+`process.report.getReport().header.glibcVersionRuntime` is absent (musl, including Alpine), the plugin does not
+load them. Other platforms, musl, and a missing or unreadable prebuild use the built-in Python parser. Settings
+and Coverage say that explicitly (`python-fallback`) even though the JavaScript engine is still available. Files over 512 KiB, and files whose parse has large error regions, also use the tokenizer. Set
 `disableAstGrep: true` to force the tokenizer everywhere.
