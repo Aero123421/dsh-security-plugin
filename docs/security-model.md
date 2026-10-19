@@ -157,8 +157,9 @@ the provider the user chose. The next section covers how that content is reduced
   identical line binds a quote to a place it was not meant for.
 - **Tolerance never stores model text.** Harmless copy mistakes (line-number prefixes, code fences, escaped or
   typographic quotes, HTML entities, a trailing `;`, `...` for skipped lines) are undone before matching, and a
-  `...` gap verifies only when every fragment of at least 12 normalized characters occurs, in order, within the
-  cited window. What is stored as the quote and snippet is always the file's own contiguous, redacted span, never
+  `...` gap verifies only when every fragment that holds a letter or digit occurs, in order, within the cited
+  window, and at least one of them has 12 or more normalized characters; a short invented fragment such as
+  `exec(cmd)` makes the quote a mismatch. What is stored as the quote and snippet is always the file's own contiguous, redacted span, never
   the model's text, and withheld files stay unquotable.
 - **Suppression needs proof.** A Skeptic `refuted` verdict needs at least one verified counter-evidence quote of
   code, or the host downgrades it to `inconclusive`. Comments, documentation, literal-only prose (including assigned
