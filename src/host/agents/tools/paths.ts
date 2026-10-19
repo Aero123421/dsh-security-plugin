@@ -3,7 +3,7 @@
  * mean" suggestions for unknown paths.
  */
 
-import { normalizePath } from '../../evidence/normalize.ts'
+import { cleanModelPath, normalizePath } from '../../evidence/normalize.ts'
 
 /**
  * Normalize a model-supplied directory. `''`, `.` and `./` mean the workspace
@@ -91,4 +91,58 @@ export function suggestPaths(target: string, candidates: Iterable<string>, max =
 function stem(name: string): string {
   const dot = name.lastIndexOf('.')
   return dot > 0 ? name.slice(0, dot) : name
+}
+
+/** What a model-written target (a planner hypothesis path) can be resolved against. */
+export interface TargetIndex {
+  /** Every snapshot path. */
+  readonly paths: ReadonlySet<string>
+  /** Files a directory target expands to, best first (for example in-scope source files). Default: `paths`. */
+  readonly candidates?: readonly string[]
+  /** Files defining a symbol-like target such as `UserService.update`; optional. */
+  readonly findSymbol?: (name: string) => readonly string[]
+}
+
+/** How one model-written target maps onto the snapshot. */
+export interface TargetResolution {
+  /** Snapshot files it names; empty when it could not be resolved. */
+  readonly paths: readonly string[]
+  /** Close candidates when it could not be resolved. */
+  readonly suggestions: readonly string[]
+}
+
+const SYMBOL_LIKE = /^[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}_$][\p{L}\p{N}_$]*)*$/u
+const FILE_EXTENSION =
+  /\.(?:[cm]?[jt]sx?|py|pyi|go|java|kt|rb|php|cs|rs|swift|scala|json|ya?ml|toml|ini|cfg|conf|md|txt|html?|vue|svelte|sql|sh|env)$/i
+
+/**
+ * Resolve a target path the way a planner meant it: a file as written
+ * (after `./`, `<root>/`, leading `/`, backslashes and `:12` suffixes are
+ * cleaned up), a directory as its first `maxFiles` candidate files, the one
+ * file whose path differs only in case or in leading directories, or a
+ * function/class name as the files defining it. Anything else yields close
+ * suggestions instead. Never returns a path outside `index.paths`.
+ */
+export function resolveTargetPath(raw: string, index: TargetIndex, maxFiles = 4): TargetResolution {
+  const clean = cleanModelPath(raw)
+  if (clean === undefined) return { paths: [], suggestions: [] }
+  if (index.paths.has(clean)) return { paths: [clean], suggestions: [] }
+  const prefix = `${clean}/`
+  const under = [...(index.candidates ?? index.paths)].filter(path => path.startsWith(prefix)).slice(0, maxFiles)
+  if (under.length > 0) return { paths: under, suggestions: [] }
+  const lower = clean.toLowerCase()
+  const near: string[] = []
+  for (const path of index.paths) {
+    const candidate = path.toLowerCase()
+    if (candidate === lower || candidate.endsWith(`/${lower}`) || lower.endsWith(`/${candidate}`)) near.push(path)
+    if (near.length > 1) break
+  }
+  const [only] = near
+  if (only !== undefined && near.length === 1) return { paths: [only], suggestions: [] }
+  const name = raw.trim()
+  if (index.findSymbol && SYMBOL_LIKE.test(name) && !FILE_EXTENSION.test(name)) {
+    const defined = [...new Set(index.findSymbol(name))].filter(path => index.paths.has(path)).slice(0, maxFiles)
+    if (defined.length > 0) return { paths: defined, suggestions: [] }
+  }
+  return { paths: [], suggestions: suggestPaths(clean, index.paths, 3) }
 }

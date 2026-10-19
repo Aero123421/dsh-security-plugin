@@ -600,6 +600,33 @@ describe('plannerSubmitTool', () => {
     hypotheses: Array.from({ length: count }, () => hypothesis),
   })
 
+  it('resolves target paths, and sends back once a hypothesis none of whose targets exists', () => {
+    const resolve = (target: string) =>
+      target.endsWith('orders.ts')
+        ? { paths: ['src/routes/orders.ts'], suggestions: [] }
+        : { paths: [], suggestions: target === 'src/gaurd.ts' ? ['src/guard.ts'] : [] }
+    const tool = plannerSubmitTool(4, resolve)
+    const args = {
+      ...model(0),
+      hypotheses: [
+        { ...hypothesis, title: 'ok', target_paths: ['./src/routes/orders.ts', 'nope.ts'] },
+        { ...hypothesis, title: 'lost', target_paths: ['src/gaurd.ts', 'UserThing'] },
+      ],
+    }
+    const first = validate(tool, args)
+    expect(first.error).toContain(
+      '- hypothesis 2 ("lost"): "src/gaurd.ts" is not a file in this repository; did you mean src/guard.ts?',
+    )
+    expect(first.error).toContain('- hypothesis 2 ("lost"): "UserThing" is not a file in this repository.')
+    // A hypothesis with at least one resolvable target is not a reason to send everything back.
+    expect(first.error).not.toContain('hypothesis 1')
+    const second = validate(tool, args)
+    expect(second.error).toBeUndefined()
+    expect(second.output?.hypotheses.map(h => h.target_paths)).toEqual([['src/routes/orders.ts'], []])
+    // On the last request nothing is sent back.
+    expect(validate(plannerSubmitTool(4, resolve), args, { final: true }).error).toBeUndefined()
+  })
+
   it('keeps the first hypotheses up to the cap instead of sending the threat model back', () => {
     const tool = plannerSubmitTool(2)
     expect(validate(tool, model(2)).output?.hypotheses).toHaveLength(2)

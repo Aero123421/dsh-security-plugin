@@ -3,7 +3,15 @@
  */
 
 export { compileGlob, expandBraces, type GlobMatcher, MAX_GLOB_LENGTH, matchGlob, normalizeGlob } from './glob.ts'
-export { isUnder, levenshtein, normalizeDir, suggestPaths } from './paths.ts'
+export {
+  isUnder,
+  levenshtein,
+  normalizeDir,
+  resolveTargetPath,
+  suggestPaths,
+  type TargetIndex,
+  type TargetResolution,
+} from './paths.ts'
 export { compileLineMatcher, type LineMatcher, MAX_PATTERN_LENGTH } from './search.ts'
 export {
   createWorkspaceTools,

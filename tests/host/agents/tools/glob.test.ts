@@ -6,7 +6,13 @@ import {
   matchGlob,
   normalizeGlob,
 } from '../../../../src/host/agents/tools/glob.ts'
-import { levenshtein, normalizeDir, suggestPaths } from '../../../../src/host/agents/tools/paths.ts'
+import {
+  levenshtein,
+  normalizeDir,
+  resolveTargetPath,
+  suggestPaths,
+  type TargetIndex,
+} from '../../../../src/host/agents/tools/paths.ts'
 
 describe('matchGlob', () => {
   it.each([
@@ -122,5 +128,38 @@ describe('path helpers', () => {
     expect(suggestPaths('lib/users.ts', paths).slice(0, 2)).toEqual(['src/models/users.ts', 'src/routes/users.ts'])
     expect(suggestPaths('zzz/qqqqqqqq.go', paths)).toEqual([])
     expect(suggestPaths('users.ts', paths, 1)).toHaveLength(1)
+  })
+
+  it('resolves model-written targets to snapshot files, or suggests what they probably meant', () => {
+    const index: TargetIndex = {
+      paths: new Set(['src/routes/users.ts', 'src/routes/user.ts', 'src/models/users.ts', 'src/app.ts', 'README.md']),
+      candidates: ['src/routes/users.ts', 'src/routes/user.ts', 'src/models/users.ts', 'src/app.ts'],
+      findSymbol: name => (name === 'UserService.update' ? ['src/models/users.ts', 'nowhere.ts'] : []),
+    }
+    const resolve = (target: string) => resolveTargetPath(target, index)
+    for (const target of [
+      'src/app.ts',
+      './src/app.ts',
+      '/src/app.ts',
+      '<root>/src/app.ts',
+      'src\\app.ts',
+      '`src/app.ts`',
+      'src/app.ts:7',
+      'src/app.ts#L3-L9',
+      'SRC/App.ts',
+      'project/src/app.ts',
+    ]) {
+      expect(resolve(target)).toEqual({ paths: ['src/app.ts'], suggestions: [] })
+    }
+    expect(resolve('src/routes').paths).toEqual(['src/routes/users.ts', 'src/routes/user.ts'])
+    expect(resolveTargetPath('src', index, 3).paths).toHaveLength(3)
+    // A symbol name resolves to the files defining it (only snapshot files).
+    expect(resolve('UserService.update')).toEqual({ paths: ['src/models/users.ts'], suggestions: [] })
+    // Ambiguous or unknown targets resolve to nothing and come with suggestions.
+    expect(resolve('users.ts').paths).toEqual([])
+    const typo = resolve('src/routes/usres.ts')
+    expect(typo.paths).toEqual([])
+    expect(typo.suggestions).toContain('src/routes/users.ts')
+    expect(resolve('../etc/passwd')).toEqual({ paths: [], suggestions: [] })
   })
 })

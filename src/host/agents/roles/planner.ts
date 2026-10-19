@@ -7,6 +7,7 @@ import { z } from 'zod'
 import type { ReportLanguage } from '../../../shared/contracts.ts'
 import type { Endpoint, Inventory, Signal } from '../../analysis/types.ts'
 import { defineTool, type WorkerTool } from '../runtime/tool.ts'
+import type { TargetResolution } from '../tools/paths.ts'
 import { bullets, categorySchema, clipLine, submitCoercion, systemPreamble } from './common.ts'
 
 export const hypothesisSchema = z.object({
@@ -99,16 +100,49 @@ Steps:
 /**
  * Terminal tool for the planner. Hypotheses beyond `maxHypotheses` are cut
  * (the planner lists them most important first) instead of sending the
- * whole threat model back.
+ * whole threat model back. With `resolve`, target paths are mapped onto
+ * snapshot files (see `resolveTargetPath`); a submission in which some
+ * hypothesis has no resolvable target at all is sent back once with
+ * suggestions, and on acceptance such a hypothesis keeps an empty target
+ * list (its hunter starts by searching).
  */
-export function plannerSubmitTool(maxHypotheses: number): WorkerTool<ThreatModelOutput, ThreatModelOutput> {
+export function plannerSubmitTool(
+  maxHypotheses: number,
+  resolve?: (target: string) => TargetResolution,
+): WorkerTool<ThreatModelOutput, ThreatModelOutput> {
+  const max = Math.max(0, maxHypotheses)
+  let asked = false
   return defineTool<ThreatModelOutput, ThreatModelOutput>({
     name: 'submit_threat_model',
     description: `Submit the threat model and up to ${maxHypotheses} hypotheses, most important first. This ends your work.`,
     input: threatModelSchema,
     coerce: submitCoercion(threatModelSchema),
     terminal: {
-      toOutput: args => ({ ...args, hypotheses: args.hypotheses.slice(0, Math.max(0, maxHypotheses)) }),
+      validate: (args, context) => {
+        if (!resolve || asked || context.final) return undefined
+        const problems: string[] = []
+        args.hypotheses.slice(0, max).forEach((hypothesis, index) => {
+          const resolutions = hypothesis.target_paths.map(target => ({ target, ...resolve(target) }))
+          if (resolutions.some(r => r.paths.length > 0)) return
+          for (const { target, suggestions } of resolutions) {
+            problems.push(
+              `- hypothesis ${index + 1} ("${clipLine(hypothesis.title, 80)}"): ${JSON.stringify(clipLine(target, 120))} is not a file in this repository${suggestions.length > 0 ? `; did you mean ${suggestions.join(', ')}?` : '.'}`,
+            )
+          }
+        })
+        if (problems.length === 0) return undefined
+        asked = true
+        return `Some hypotheses name no file that exists in this repository:\n${problems.join('\n')}\nUse workspace-relative paths as list_files shows them; a directory stands for its files and a function or class name for the file that defines it. Call submit_threat_model again with corrected target_paths. Hypotheses whose files still cannot be found are kept without starting files.`
+      },
+      toOutput: args => ({
+        ...args,
+        hypotheses: args.hypotheses.slice(0, max).map(hypothesis => ({
+          ...hypothesis,
+          target_paths: resolve
+            ? [...new Set(hypothesis.target_paths.flatMap(target => resolve(target).paths))].slice(0, 6)
+            : hypothesis.target_paths,
+        })),
+      }),
     },
   })
 }

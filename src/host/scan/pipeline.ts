@@ -34,8 +34,10 @@ import { plannerSubmitTool, plannerSystem, plannerTask, type ThreatModelOutput }
 import { type SkepticOutput, skepticSubmitTool, skepticSystem, skepticTask } from '../agents/roles/skeptic.ts'
 import type { WorkerTool } from '../agents/runtime/tool.ts'
 import { runWorker, type WorkerResult } from '../agents/runtime/worker.ts'
+import { resolveTargetPath, type TargetResolution } from '../agents/tools/paths.ts'
 import { createWorkspaceTools } from '../agents/tools/workspace.ts'
 import type { AstGrepHandle } from '../analysis/astgrep.ts'
+import { findSymbol } from '../analysis/outline.ts'
 import type { Toolkit } from '../analysis/toolkit.ts'
 import type { Config } from '../config.ts'
 import type { AgentRunRecord, FindingRecord, ScanRecord, TaskRecord, ThreatModelRecord } from '../core/model.ts'
@@ -56,7 +58,7 @@ import {
 } from './findings.ts'
 import { resolveScanRoot, sameScanRoot, scanRoot } from './root.ts'
 import { snapshotDigest } from './fingerprint.ts'
-import { endpointPath, planHuntTasks, planReviewTasks, type PlannedTask } from './planning.ts'
+import { endpointPath, planHuntTasks, planReviewTasks, type PlannedTask, targetIndex } from './planning.ts'
 
 /** Why a run stopped early on request. */
 export type StopRequest = 'pause' | 'cancel' | 'shutdown'
@@ -415,7 +417,7 @@ export class ScanJob {
         signals: this.analysis.signals.map(signal => this.analysis.privacy.signal(signal)),
         maxHypotheses: max,
       }),
-      submit: plannerSubmitTool(max),
+      submit: plannerSubmitTool(max, this.plannerTargets()),
       maxTurns: Math.min(this.scan.budget.maxTurnsPerWorker, MAX_SHORT_ROLE_TURNS),
     })
     if (result.status === 'submitted' && result.output) {
@@ -1013,8 +1015,9 @@ export class ScanJob {
     const targetPaths = task.input.targetPaths.filter(path => this.analysis.snapshot.files.has(path))
     const endpoints = new Set(this.analysis.endpoints.map(endpoint => endpoint.id))
     const endpointIds = task.input.endpointIds?.filter(id => endpoints.has(id))
+    // A hypothesis stays worth checking when its files are gone: its hunter starts by searching instead.
     if (
-      (task.input.targetPaths.length > 0 && targetPaths.length === 0) ||
+      (task.input.targetPaths.length > 0 && targetPaths.length === 0 && task.kind !== 'hunt-hypothesis') ||
       (task.input.endpointIds?.length && endpointIds?.length === 0)
     ) {
       return this.deps.store.updateTask(task.id, {
@@ -1066,6 +1069,26 @@ export class ScanJob {
 
   private language(): 'en' | 'ja' | 'zh' {
     return this.scan.language ?? 'en'
+  }
+
+  /**
+   * Planner targets resolved to snapshot files (directories to their in-scope source files, symbol names to
+   * the files defining them). Withheld files are never returned or suggested.
+   */
+  private plannerTargets(): (target: string) => TargetResolution {
+    const { snapshot, privacy, astGrep } = this.analysis
+    const includeTests = this.scan.settings.scan.includeTests
+    const visible = (path: string) => !privacy.isWithheld(path)
+    const inScope = (path: string) => visible(path) && (includeTests || snapshot.files.get(path)?.isTest !== true)
+    const index = targetIndex(snapshot, inScope, name =>
+      findSymbol(snapshot, name, { ...(astGrep ? { astGrep } : {}), limit: 8 })
+        .map(definition => definition.path)
+        .filter(inScope),
+    )
+    return target => {
+      const resolution = resolveTargetPath(target, index)
+      return { paths: resolution.paths.filter(visible), suggestions: resolution.suggestions.filter(visible) }
+    }
   }
 
   /** In-scope endpoints a model may be told about (route text from withheld files is withheld too). */

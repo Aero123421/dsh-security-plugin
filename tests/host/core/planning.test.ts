@@ -194,14 +194,52 @@ describe('planHuntTasks — deep and research modes', () => {
     expect(hyp.map(t => t.title)).toEqual(['Order IDOR', 'Admin without auth'])
     expect(hyp.map(t => t.priority)).toEqual([70, 69])
     expect(hyp[0]?.key).toMatch(/^hypothesis:[0-9a-f]{16}$/)
+    // Targets that name no file are not passed on.
     expect(hyp[1]?.input).toEqual({
-      targetPaths: ['src/routes/admin.ts', 'src/app.ts', 'a', 'b', 'c', 'd'],
+      targetPaths: ['src/routes/admin.ts', 'src/app.ts'],
       focus: ['authn'],
       hypothesis: 'Admin without auth\nmounted without guard',
     })
     // Hypotheses outrank ordinary endpoint groups.
     const withEndpoints = plan({ hypotheses, endpoints: [endpointOf('GET', '/', 'src/app.ts', 1)] }).tasks
     expect(withEndpoints[0]?.kind).toBe('hunt-hypothesis')
+  })
+
+  it('resolves how planners spell targets, and keeps hypotheses with unknown targets as search tasks', () => {
+    const h = (title: string, ...targetPaths: string[]): Hypothesis => ({
+      title,
+      category: 'authz',
+      targetPaths,
+      rationale: 'r',
+    })
+    const hypotheses = [
+      h('dot slash', './src/routes/orders.ts'),
+      h('leading slash', '/src/routes/admin.ts'),
+      h('root placeholder', '<root>/src/lib/db.ts'),
+      h('backslashes', 'src\\services\\payments.ts'),
+      h('line suffix', 'src/app.ts:12'),
+      h('directory', 'src/middleware'),
+      h('missing prefix', 'routes/orders.ts'),
+      h('typo', 'src/route/ordrs.ts'),
+      h('withheld only', 'src/lib/render.ts'),
+    ]
+    const tasks = plan({ hypotheses, isWithheld: path => path === 'src/lib/render.ts' }).tasks.filter(
+      t => t.kind === 'hunt-hypothesis',
+    )
+    const targets = Object.fromEntries(tasks.map(t => [t.title, t.input.targetPaths]))
+    expect(targets).toEqual({
+      'dot slash': ['src/routes/orders.ts'],
+      'leading slash': ['src/routes/admin.ts'],
+      'root placeholder': ['src/lib/db.ts'],
+      backslashes: ['src/services/payments.ts'],
+      'line suffix': ['src/app.ts'],
+      directory: ['src/middleware/auth.ts'],
+      'missing prefix': ['src/routes/orders.ts'],
+      // Not resolvable: the hunter starts by searching rather than the task being skipped as stale.
+      typo: [],
+    })
+    // A hypothesis about withheld files only gets no task.
+    expect(tasks.some(t => t.title === 'withheld only')).toBe(false)
   })
 
   it('adds the 6 largest sensitive source files nobody targets yet', () => {

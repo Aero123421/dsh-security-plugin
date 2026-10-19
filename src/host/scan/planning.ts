@@ -13,8 +13,9 @@ import {
   severityAtLeast,
   severityRank,
 } from '../../shared/domain.ts'
+import { resolveTargetPath, type TargetIndex } from '../agents/tools/paths.ts'
 import { MUTATING_METHODS } from '../analysis/routes/signals.ts'
-import type { Endpoint, Signal, Snapshot } from '../analysis/types.ts'
+import type { Endpoint, Signal, Snapshot, SnapshotFile } from '../analysis/types.ts'
 import type { FindingRecord, TaskInput, TaskKind } from '../core/model.ts'
 import type { RoleName } from '../../shared/domain.ts'
 import { signalFingerprint } from './findings.ts'
@@ -96,11 +97,11 @@ export function planHuntTasks(input: HuntPlanInput): { readonly tasks: PlannedTa
             steering,
           ),
           ...planSignals(steering, endpoints),
-          ...planHypotheses(
-            input.hypotheses
-              .map(h => ({ ...h, targetPaths: h.targetPaths.filter(visible) }))
-              .filter(h => h.targetPaths.some(inScope)),
-          ),
+          ...(input.hypotheses.length > 0
+            ? planHypotheses(
+                resolveHypotheses(input.hypotheses, targetIndex(input.snapshot, inScope), visible, inScope),
+              )
+            : []),
         ]
   if (input.mode !== 'quick') {
     const targeted = new Set(candidates.flatMap(task => task.input.targetPaths))
@@ -244,20 +245,85 @@ function planSignals(signals: readonly Signal[], endpoints: readonly Endpoint[])
   )
 }
 
-function planHypotheses(hypotheses: readonly Hypothesis[]): PlannedTask[] {
-  return hypotheses.map((h, index) => ({
-    key: `hypothesis:${shortHash(`${h.title}\u0000${h.targetPaths.join('\u0000')}`)}`,
+/** A hypothesis with its targets resolved to in-scope snapshot files, and the paths its task key is built from. */
+interface ResolvedHypothesis {
+  readonly hypothesis: Hypothesis
+  readonly keyPaths: readonly string[]
+  readonly targets: readonly string[]
+}
+
+/**
+ * Map planner targets onto snapshot files (`resolveTargetPath`). A hypothesis
+ * whose targets resolve only to withheld or out-of-scope files is dropped
+ * (no task targets them); one whose targets cannot be resolved at all is
+ * kept without targets, so its hunter starts by searching instead of the
+ * task being skipped as stale.
+ */
+function resolveHypotheses(
+  hypotheses: readonly Hypothesis[],
+  index: TargetIndex,
+  visible: (path: string) => boolean,
+  inScope: (path: string) => boolean,
+): ResolvedHypothesis[] {
+  return hypotheses.flatMap(hypothesis => {
+    const resolved = unique(hypothesis.targetPaths.flatMap(target => resolveTargetPath(target, index).paths))
+    const targets = resolved.filter(inScope)
+    if (resolved.length > 0 && targets.length === 0) return []
+    // The key keeps its original basis so tasks of a resumed scan keep their identity.
+    return [{ hypothesis, keyPaths: hypothesis.targetPaths.filter(visible), targets }]
+  })
+}
+
+function planHypotheses(hypotheses: readonly ResolvedHypothesis[]): PlannedTask[] {
+  return hypotheses.map(({ hypothesis: h, keyPaths, targets }, index) => ({
+    key: `hypothesis:${shortHash(`${h.title}\u0000${keyPaths.join('\u0000')}`)}`,
     kind: 'hunt-hypothesis' as const,
     role: 'hunter' as const,
     title: h.title,
     // Planner order expresses its own ranking.
     priority: 70 - Math.min(index, 20),
     input: {
-      targetPaths: unique(h.targetPaths).slice(0, 6),
+      targetPaths: unique(targets).slice(0, 6),
       focus: [h.category],
       hypothesis: `${h.title}\n${h.rationale}`,
     },
   }))
+}
+
+/**
+ * What planner targets resolve against: every snapshot path, with directories
+ * expanding to their in-scope source files (production files, sensitive
+ * names and larger files first) and, when given, symbol names to the files
+ * defining them.
+ */
+export function targetIndex(
+  snapshot: Snapshot,
+  inScope: (path: string) => boolean,
+  findSymbol?: (name: string) => readonly string[],
+): TargetIndex {
+  let candidates: string[] | undefined
+  const paths = new Set(snapshot.files.keys())
+  return {
+    paths,
+    get candidates() {
+      candidates ??= [...snapshot.files.values()]
+        .filter(f => SOURCE_LANGUAGES.has(f.language) && !f.isGenerated && inScope(f.path))
+        .sort(preferForReview)
+        .map(f => f.path)
+      return candidates
+    },
+    ...(findSymbol ? { findSymbol } : {}),
+  }
+}
+
+/** Production files first, then sensitive names, then larger files. */
+function preferForReview(a: SnapshotFile, b: SnapshotFile): number {
+  return (
+    Number(a.isTest) - Number(b.isTest) ||
+    Number(SENSITIVE_NAME.test(b.path)) - Number(SENSITIVE_NAME.test(a.path)) ||
+    b.size - a.size ||
+    (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  )
 }
 
 function planSensitiveFiles(
@@ -294,14 +360,8 @@ function planSweep(
 ): { tasks: PlannedTask[]; overflow: number } {
   const files = [...snapshot.files.values()]
     .filter(f => SOURCE_LANGUAGES.has(f.language) && !f.isGenerated && inScope(f.path) && !targeted.has(f.path))
-    .sort(
-      (a, b) =>
-        // Even with includeTests, spare sweep capacity goes to production first.
-        Number(a.isTest) - Number(b.isTest) ||
-        Number(SENSITIVE_NAME.test(b.path)) - Number(SENSITIVE_NAME.test(a.path)) ||
-        b.size - a.size ||
-        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
-    )
+    // Even with includeTests, spare sweep capacity goes to production first.
+    .sort(preferForReview)
   const groups = chunk(files, SWEEP_FILES_PER_TASK)
   return {
     tasks: groups.slice(0, remaining).map((part, index) => ({
