@@ -556,6 +556,16 @@ const MERGE_QUALIFIED =
 const MERGE_BARE =
   /^(?:_\.(?:merge|mergeWith|defaultsDeep|set|setWith)|merge|deepmerge|deepMerge|mergeDeep|deepExtend|defaultsDeep)$/
 
+/**
+ * Receivers that write records: model classes (`User`, `db.User`), Prisma delegates (`prisma.user`), model and
+ * repository instances (`userModel`, `this.orderRepository`, `repo`, `em`, `entityManager`), and Knex query
+ * builders (`knex('users')`).
+ */
+const ORM_RECEIVER =
+  /^(?:(?:[\w$]+\.)*[A-Z][A-Za-z0-9]*|[\w$]*(?:Model|Models|Repository|Repo|Entity|Collection|Dao|DAO)|(?:prisma|tx|trx|db|database)\.[a-z][\w$]*|(?:repo|repository|em|entityManager|manager|model|collection|queryRunner\.manager)|(?:knex|db|trx|tx|database|qb|sql)\((['"`])[\w.]+\1\))$/
+/** Names that are services, controllers, clients or framework objects even when capitalized. */
+const NOT_A_MODEL =
+  /(?:Service|Services|Controller|Handler|Client|Api|API|Error|Exception|Response|Request|Router|Factory|Helper|Manager|Validator|Schema|Dto|DTO|Store|Cache|Map|Set)$|^(?:res|response|req|request|ctx|map|cache|headers|searchParams|params|formData|localStorage|sessionStorage|Object|Array|Promise|Reflect|JSON|Math|Date)$/
 const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd\b|passphrase/i
 const AUTH_HEADER_READ =
   /headers\s*(?:\.\s*authorization|\[\s*['"`]authorization['"`]\s*\])|\.(?:get|header)\s*\(\s*['"`]authorization['"`]\s*\)/i
@@ -1124,6 +1134,7 @@ function massAssignment(chk: Checker, call: CallFact, q: string): void {
   if (
     call.isNew &&
     /^[A-Z]/.test(lastName(call.callee)) &&
+    !NOT_A_MODEL.test(lastName(call.callee)) &&
     !/^(?:Error|Map|Set|URL|URLSearchParams|Date|Promise|Response|Request|Headers|FormData|Blob)$/.test(call.callee)
   ) {
     candidates = call.args.slice(0, 1)
@@ -1137,12 +1148,8 @@ function massAssignment(chk: Checker, call: CallFact, q: string): void {
     ) &&
     call.receiver !== ''
   ) {
-    if (
-      /^(?:res|response|req|request|ctx|map|cache|headers|searchParams|params|formData|localStorage|sessionStorage)$/i.test(
-        lastName(call.receiver),
-      )
-    )
-      return
+    // Only data-layer receivers write records; a service or controller method picks its own fields.
+    if (!isRecordWriter(chk, call)) return
     candidates = [...call.args]
   } else return
   for (const arg of candidates) {
@@ -1177,6 +1184,38 @@ function massAssignment(chk: Checker, call: CallFact, q: string): void {
     }
   }
 }
+
+/**
+ * The receiver of `create`/`update`/`insert`… writes database records: a model class, a Prisma delegate, a
+ * model or repository instance, a Knex builder, or a record loaded through one of those
+ * (`const user = await User.findByPk(id)`; an unassigned `user` parameter counts too). Services, controllers,
+ * API clients and imported modules other than models do not.
+ */
+function isRecordWriter(chk: Checker, call: CallFact): boolean {
+  const receiver = call.receiver.replace(/^this\./, '')
+  const last = lastName(receiver)
+  if (NOT_A_MODEL.test(last) && !/^(?:entityManager|manager)$/.test(last)) return false
+  if (ORM_RECEIVER.test(receiver)) return true
+  if (receiver !== call.receiver || !/^[a-z_$][\w$]*$/.test(receiver) || NOT_A_RECORD.test(receiver)) return false
+  if (chk.model.imports.some(imp => imp.bindings.some(b => b.local === receiver))) return false
+  const values = chk.values({ start: call.calleeSpan.start, end: call.calleeSpan.start + receiver.length })
+  const assigned = values.filter(v => v.start !== call.calleeSpan.start)
+  if (assigned.length === 0) return !chk.model.assigns.some(a => a.targets.some(t => t.name === receiver))
+  return assigned.some(value =>
+    chk.model.calls.some(
+      c =>
+        c.start >= value.start &&
+        c.end <= value.end &&
+        (c.isNew
+          ? /^[A-Z]/.test(lastName(c.callee)) && !NOT_A_MODEL.test(lastName(c.callee))
+          : ORM_RECEIVER.test(c.receiver.replace(/^this\./, ''))),
+    ),
+  )
+}
+
+/** Lower-case names of things that are not records: clients, framework objects, utilities. */
+const NOT_A_RECORD =
+  /^(?:api|http|https|axios|client|service|services|controller|router|app|server|store|cache|queue|bus|emitter|events?|logger|log|mailer|transport|stripe|twilio|sendgrid|s3|sns|sqs|redis|socket|io|ws|fs|path|util|utils|helpers?|lodash|_)$/
 
 function prototypePollution(chk: Checker, call: CallFact, q: string): void {
   let args: Span[]

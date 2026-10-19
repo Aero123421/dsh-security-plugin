@@ -132,6 +132,10 @@ changes; they are called out explicitly.
   are not text, and an anchored allow-list pattern with an early exit before `exec`/`subprocess` or a file call
   turns the hit into a review hint. Some of these were reported as critical command injection. A preference
   cookie such as `theme` set with `httpOnly: false` is no longer reported.
+- Report JavaScript mass assignment only on receivers that write records (model classes, Prisma delegates, model
+  and repository instances, Knex builders, records loaded through them). `teamService.create(req.body)` and
+  other service or controller calls were reported, and in a layered app one controller pattern produced most of
+  the rule hits that Quick mode triages.
 
 ## [0.4.0] - 2026-10-18
 

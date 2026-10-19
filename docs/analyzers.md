@@ -123,6 +123,11 @@ SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string c
 `literal(...)` (including named imports). Static placeholder predicates with separate parameter objects and
 object filters are not SQL text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
 
+`js.mass-assignment` needs a receiver that writes records: a model class (`User.create`, `db.User.update`), a Prisma
+delegate (`prisma.user`), a model or repository instance (`this.userRepository`, `userModel`, `em`), a Knex builder
+(`knex('users')`) or a record loaded through one of those. A service, controller or API client method
+(`teamService.create(req.body)`) chooses its own fields and is not reported.
+
 `js.cookie-without-httponly` leaves out `res.cookie('<name>', …)` (and `setCookie`/`serialize`) when the literal
 name does not suggest a session, credential or CSRF token (`theme`, `locale`): page scripts are meant to read those.
 
