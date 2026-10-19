@@ -655,17 +655,26 @@ export class ScanJob {
     })
     if (task.status !== 'pending' && task.status !== 'running') return false
     const { snapshot } = this.analysis
-    const read = new Set(store.listAgentRuns(this.scan.id).flatMap(run => run.filesRead))
+    // Tasks the wave ceiling left pending run in a later wave: they are queued, not gaps (nor failures).
+    const queued = hunts.filter(t => t.status === 'pending' || t.status === 'running')
+    const started = hunts.filter(t => t.status !== 'pending' && t.status !== 'running')
+    const read = new Set([
+      ...store.listAgentRuns(this.scan.id).flatMap(run => run.filesRead),
+      ...queued.flatMap(t => t.input.targetPaths),
+    ])
     const excluded = (this.scan.threatModel?.excluded ?? []).map(entry => entry.path)
     const unread = sweepCandidates(snapshot, path => this.inScope(path) && !isExcludedPath(path, excluded), read)
-    const reviewed = new Set(hunts.filter(t => t.status === 'done').flatMap(t => t.input.endpointIds ?? []))
+    const reviewed = new Set(
+      [...hunts.filter(t => t.status === 'done'), ...queued].flatMap(t => t.input.endpointIds ?? []),
+    )
     const endpoints = this.modelEndpoints().filter(e => !reviewed.has(e.id))
     const existing = new Set(hunts.flatMap(t => [t.key, ...(t.input.unitId ? [t.input.unitId] : [])]))
     const { result } = await this.runAgent<CriticOutput>(task, route, {
       budget: this.huntBudget,
       system: criticSystem(this.language()),
       task: criticTask({
-        ledger: this.ledger(hunts, { paths: [], reason: 'task-limit' }),
+        ledger: this.ledger(started, { paths: [], reason: 'task-limit' }),
+        queued: this.ledger(queued, { paths: [], reason: 'task-limit' }),
         unread: unread.slice(0, CRITIC_UNREAD_FILES).map(f => ({
           path: f.path,
           language: f.language,

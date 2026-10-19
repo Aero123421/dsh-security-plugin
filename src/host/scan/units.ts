@@ -284,7 +284,8 @@ export interface LedgerInput {
  * included. A finished task with at least one non-refuted finding backed by
  * its evidence is `finding`; finished with a `needs-runtime` or `partial`
  * verdict, `blocked`; otherwise finished, `covered`. Anything else is
- * `not-run` with a reason from the task's error code.
+ * `not-run` with a reason from the task's error code (a task still queued
+ * counts as stopped by the budget).
  */
 export function coverageLedger(input: LedgerInput): CoverageUnit[] {
   const taskOfEvidence = new Map<string, string>()
@@ -367,6 +368,8 @@ function unitKind(task: TaskRecord): NonNullable<CoverageUnit['kind']> {
 }
 
 function reasonOf(task: TaskRecord): UnitReasonCode {
+  // Still queued when the ledger is made: hunting stopped before it started, which only the budget does.
+  if ((task.status === 'pending' || task.status === 'running') && task.error === undefined) return 'budget'
   switch (task.error?.code) {
     case 'budget':
     case 'budget_exhausted':

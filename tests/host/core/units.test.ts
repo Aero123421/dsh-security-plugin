@@ -262,7 +262,7 @@ describe('coverageLedger', () => {
       'unit:toolless': 'no-tools',
       'unit:consent': 'consent-revoked',
       'unit:stale': 'stale-target',
-      'unit:pending': 'failed',
+      'unit:pending': 'budget',
       unassigned: 'budget',
     })
     // Gap tasks become units too; their surface comes from their endpoints; older hypothesis tasks were planned.

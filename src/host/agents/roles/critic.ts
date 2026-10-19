@@ -33,13 +33,15 @@ export interface CriticOutput {
 }
 
 export interface CriticInput {
-  /** The ledger so far (without the unassigned-files row). */
+  /** The ledger of the units examined or given up so far (without the unassigned-files row). */
   readonly ledger: readonly CoverageUnit[]
-  /** In-scope source files no worker read, best first (bounded by the caller). */
+  /** Units waiting for a later wave (their tasks have not started yet); default none. */
+  readonly queued?: readonly CoverageUnit[]
+  /** In-scope source files no worker read or is queued to start from, best first (bounded by the caller). */
   readonly unread: readonly { readonly path: string; readonly language: string; readonly lines: number }[]
   /** How many unread files there are in all. */
   readonly unreadTotal: number
-  /** Endpoints no finished task reviewed. */
+  /** Endpoints no finished or queued task covers. */
   readonly endpoints: readonly Endpoint[]
   readonly maxUnits: number
   readonly pass: number
@@ -53,11 +55,15 @@ export function criticSystem(language: ReportLanguage): string {
 }
 
 export function criticTask(input: CriticInput): string {
-  const ledger = input.ledger.slice(0, MAX_LEDGER_ROWS).map(unit => {
+  const row = (unit: CoverageUnit, status: string) => {
     const paths = unit.paths.slice(0, 3).join(', ') + (unit.paths.length > 3 ? ` (+${unit.paths.length - 3})` : '')
-    const status = unit.reason ? `${unit.status}: ${unit.reason.code}` : unit.status
     return `[${status}] ${clipLine(unit.title, 100)}${unit.surface ? ` — ${clipLine(unit.surface, 80)}` : ''} — ${paths}`
-  })
+  }
+  const ledger = input.ledger
+    .slice(0, MAX_LEDGER_ROWS)
+    .map(unit => row(unit, unit.reason ? `${unit.status}: ${unit.reason.code}` : unit.status))
+  const queuedUnits = input.queued ?? []
+  const queued = queuedUnits.slice(0, MAX_LEDGER_ROWS).map(unit => row(unit, 'queued'))
   const endpoints = input.endpoints
     .slice(0, MAX_ENDPOINT_ROWS)
     .map(e => `${e.method} ${clipLine(e.route, 120)}  ${e.handler?.path ?? e.declaredAt.path}`)
@@ -66,11 +72,18 @@ export function criticTask(input: CriticInput): string {
 
 Coverage ledger (${input.ledger.length} units${input.ledger.length > MAX_LEDGER_ROWS ? `, first ${MAX_LEDGER_ROWS} shown` : ''}; covered = examined without findings, finding = examined with findings, blocked = examined but undecided, not-run = not examined):
 ${bullets(ledger)}
-
-Source files no reviewer opened (${input.unreadTotal}${input.unreadTotal > unread.length ? `, ${unread.length} most review-worthy shown` : ''}):
+${
+  queuedUnits.length > 0
+    ? `
+Units already queued for the next review wave (${queuedUnits.length}${queuedUnits.length > MAX_LEDGER_ROWS ? `, first ${MAX_LEDGER_ROWS} shown` : ''}; they will run, so do not plan them again):
+${bullets(queued)}
+`
+    : ''
+}
+Source files no reviewer opened or is queued to start from (${input.unreadTotal}${input.unreadTotal > unread.length ? `, ${unread.length} most review-worthy shown` : ''}):
 ${bullets(unread)}
 
-Detected endpoints no reviewer was given (${input.endpoints.length}${input.endpoints.length > MAX_ENDPOINT_ROWS ? `, first ${MAX_ENDPOINT_ROWS} shown` : ''}):
+Detected endpoints no reviewer was given or is queued to get (${input.endpoints.length}${input.endpoints.length > MAX_ENDPOINT_ROWS ? `, first ${MAX_ENDPOINT_ROWS} shown` : ''}):
 ${bullets(endpoints)}
 
 Look for: entry surfaces and trust boundaries no unit covers; sensitive internals nobody read (authentication and sessions, authorization and tenant isolation, cryptography, uploads and file paths, deserialization, templates, shell execution, SQL and other queries, outbound requests); blocked units that a narrower follow-up could settle. Use list_files, read_file and search_code to check quickly.

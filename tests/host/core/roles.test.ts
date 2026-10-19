@@ -195,11 +195,40 @@ describe('task prompts', () => {
       pass: 1,
     })
     expect(task).toContain('[blocked: needs-runtime] Orders API — GET /orders/:id — src/routes/orders.ts')
-    expect(task).toContain('Source files no reviewer opened (7, 1 most review-worthy shown)')
+    expect(task).toContain('Source files no reviewer opened or is queued to start from (7, 1 most review-worthy shown)')
     expect(task).toContain('- src/admin/export.go  (go, 120 lines)')
     expect(task).toContain('- POST /admin/export  src/admin/export.go')
     expect(task).toContain('propose up to 8 new units')
     expect(criticSystem('en')).toContain('"coverage critic"')
+    expect(task).not.toContain('already queued')
+  })
+
+  it('critic lists units waiting for a later wave as queued, apart from the ledger', () => {
+    const task = criticTask({
+      ledger: [],
+      queued: [
+        {
+          id: 'u2',
+          title: 'Admin API',
+          focus: ['authz'],
+          paths: ['src/routes/admin.ts'],
+          status: 'not-run',
+          findings: 0,
+          reason: { code: 'budget', fallback: 'x' },
+          origin: 'recon',
+        },
+      ],
+      unread: [],
+      unreadTotal: 0,
+      endpoints: [],
+      maxUnits: 8,
+      pass: 1,
+    })
+    expect(task).toContain(
+      'Units already queued for the next review wave (1; they will run, so do not plan them again)',
+    )
+    expect(task).toContain('- [queued] Admin API — src/routes/admin.ts')
+    expect(task).not.toContain('[not-run')
   })
 
   it('hunter shows endpoints, signal ids, hypothesis, known issues, and starting files', () => {
