@@ -8,6 +8,38 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- `pnpm e2e` runs every fixture app as its own project in a scratch DSH with the scripted model, scans them at
+  the same time, and checks each report (completion, AI tasks, recall, negative controls, discarded fabricated
+  claims, no file paths from another project) and the shared scan queue. The scripted model now answers per
+  fixture app, so several fixture projects can share one DSH.
+- The project picker shows each project's state: scanning, queued, paused, or the open findings of its last scan.
+  A queued scan names the project whose scan it waits for and links to it. While any scan is queued or running,
+  the page polls the active scans of all projects (every 5 seconds, 10 seconds while the tab is hidden).
+
+### Changed
+
+- Rework the Security page to follow DSH's own patterns: severity and status as a colored dot with plain text
+  instead of pill badges and signal bars; a centered empty state; one Export menu; filter menus for severity,
+  status, decision and source instead of rows of chips; a segmented review-depth control with a one-line
+  description instead of mode cards; a one-line scope estimate; and one "Usage and activity" disclosure for usage,
+  reviewers and the activity log. Results start with how complete the AI review was, then the open findings, then
+  coverage.
+- Order the finding detail as Problem, Evidence, Independent review, Fix and Decision. Repeated evidence excerpts
+  are shown once, and the re-scan button names the depth it reuses.
+- The activity log shows the Host's own sentence for reviewer, warning and failure events (after a localized
+  label in Japanese and Chinese) instead of "check technical details" placeholders.
+- Adding a project folder from the header selects it without opening New scan.
+- Offer **Add budget** only when a budget limit stopped scheduled AI work, not for every incomplete review.
+- Tasks skipped because their target file no longer exists no longer count as unfinished AI review work.
+
+### Fixed
+
+- Closing a dialog no longer moves focus back to its opener when another dialog has already taken focus. Escape
+  closes the topmost dialog even when focus has left it.
+- The folder browser's breadcrumb has its own accessible name instead of repeating "Folder path".
+
 ## [0.4.0] - 2026-10-18
 
 ### Changed

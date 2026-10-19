@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { CodeRef } from '../../shared/domain.ts'
 import { DASH } from '../format.ts'
 
@@ -39,23 +40,29 @@ export function formatLocation(ref: CodeRef | undefined): string {
 }
 
 /**
- * Source excerpt with line numbers taken from the cited location. Lines are
- * numbered from `startLine`; the block scrolls horizontally instead of
- * wrapping so indentation stays readable.
+ * Source excerpt with line numbers taken from the cited location. Long lines
+ * wrap under their own text (the line number column stays put), so nothing
+ * is hidden past the right edge of a narrow pane.
  */
 export function CodeBlock(props: {
   readonly snippet: string
   readonly location?: CodeRef | undefined
   readonly label?: string
+  /** Shown at the end of the caption, e.g. the host's quote check. */
+  readonly aside?: ReactNode
 }) {
   const lines = props.snippet.replace(/\n$/, '').split('\n')
   const start = props.location && Number.isFinite(props.location.startLine) ? Math.max(1, props.location.startLine) : 1
   const width = String(start + lines.length - 1).length
   return (
     <figure className="dshsec-code">
-      {props.location ? <figcaption className="dshsec-code-path">{formatLocation(props.location)}</figcaption> : null}
-      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: scrollable region must be keyboard-reachable */}
-      <pre tabIndex={0} title={props.label}>
+      {props.location || props.aside ? (
+        <figcaption className="dshsec-code-path">
+          <span>{props.location ? formatLocation(props.location) : null}</span>
+          {props.aside}
+        </figcaption>
+      ) : null}
+      <pre title={props.label}>
         <code>
           {lines.map((line, i) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: lines are positional

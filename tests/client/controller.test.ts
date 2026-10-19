@@ -365,16 +365,24 @@ describe('controller revalidate', () => {
         listScans: () => ok([]),
       })
       const controller = createController({ api, storage: null })
+      // One list for the selected project, one across projects for the active scans.
+      const projectLists = () =>
+        (api.callsOf('listScans') as { workspaceId?: string }[]).filter(call => call?.workspaceId === 'ws-1')
+      const activeLists = () =>
+        (api.callsOf('listScans') as { workspaceId?: string }[]).filter(call => call?.workspaceId === undefined)
       controller.revalidate()
       await vi.advanceTimersByTimeAsync(0)
-      expect(api.callsOf('listScans')).toHaveLength(1)
+      expect(projectLists()).toHaveLength(1)
+      expect(activeLists()).toHaveLength(1)
       controller.revalidate()
       await vi.advanceTimersByTimeAsync(0)
-      expect(api.callsOf('listScans')).toHaveLength(1)
+      expect(projectLists()).toHaveLength(1)
+      expect(activeLists()).toHaveLength(1)
       vi.setSystemTime(new Date(Date.now() + REVALIDATE_MS + 1))
       controller.revalidate()
       await vi.advanceTimersByTimeAsync(0)
-      expect(api.callsOf('listScans')).toHaveLength(2)
+      expect(projectLists()).toHaveLength(2)
+      expect(activeLists()).toHaveLength(2)
       expect(api.callsOf('getBootstrap')).toHaveLength(2)
       controller.dispose()
     } finally {

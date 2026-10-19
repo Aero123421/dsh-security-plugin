@@ -1,12 +1,13 @@
-import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FindingSummary, ScanSummary } from '../../shared/contracts.ts'
-import { FINDING_SOURCES, type FindingSource, SEVERITIES, TRIAGE_STATES } from '../../shared/domain.ts'
+import { FINDING_SOURCES, SEVERITIES, TRIAGE_STATES } from '../../shared/domain.ts'
 import { Button } from '../components/Button.tsx'
-import { Select } from '../components/Field.tsx'
+import { MenuButton } from '../components/Menu.tsx'
 import { useController, usePageWidth, useSecurity, useT } from '../context.tsx'
 import type { Loadable } from '../controller.ts'
 import { CLOSURES, DEFAULT_FINDINGS_FILTER, filterFindings, isDefaultFilter, toggleIn } from '../findings.ts'
 import { useWorkspaceScans } from '../hooks.ts'
+import type { Translator } from '../i18n.ts'
 import { IconArrowLeft, IconSearch } from '../icons.tsx'
 import { pollableScan, resultsScan } from '../selectors.ts'
 import { FindingDetailView } from './FindingDetail.tsx'
@@ -257,11 +258,6 @@ function FilterBar(props: { readonly total: number; readonly shown: number }) {
   const filter = useSecurity(s => s.filter)
   const searchId = useId()
 
-  const sourceOptions = [
-    { value: 'all' as const, label: tr.t('findings.allSources') },
-    ...FINDING_SOURCES.map(source => ({ value: source, label: tr.t(`source.${source}`) })),
-  ]
-
   return (
     <div className="dshsec-filters">
       <div className="dshsec-search">
@@ -280,91 +276,91 @@ function FilterBar(props: { readonly total: number; readonly shown: number }) {
           }}
         />
       </div>
-      <ChipGroup label={tr.t('findings.severity')}>
-        {SEVERITIES.map(severity => (
-          <Chip
-            key={severity}
-            pressed={filter.severities.includes(severity)}
-            tone={severity}
-            onToggle={() =>
-              controller.setFilter(f => ({ ...f, severities: toggleIn(f.severities, severity, SEVERITIES) }))
-            }
-          >
-            {tr.t(`severity.${severity}`)}
-          </Chip>
-        ))}
-      </ChipGroup>
-      <ChipGroup label={tr.t('findings.closure')}>
-        {CLOSURES.map(closure => (
-          <Chip
-            key={closure}
-            pressed={filter.closures.includes(closure)}
-            onToggle={() => controller.setFilter(f => ({ ...f, closures: toggleIn(f.closures, closure, CLOSURES) }))}
-          >
-            {tr.t(`closure.${closure}`)}
-          </Chip>
-        ))}
-      </ChipGroup>
-      <ChipGroup label={tr.t('findings.triage')}>
-        {TRIAGE_STATES.map(triage => (
-          <Chip
-            key={triage}
-            pressed={filter.triage.includes(triage)}
-            onToggle={() => controller.setFilter(f => ({ ...f, triage: toggleIn(f.triage, triage, TRIAGE_STATES) }))}
-          >
-            {tr.t(`triage.${triage}`)}
-          </Chip>
-        ))}
-      </ChipGroup>
-      <div className="dshsec-filters-foot">
-        <Select<FindingSource | 'all'>
-          ariaLabel={tr.t('findings.source')}
-          value={filter.source}
-          options={sourceOptions}
-          onChange={source => controller.setFilter(f => ({ ...f, source }))}
+      {/* biome-ignore lint/a11y/useSemanticElements: a labelled group of filter menus, not a form fieldset */}
+      <div className="dshsec-filter-row" role="group" aria-label={tr.t('findings.filters')}>
+        <MenuButton
+          size="sm"
+          align="start"
+          keepOpen
+          active={!sameSet(filter.severities, DEFAULT_FINDINGS_FILTER.severities)}
+          label={filterLabel(tr, tr.t('findings.severity'), filter.severities, SEVERITIES, v => tr.t(`severity.${v}`))}
+          items={SEVERITIES.map(severity => ({
+            id: severity,
+            label: tr.t(`severity.${severity}`),
+            checked: filter.severities.includes(severity),
+            onSelect: () =>
+              controller.setFilter(f => ({ ...f, severities: toggleIn(f.severities, severity, SEVERITIES) })),
+          }))}
         />
-        <span className="dshsec-muted dshsec-count" aria-live="polite">
-          {tr.t('findings.count', { shown: props.shown, total: props.total })}
-        </span>
+        <MenuButton
+          size="sm"
+          align="start"
+          keepOpen
+          active={!sameSet(filter.closures, DEFAULT_FINDINGS_FILTER.closures)}
+          label={filterLabel(tr, tr.t('findings.closure'), filter.closures, CLOSURES, v => tr.t(`closure.${v}`))}
+          items={CLOSURES.map(closure => ({
+            id: closure,
+            label: tr.t(`closure.${closure}`),
+            checked: filter.closures.includes(closure),
+            onSelect: () => controller.setFilter(f => ({ ...f, closures: toggleIn(f.closures, closure, CLOSURES) })),
+          }))}
+        />
+        <MenuButton
+          size="sm"
+          align="start"
+          keepOpen
+          active={!sameSet(filter.triage, DEFAULT_FINDINGS_FILTER.triage)}
+          label={filterLabel(tr, tr.t('findings.triage'), filter.triage, TRIAGE_STATES, v => tr.t(`triage.${v}`))}
+          items={TRIAGE_STATES.map(triage => ({
+            id: triage,
+            label: tr.t(`triage.${triage}`),
+            checked: filter.triage.includes(triage),
+            onSelect: () => controller.setFilter(f => ({ ...f, triage: toggleIn(f.triage, triage, TRIAGE_STATES) })),
+          }))}
+        />
+        <MenuButton
+          size="sm"
+          align="start"
+          active={filter.source !== 'all'}
+          label={
+            filter.source === 'all'
+              ? tr.t('findings.source')
+              : `${tr.t('findings.source')}: ${tr.t(`source.${filter.source}`)}`
+          }
+          items={(['all', ...FINDING_SOURCES] as const).map(source => ({
+            id: source,
+            label: source === 'all' ? tr.t('findings.allSources') : tr.t(`source.${source}`),
+            checked: filter.source === source,
+            onSelect: () => controller.setFilter(f => ({ ...f, source })),
+          }))}
+        />
         {!isDefaultFilter(filter) ? (
           <Button size="sm" variant="link" onClick={() => controller.setFilter(DEFAULT_FINDINGS_FILTER)}>
             {tr.t('findings.reset')}
           </Button>
         ) : null}
+        <span className="dshsec-muted dshsec-count" aria-live="polite">
+          {tr.t('findings.count', { shown: props.shown, total: props.total })}
+        </span>
       </div>
     </div>
   )
 }
 
-function ChipGroup(props: { readonly label: string; readonly children: ReactNode }) {
-  const id = useId()
-  return (
-    <div className="dshsec-chipgroup">
-      <span className="dshsec-chipgroup-label" id={id}>
-        {props.label}
-      </span>
-      {/* biome-ignore lint/a11y/useSemanticElements: toggle buttons grouped under a visible label */}
-      <div className="dshsec-chips" role="group" aria-labelledby={id}>
-        {props.children}
-      </div>
-    </div>
-  )
+function sameSet<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every(item => b.includes(item))
 }
 
-function Chip(props: {
-  readonly pressed: boolean
-  readonly onToggle: () => void
-  readonly tone?: string
-  readonly children: ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      className={`dshsec-chip ${props.tone ? `dshsec-chip--${props.tone}` : ''}`}
-      aria-pressed={props.pressed}
-      onClick={props.onToggle}
-    >
-      {props.children}
-    </button>
-  )
+/** "Severity" when nothing is filtered out, else the chosen values ("Severity: High, Critical", "Severity: 3"). */
+function filterLabel<T extends string>(
+  tr: Translator,
+  name: string,
+  selected: readonly T[],
+  all: readonly T[],
+  labelOf: (value: T) => string,
+): string {
+  if (selected.length === all.length) return name
+  if (selected.length === 0) return `${name}: ${tr.t('findings.none')}`
+  const chosen = all.filter(value => selected.includes(value))
+  return chosen.length <= 2 ? `${name}: ${chosen.map(labelOf).join(', ')}` : `${name}: ${chosen.length}`
 }

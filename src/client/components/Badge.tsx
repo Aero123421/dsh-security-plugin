@@ -1,9 +1,11 @@
 import type { ReactNode } from 'react'
 import type { QuoteCheck, ScanStatus, Severity, TriageState, Verification } from '../../shared/domain.ts'
 import { useT } from '../context.tsx'
+import { IconCheck, IconWarn } from '../icons.tsx'
 
 export type BadgeTone = 'neutral' | 'quiet' | 'brand' | 'success' | 'warn' | 'error' | 'error-strong'
 
+/** Small text tag ("New", a triage decision). Kept quiet so severity stays the only color in a row. */
 export function Badge(props: {
   readonly tone?: BadgeTone
   readonly title?: string
@@ -32,41 +34,20 @@ export function severityTone(severity: Severity): BadgeTone {
   return SEVERITY_TONE[severity] ?? 'neutral'
 }
 
-export function SeverityBadge(props: { readonly severity: Severity }) {
+/** Severity as a colored dot and its name. */
+export function SeverityLabel(props: { readonly severity: Severity }) {
   const tr = useT()
   const label = tr.lookup(`severity.${props.severity}`) ?? String(props.severity ?? '—')
   return (
-    <Badge tone={severityTone(props.severity)} className="dshsec-sev">
+    <span className={`dshsec-sev dshsec-sev--${props.severity}`}>
+      <span className="dshsec-sev-dot" aria-hidden="true" />
       {label}
-    </Badge>
-  )
-}
-
-/** Number of filled bars in the certainty glyph. */
-const CERTAINTY_LEVEL: Record<Verification, number> = {
-  refuted: 0,
-  inconclusive: 1,
-  potential: 1,
-  strong_static_evidence: 2,
-  proven_dynamic: 3,
-}
-
-/**
- * The certainty glyph: three ascending bars, filled up to how firmly a
- * finding is established. Ruled-out findings show empty bars.
- */
-export function CertaintyGlyph(props: { readonly verification: Verification }) {
-  const level = CERTAINTY_LEVEL[props.verification] ?? 0
-  return (
-    <span className={`dshsec-certainty dshsec-certainty--${level}`} aria-hidden="true">
-      <span />
-      <span />
-      <span />
     </span>
   )
 }
 
-export function VerificationBadge(props: { readonly verification: Verification; readonly withTitle?: boolean }) {
+/** How firmly a finding is established, as plain text; the explanation is its tooltip. */
+export function VerificationLabel(props: { readonly verification: Verification; readonly withTitle?: boolean }) {
   const tr = useT()
   const label = tr.lookup(`verification.${props.verification}`) ?? String(props.verification ?? '—')
   const explain = tr.lookup(`verification.${props.verification}.explain`)
@@ -75,45 +56,32 @@ export function VerificationBadge(props: { readonly verification: Verification; 
       className={`dshsec-verif dshsec-verif--${props.verification}`}
       title={props.withTitle === false ? undefined : explain}
     >
-      <CertaintyGlyph verification={props.verification} />
-      <span>{label}</span>
+      {label}
     </span>
   )
 }
 
-const QUOTE_TONE: Record<QuoteCheck, BadgeTone> = {
-  match: 'success',
-  relocated: 'success',
-  mismatch: 'warn',
-  stale: 'neutral',
-  unchecked: 'quiet',
-}
-
-export function QuoteBadge(props: { readonly check: QuoteCheck }) {
+/** Whether the host found a cited quote in the source. Only a failed check draws attention. */
+export function QuoteCheckLabel(props: { readonly check: QuoteCheck }) {
   const tr = useT()
+  const label = tr.lookup(`quote.${props.check}`) ?? String(props.check ?? '—')
+  const ok = props.check === 'match' || props.check === 'relocated'
   return (
-    <Badge tone={QUOTE_TONE[props.check] ?? 'neutral'} title={tr.lookup(`quote.${props.check}.explain`)}>
-      {tr.lookup(`quote.${props.check}`) ?? String(props.check ?? '—')}
-    </Badge>
+    <span className={`dshsec-quote dshsec-quote--${props.check}`} title={tr.lookup(`quote.${props.check}.explain`)}>
+      {ok ? <IconCheck size={13} /> : props.check === 'mismatch' ? <IconWarn size={13} /> : null}
+      {label}
+    </span>
   )
 }
 
-const STATUS_TONE: Record<ScanStatus, BadgeTone> = {
-  queued: 'neutral',
-  running: 'brand',
-  paused: 'neutral',
-  completed: 'success',
-  failed: 'error',
-  cancelled: 'quiet',
-  interrupted: 'warn',
-}
-
-export function StatusBadge(props: { readonly status: ScanStatus }) {
+/** Scan status as a dot and a word, like DSH's own status rows. */
+export function StatusLabel(props: { readonly status: ScanStatus }) {
   const tr = useT()
   return (
-    <Badge tone={STATUS_TONE[props.status] ?? 'neutral'}>
+    <span className={`dshsec-status dshsec-status--${props.status}`}>
+      <span className="dshsec-status-dot" aria-hidden="true" />
       {tr.lookup(`status.${props.status}`) ?? String(props.status ?? '—')}
-    </Badge>
+    </span>
   )
 }
 

@@ -34,6 +34,8 @@ export function Modal(props: {
   const dialogRef = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(props.onClose)
   onCloseRef.current = props.onClose
+  const dismissibleRef = useRef(props.dismissible)
+  dismissibleRef.current = props.dismissible
   const initialFocusRef = props.initialFocusRef
 
   useEffect(() => {
@@ -73,10 +75,27 @@ export function Modal(props: {
       }
     })
     observer.observe(dialog, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] })
+    // Esc with focus outside every dialog (for example after a click on the
+    // backdrop's page) still closes the topmost dialog.
+    const doc = dialog.ownerDocument
+    const onDocumentKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      const target = event.target instanceof Element ? event.target : null
+      if (target?.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]')) return
+      const dialogs = doc.querySelectorAll('.dshsec-modal')
+      if (dialogs[dialogs.length - 1] !== dialog) return
+      event.preventDefault()
+      if (dismissibleRef.current !== false) onCloseRef.current()
+    }
+    doc.addEventListener('keydown', onDocumentKey)
     return () => {
       observer.disconnect()
       dialog.removeEventListener('focusin', onFocus)
-      if (opener?.isConnected) opener.focus()
+      doc.removeEventListener('keydown', onDocumentKey)
+      // Return focus only when it went down with this dialog. A dialog opened in
+      // the same update (Add folder → New scan) keeps the focus it has taken.
+      const active = doc.activeElement
+      if (opener?.isConnected && (!active || active === doc.body || dialog.contains(active))) opener.focus()
     }
   }, [initialFocusRef])
 

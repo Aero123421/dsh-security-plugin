@@ -76,18 +76,21 @@ async function renderPage(handlers: Handlers, host: Parameters<typeof createCont
 }
 
 describe('first run', () => {
-  it('explains the scan and offers the three modes with Deep preselected', async () => {
+  it('shows a one-line empty state whose New scan opens the dialog at the default depth', async () => {
     const { container } = await renderPage(baseHandlers())
-    expect(container.textContent).toContain('Check this project for security problems')
-    expect(container.textContent).toContain('What leaves this machine')
-    const radios = [...container.querySelectorAll<HTMLInputElement>('input[name="dshsec-intro-mode"]')]
-    expect(radios.map(r => r.value)).toEqual(['quick', 'deep', 'research'])
+    const empty = container.querySelector('.dshsec-empty')!
+    expect(empty.textContent).toContain('No scans yet')
+    expect(empty.textContent).toContain('Check Demo for leaked secrets')
+    await click(byText(empty, 'button', 'New scan'))
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    const radios = [...dialog.querySelectorAll<HTMLInputElement>('input[name="dshsec-newscan-review"]')]
+    expect(radios.map(r => r.value)).toEqual(['builtin', 'quick', 'deep', 'research'])
     expect(radios.find(r => r.checked)?.value).toBe('deep')
   })
 
   it('tells the user to open a project when there are no workspaces', async () => {
     const { container } = await renderPage(baseHandlers({ listWorkspaces: () => ok([]) }))
-    expect(container.textContent).toContain('Open a project first')
+    expect(container.textContent).toContain('No projects yet')
   })
 
   it('shows a retry affordance on transport errors', async () => {
@@ -98,7 +101,7 @@ describe('first run', () => {
     api.handlers.listWorkspaces = () => ok(WORKSPACES)
     await click(byText(container, 'button', 'Retry'))
     await flush(10)
-    expect(container.textContent).toContain('Check this project for security problems')
+    expect(container.textContent).toContain('No scans yet')
   })
 
   it('shows the contract banner on a version mismatch', async () => {
@@ -136,17 +139,23 @@ describe('New Scan dialog', () => {
 
   async function openDialog(extra: Handlers = {}, bootstrap = makeBootstrap({ settings: withModel })) {
     const page = await renderPage(baseHandlers({ getBootstrap: () => ok(bootstrap), ...extra }))
-    await click(byText(page.container, 'button', 'Start a scan'))
+    await click(byText(page.container, '.dshsec-empty button', 'New scan'))
     await flush(10)
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')
     if (!dialog) throw new Error('dialog not open')
     return { ...page, dialog }
   }
 
-  function approach(dialog: HTMLElement, value: 'ai' | 'builtin') {
-    const radio = dialog.querySelector<HTMLInputElement>(`input[name="dshsec-newscan-approach"][value="${value}"]`)
+  function review(dialog: HTMLElement, value: 'builtin' | 'quick' | 'deep' | 'research') {
+    const radio = dialog.querySelector<HTMLInputElement>(`input[name="dshsec-newscan-review"][value="${value}"]`)
     if (!radio) throw new Error(`no ${value} radio`)
     return radio
+  }
+
+  function providerSelect(dialog: HTMLElement): HTMLSelectElement | undefined {
+    const label = [...dialog.querySelectorAll<HTMLLabelElement>('label')].find(l => l.textContent === 'Provider')
+    const el = label ? document.getElementById(label.htmlFor) : null
+    return el instanceof HTMLSelectElement ? el : undefined
   }
 
   function select(dialog: HTMLElement, label: string): HTMLSelectElement {
@@ -171,12 +180,10 @@ describe('New Scan dialog', () => {
     expect(project.tagName).toBe('BUTTON')
     expect(project.disabled).toBe(true)
     expect(project.textContent).toBe('Demo~/demo')
-    expect(dialog.textContent).toContain('Dependency vulnerability lookup is off')
-    expect(dialog.textContent).toContain('unless offline OSV-Scanner returns results')
-    expect(dialog.textContent).toContain('never code or paths')
-    await click(approach(dialog, 'builtin'))
-    expect(dialog.textContent).toContain('Dependency vulnerability lookup is off')
-    await click(byText(dialog, 'button', 'Open privacy settings'))
+    expect(dialog.textContent).toContain('Known-vulnerability lookup for dependencies is off')
+    await click(review(dialog, 'builtin'))
+    expect(dialog.textContent).toContain('Known-vulnerability lookup for dependencies is off')
+    await click(byText(dialog, 'button', 'Change in Settings'))
     await flush(10)
     expect(document.querySelector('[role="dialog"]')).toBeNull()
     expect(c.store.getState().tab).toBe('settings')
@@ -195,8 +202,6 @@ describe('New Scan dialog', () => {
     const trigger = document.getElementById(label.htmlFor) as HTMLButtonElement
     expect(trigger.tagName).toBe('BUTTON')
     expect(trigger.classList.contains('dshsec-input')).toBe(true)
-    const hintId = trigger.getAttribute('aria-describedby')!
-    expect(document.getElementById(hintId)?.textContent).toContain('Projects are managed in DSH')
     await click(trigger)
     // The portal stays inside the dialog while escaping its scrolling form body.
     const list = dialog.querySelector('[role="listbox"]')!
@@ -220,7 +225,7 @@ describe('New Scan dialog', () => {
   it('hides the dependency hint when lookup is enabled', async () => {
     const settings = makeSettings({ ...withModel, privacy: { ...withModel.privacy, allowDependencyLookup: true } })
     const { dialog } = await openDialog({}, makeBootstrap({ settings }))
-    expect(dialog.textContent).not.toContain('Dependency vulnerability lookup is off')
+    expect(dialog.textContent).not.toContain('Known-vulnerability lookup for dependencies is off')
   })
 
   it.each([0, 1])('uses the supported dependency manifest estimate (%s files)', async count => {
@@ -239,13 +244,12 @@ describe('New Scan dialog', () => {
           dependencyManifests: count,
         }),
     })
-    expect(dialog.textContent?.includes('Dependency vulnerability lookup is off')).toBe(count > 0)
+    expect(dialog.textContent?.includes('Known-vulnerability lookup for dependencies is off')).toBe(count > 0)
   })
 
   it('keeps the conditional hint when the estimate fails', async () => {
     const { dialog } = await openDialog({ estimateScan: () => fail('security/workspace-unavailable') })
-    expect(dialog.textContent).toContain('Dependency vulnerability lookup is off')
-    expect(dialog.textContent).toContain('If this project has dependencies')
+    expect(dialog.textContent).toContain('Known-vulnerability lookup for dependencies is off')
   })
 
   it('passes the optional subfolder to estimates and scan creation', async () => {
@@ -253,6 +257,8 @@ describe('New Scan dialog', () => {
       { createScan: () => ok({ scanId: 'subpath-scan' }) },
       makeBootstrap({ settings: consented }),
     )
+    expect(dialog.querySelector('input[placeholder="packages/app"]')).toBeNull()
+    await click(byText(dialog, 'button', 'Scan only a subfolder'))
     const input = dialog.querySelector<HTMLInputElement>('input[placeholder="packages/app"]')!
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
@@ -265,12 +271,12 @@ describe('New Scan dialog', () => {
     expect(api.callsOf('createScan')[0]).toMatchObject({ subpath: 'packages/app' })
   })
 
-  it('defaults to AI review, shows the estimate with ≈ and requires the consent checkbox', async () => {
+  it('defaults to a Deep AI review, shows the estimate on one line and requires the consent checkbox', async () => {
     const { dialog, api } = await openDialog()
-    expect(approach(dialog, 'ai').checked).toBe(true)
-    expect(dialog.textContent).toContain('≈')
-    expect(dialog.textContent).toContain('These numbers are an estimate')
-    expect(dialog.textContent).toContain('Allow sending code to the AI model')
+    expect(review(dialog, 'deep').checked).toBe(true)
+    expect(dialog.textContent).toContain('120 files · 12 endpoints · about 18 AI tasks')
+    expect(dialog.textContent).toContain('tokens (limit')
+    expect(dialog.textContent).toContain('Sending code to the model')
     await click(byText(dialog, 'button', 'Start scan'))
     expect(dialog.textContent).toContain('Tick the box above to continue.')
     expect(document.activeElement).toBe(dialog.querySelector('.dshsec-consent input[type="checkbox"]'))
@@ -300,20 +306,19 @@ describe('New Scan dialog', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 
-  it('"Built-in checks only" hides consent and models and sends aiReview: false', async () => {
+  it('"Built-in only" hides consent and models and sends aiReview: false', async () => {
     const { dialog, api } = await openDialog(
       { createScan: () => ok({ scanId: 'scan-b' }) },
       makeBootstrap({ settings: makeSettings() }),
     )
     // Nothing configured: AI review offers the inline picker and the consent box.
-    expect(dialog.textContent).toContain('Choose an AI model')
-    expect(dialog.textContent).toContain('Allow sending code to the AI model')
-    await click(approach(dialog, 'builtin'))
-    expect(approach(dialog, 'builtin').checked).toBe(true)
-    expect(dialog.textContent).not.toContain('Allow sending code to the AI model')
-    expect(dialog.textContent).not.toContain('Choose an AI model')
-    expect(dialog.querySelector('input[name="dshsec-newscan-mode"]')).toBeNull()
-    expect(dialog.textContent).not.toContain('Tokens')
+    expect(providerSelect(dialog)).toBeDefined()
+    expect(dialog.textContent).toContain('Sending code to the model')
+    await click(review(dialog, 'builtin'))
+    expect(review(dialog, 'builtin').checked).toBe(true)
+    expect(dialog.textContent).not.toContain('Sending code to the model')
+    expect(providerSelect(dialog)).toBeUndefined()
+    expect(dialog.textContent).not.toContain('tokens')
     await click(byText(dialog, 'button', 'Start built-in checks'))
     await flush(10)
     expect(api.callsOf('updateSettings')).toHaveLength(0)
@@ -340,7 +345,7 @@ describe('New Scan dialog', () => {
       },
       makeBootstrap({ settings }),
     )
-    expect(dialog.textContent).toContain('Choose an AI model')
+    expect(dialog.textContent).toContain('Saved as the default model')
     await click(dialog.querySelector('.dshsec-consent input[type="checkbox"]'))
     // The only provider is preselected; its single model too.
     expect(select(dialog, 'Provider').value).toBe('deepseek')
@@ -402,7 +407,7 @@ describe('New Scan dialog', () => {
     const { dialog } = await openDialog({ listModels: () => ok([]) }, makeBootstrap({ settings: makeSettings() }))
     expect(dialog.textContent).toContain('No AI model is connected to DSH yet')
     await click(byText(dialog, 'button', 'Use built-in checks only'))
-    expect(approach(dialog, 'builtin').checked).toBe(true)
+    expect(review(dialog, 'builtin').checked).toBe(true)
   })
 
   it('explains forbidden-remote, does not create a scan, and offers built-in checks', async () => {
@@ -417,7 +422,7 @@ describe('New Scan dialog', () => {
     expect(dialog.textContent).toContain('only allows this from the host machine itself')
     expect(api.callsOf('createScan')).toHaveLength(0)
     await click(byText(dialog, 'button', 'Use built-in checks only'))
-    expect(approach(dialog, 'builtin').checked).toBe(true)
+    expect(review(dialog, 'builtin').checked).toBe(true)
   })
 
   it('skips the consent box when sending code is already allowed and links to models on no-model', async () => {
@@ -426,9 +431,10 @@ describe('New Scan dialog', () => {
       api,
       controller: c,
     } = await openDialog({ createScan: () => fail('security/no-model') }, makeBootstrap({ settings: consented }))
-    expect(dialog.textContent).not.toContain('Allow sending code to the AI model')
-    expect(dialog.textContent).toContain('Models that will be used')
-    expect(dialog.textContent).toContain('DeepSeek · DeepSeek Chat')
+    expect(dialog.textContent).not.toContain('Sending code to the model')
+    expect(dialog.querySelector('.dshsec-form-control .dshsec-route-model')?.textContent).toBe(
+      'DeepSeek · DeepSeek Chat',
+    )
     await click(byText(dialog, 'button', 'Start scan'))
     await flush(10)
     expect(api.callsOf('updateSettings')).toHaveLength(0)
@@ -555,15 +561,12 @@ describe('finding detail', () => {
       s => s.dataset.section,
     )
     expect(sections).toEqual([...DETAIL_SECTIONS])
-    expect(DETAIL_SECTIONS).toEqual(['problem', 'sure', 'evidence', 'fix', 'recheck'])
+    expect(DETAIL_SECTIONS).toEqual(['problem', 'evidence', 'review', 'fix'])
     const headings = [...container.querySelectorAll('.dshsec-dsec-title')].map(h => h.textContent)
-    expect(headings).toEqual([
-      'What is the problem',
-      'How sure we are',
-      'Evidence',
-      'How to fix',
-      'Re-check after fixing',
-    ])
+    expect(headings).toEqual(['Problem', 'Evidence', 'Independent review', 'Fix', 'Decision'])
+    // The fix actions sit with the title, before the sections.
+    const head = container.querySelector('.dshsec-detail-head')!
+    expect(head.textContent).toContain('Copy fix prompt')
     // Triage comes after the sections; CWE and references at the very bottom.
     const article = container.querySelector('.dshsec-detail')!
     const last = article.lastElementChild!
@@ -574,7 +577,7 @@ describe('finding detail', () => {
   it('explains the verification level and marks unverified quotes', async () => {
     const { container } = await openFinding()
     expect(container.textContent).toContain('Confirmed by reading the code')
-    expect(container.textContent).toContain('NOT VERIFIED')
+    expect(byText(container, '.dshsec-quote', 'Not verified').classList.contains('dshsec-quote--mismatch')).toBe(true)
     const pre = container.querySelector('.dshsec-code pre')!
     expect(pre.querySelector('.dshsec-code-ln')?.textContent?.trim()).toBe('10')
     // Recommendation is split into paragraphs, never injected as HTML.
@@ -803,7 +806,10 @@ describe('page header', () => {
     const picker = head.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!
     await click(picker)
     const list = container.querySelector('[role="listbox"]')!
-    expect(list.querySelector('[role="option"][aria-selected="true"]')?.textContent).toBe('Demo~/code/demo')
+    const selected = list.querySelector('[role="option"][aria-selected="true"]')!
+    expect(selected.querySelector('.dshsec-projsel-title')?.textContent).toBe('Demo')
+    expect(selected.querySelector('.dshsec-projsel-path')?.textContent).toBe('~/code/demo')
+    expect(selected.querySelector('.dshsec-projsel-status')?.textContent).toBe('Not scanned')
     await click(byText(list, '[role="option"]', 'Shop'))
     expect(c.store.getState().workspaceId).toBe('ws-2')
     expect(head.querySelector('.dshsec-project-title')?.textContent).toBe('Shop')
@@ -822,9 +828,21 @@ describe('page header', () => {
     expect(project.textContent).toContain('Demo~/demo')
     expect(project.hasAttribute('aria-haspopup')).toBe(false)
     expect(dialog.querySelector('[role="listbox"]')).toBeNull()
-    expect(dialog.textContent).toContain('Projects are managed in DSH')
   })
 })
+
+/** The header's icon button (or a text button in forms and empty states). */
+function addButton(root: ParentNode): HTMLButtonElement {
+  const icon = root.querySelector<HTMLButtonElement>('button[aria-label="Add project folder…"]')
+  return icon ?? byText<HTMLButtonElement>(root, 'button', 'Add project folder…')
+}
+
+function hasAddButton(root: ParentNode): boolean {
+  return (
+    root.querySelector('button[aria-label="Add project folder…"]') !== null ||
+    [...root.querySelectorAll('button')].some(b => b.textContent?.includes('Add project folder…'))
+  )
+}
 
 describe('add project folder', () => {
   it('allows a new folder pick after a reconnect cancels the previous pick', async () => {
@@ -837,7 +855,7 @@ describe('add project folder', () => {
         }),
     )
     const { container, controller: c } = await renderPage(s.handlers, s.host)
-    const add = byText(container, 'button', 'Add project folder…')
+    const add = addButton(container)
     await click(add)
     await act(async () => c.reload())
     await click(add)
@@ -863,7 +881,7 @@ describe('add project folder', () => {
       ...s.host,
       uiWorkspace: () => ({ listDirectory, pickDirectory: s.pickDirectory }),
     })
-    await click(byText(container, 'button', 'Add project folder…'))
+    await click(addButton(container))
     await flush(10)
     await click(byText(document.body, 'button', 'Shop folder'))
     await flush(10)
@@ -883,7 +901,7 @@ describe('add project folder', () => {
       ...s.host,
       uiWorkspace: () => ({ listDirectory, pickDirectory: s.pickDirectory }),
     })
-    await click(byText(container, 'button', 'Add project folder…'))
+    await click(addButton(container))
     await flush(10)
     expect(s.pickDirectory).toHaveBeenCalledTimes(1)
     expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/shop' })
@@ -898,7 +916,7 @@ describe('add project folder', () => {
       ...s.host,
       uiWorkspace: () => ({ listDirectory, pickDirectory: s.pickDirectory }),
     })
-    await click(byText(container, 'button', 'Add project folder…'))
+    await click(addButton(container))
     await flush(10)
     expect(document.body.textContent).toContain('Could not open this folder')
     expect(s.pickDirectory).not.toHaveBeenCalled()
@@ -926,20 +944,19 @@ describe('add project folder', () => {
     }
   }
 
-  it('registers the picked path, refreshes, selects it and opens a scoped scan from the header', async () => {
+  it('registers the picked path, refreshes and selects it from the header without opening a scan', async () => {
     const s = services()
     const { container, controller: c, api } = await renderPage(s.handlers, s.host)
-    const add = byText<HTMLButtonElement>(container, 'button', 'Add project folder…')
-    expect(container.textContent).toContain('Adds the selected folder to DSH’s project list')
+    const add = addButton(container)
+    expect(add.getAttribute('title')).toBe('Add project folder…')
     await click(add)
     expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/shop' })
     expect(api.callsOf('listWorkspaces')).toHaveLength(2)
     expect(c.store.getState().workspaceId).toBe(shop.id)
-    expect(c.store.getState().newScan).toEqual({ workspaceId: shop.id })
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
-    expect(dialog.querySelector('.dshsec-projsel--field .dshsec-project-title')?.textContent).toBe(shop.title)
+    expect(c.store.getState().newScan).toBeUndefined()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(container.querySelector('.dshsec-head .dshsec-project-title')?.textContent).toBe(shop.title)
     expect(api.callsOf('createScan')).toHaveLength(0)
-    await click(byText(dialog, 'button', 'Cancel'))
     expect(document.activeElement).toBe(add)
   })
 
@@ -954,15 +971,16 @@ describe('add project folder', () => {
       baseHandlers({ listWorkspaces: () => ok(registered ? [shop] : []) }),
       s.host,
     )
-    await click(byText(container, 'button', 'Add project folder…'))
+    expect(container.textContent).toContain('No projects yet')
+    await click(addButton(container.querySelector('.dshsec-empty')!))
     expect(c.store.getState().workspaceId).toBe(shop.id)
-    expect(c.store.getState().newScan?.workspaceId).toBe(shop.id)
+    expect(c.store.getState().newScan).toBeUndefined()
   })
 
   it('treats picker cancellation as a silent no-op and keeps focus and selection', async () => {
     const s = services(null)
     const { container, controller: c, api } = await renderPage(s.handlers, s.host)
-    const add = byText<HTMLButtonElement>(container, 'button', 'Add project folder…')
+    const add = addButton(container)
     await click(add)
     expect(s.create).not.toHaveBeenCalled()
     expect(api.callsOf('listWorkspaces')).toHaveLength(1)
@@ -978,10 +996,10 @@ describe('add project folder', () => {
       ...(absent === 'create' ? { uiWorkspace: s.host.uiWorkspace } : {}),
       ...(absent === 'picker' ? { workspaces: s.host.workspaces } : {}),
     })
-    expect(container.textContent).not.toContain('Add project folder…')
+    expect(hasAddButton(container)).toBe(false)
     expect(await c.addProjectFolder()).toBeUndefined()
     await click(byText(container, 'button', 'New scan'))
-    expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain('Add project folder…')
+    expect(hasAddButton(document.querySelector('[role="dialog"]')!)).toBe(false)
     expect(s.pickDirectory).not.toHaveBeenCalled()
     expect(s.create).not.toHaveBeenCalled()
   })
@@ -994,11 +1012,11 @@ describe('add project folder', () => {
       s.host,
     )
     expect(c.store.getState().workspaceId).toBe(shop.id)
-    await click(byText(container, 'button', 'Add project folder…'))
+    await click(addButton(container))
     expect(s.create).toHaveBeenCalledExactlyOnceWith({ path: '/code/demo' })
     expect(c.store.getState().workspaceId).toBe('ws-1')
     expect(c.store.getState().workspaces.value).toHaveLength(2)
-    expect(c.store.getState().newScan?.workspaceId).toBe('ws-1')
+    expect(c.store.getState().newScan).toBeUndefined()
     expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 
@@ -1007,7 +1025,7 @@ describe('add project folder', () => {
     const { container, controller: c, api } = await renderPage(s.handlers, s.host)
     await act(async () => c.openNewScan({ workspaceId: 'ws-1', subpath: 'old/folder' }))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
-    const add = byText<HTMLButtonElement>(dialog, 'button', 'Add project folder…')
+    const add = addButton(dialog)
     await click(add)
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1)
     expect(dialog.querySelector('.dshsec-projsel--field .dshsec-project-title')?.textContent).toBe(shop.title)
@@ -1026,7 +1044,7 @@ describe('add project folder', () => {
     if (stage === 'picker') s.pickDirectory.mockImplementation(fail)
     else s.create.mockImplementation(fail)
     const { container, controller: c } = await renderPage(s.handlers, s.host)
-    await click(byText(container, 'button', 'Add project folder…'))
+    await click(addButton(container))
     expect(container.textContent).toContain('Couldn’t pick or add the folder')
     expect(container.textContent).not.toContain('private host diagnostic')
     expect(c.store.getState().workspaceId).toBe('ws-1')
@@ -1038,7 +1056,7 @@ describe('add project folder', () => {
     const s = services()
     const { container, controller: c, api } = await renderPage(s.handlers, s.host)
     api.handlers.listWorkspaces = () => fail('security/transport')
-    await click(byText(container, 'button', 'Add project folder…'))
+    await click(addButton(container))
     expect(container.textContent).toContain('The folder is registered in DSH')
     expect(c.store.getState().workspaceId).toBe('ws-1')
     expect(c.store.getState().newScan).toBeUndefined()
@@ -1056,7 +1074,7 @@ describe('add project folder', () => {
     const { container, controller: c } = await renderPage(s.handlers, s.host)
     await click(byText(container, 'button', 'New scan'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
-    await click(byText(dialog, 'button', 'Add project folder…'))
+    await click(addButton(dialog))
     await click(byText(dialog, 'button', 'Cancel'))
     await act(async () => resolve('/code/shop'))
     await flush(10)
@@ -1076,7 +1094,7 @@ describe('add project folder', () => {
         }),
     )
     const { container, controller: c } = await renderPage(s.handlers, s.host)
-    const add = byText(container, 'button', 'Add project folder…')
+    const add = addButton(container)
     await click(add)
     await click(add)
     expect(s.pickDirectory).toHaveBeenCalledTimes(1)
@@ -1365,9 +1383,9 @@ describe('B6 modal busy focus', () => {
       resolve = done
     })
     const { controller: c, container } = await renderPage(baseHandlers({ createScan: () => request }))
-    await click(byText(container, 'button', 'Start a scan'))
+    await click(byText(container, '.dshsec-empty button', 'New scan'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
-    await click(dialog.querySelector('input[name="dshsec-newscan-approach"][value="builtin"]'))
+    await click(dialog.querySelector('input[name="dshsec-newscan-review"][value="builtin"]'))
     const submit = byText<HTMLButtonElement>(dialog, 'button', 'Start built-in checks')
     submit.focus()
     await click(submit)

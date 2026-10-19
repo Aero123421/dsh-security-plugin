@@ -66,8 +66,9 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
    `dsh --profile web --dump-config` and look for a `# == dsh-security-plugin` layer.
 
    To update, add the newer tag the same way. The *Settings* tab shows the running version.
-2. **Open Security** in the DSH sidebar and choose a project. Use **Add project folder…** (when available) to
-   register another folder in DSH’s project list and select it for scanning.
+2. **Open Security** in the DSH sidebar and choose a project. The project list shows each project's state
+   (scanning, queued, or the open findings of its last scan). The folder button next to it (**Add project
+   folder…**, when available) registers another folder in DSH’s project list and selects it.
 3. **Pick models** under the page's *Settings* tab → *Models*. A *Default* model is enough; each role (Planner,
    Hunter, Skeptic, Chain analyst) can override it. A scan needs at least a Hunter model, either its own or the
    default.
@@ -75,7 +76,8 @@ the deterministic test model from `tests/e2e/scripted-llm` (shown as `scripted/o
    consent box. Your consent is saved in Security settings and applies to later scans until you turn it off.
 5. **Start scan.** Progress, live workers and token usage appear on *Overview*. You can close the tab; the scan runs
    in the DSH Host. Pause, resume and cancel are on the same page. A scan that DSH interrupted by stopping can be
-   resumed later.
+   resumed later. Scans of all projects share one queue (`maxConcurrentScans`, default 1); a queued scan names the
+   project whose scan it waits for.
 
 ## Reading the results
 
@@ -94,8 +96,8 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 - **Your decision** (Open, Accepted risk, False positive, Fixed) is stored per project and per finding fingerprint,
   so it carries over to later scans. Fingerprints ignore line numbers, so moving code does not reset decisions.
   Findings that were not in the previous completed scan are marked **New**.
-- Every quoted step shows its check: *Quote verified*, *Verified, lines adjusted* (found once elsewhere in the same
-  file), or *NOT VERIFIED*.
+- Every quoted step shows its check: *Verified*, *Verified (lines adjusted)* (found once elsewhere in the same
+  file), or *Not verified*.
 - **Fix in DSH chat** opens a new DSH chat for the same project with a fix prompt filled in: the finding, its
   verified code and the recommendation. Read it before you send it. The fix is made by your normal coding agent
   under its normal permissions; this plugin never edits code. *Copy fix prompt* copies the same text instead.
@@ -214,8 +216,9 @@ pnpm check:dsh            # latest DSH alpha (network): peer range, types, scrat
 - To try a checkout in DSH, run `pnpm install && pnpm build` in it, then
   `dsh plugin --profile web add /absolute/path/to/checkout`. Rebuild (`pnpm build:watch`) and restart DSH after
   changes.
-- End-to-end runs without an API key use the deterministic test model in `tests/e2e/scripted-llm/`. See
-  [docs/e2e-testing.md](docs/e2e-testing.md).
+- End-to-end runs without an API key use the deterministic test model in `tests/e2e/scripted-llm/`.
+  `pnpm e2e` starts a scratch DSH, adds every fixture app as its own project, scans them at the same time and
+  checks each result and the shared queue. See [docs/e2e-testing.md](docs/e2e-testing.md).
 - `pnpm bench` scans the intentionally vulnerable fixture apps in `tests/fixtures/apps/` offline (built-in analyzers,
   and the scripted model for the AI path) and scores the results against their ground truth. See
   [docs/benchmark.md](docs/benchmark.md).

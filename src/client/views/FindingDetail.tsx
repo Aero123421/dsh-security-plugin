@@ -1,7 +1,7 @@
 import { type ReactNode, type RefObject, useEffect, useId, useRef, useState } from 'react'
 import type { AttackStepView, EvidenceView, FindingDetail, ScanSummary } from '../../shared/contracts.ts'
-import { TRIAGE_STATES, type TriageState } from '../../shared/domain.ts'
-import { Badge, QuoteBadge, SeverityBadge, VerificationBadge } from '../components/Badge.tsx'
+import { type CodeRef, type QuoteCheck, TRIAGE_STATES, type TriageState } from '../../shared/domain.ts'
+import { Badge, QuoteCheckLabel, SeverityLabel, TriageBadge, VerificationLabel } from '../components/Badge.tsx'
 import { Button } from '../components/Button.tsx'
 import { Callout } from '../components/Callout.tsx'
 import { CodeBlock, formatLocation, Paragraphs } from '../components/Text.tsx'
@@ -15,7 +15,7 @@ import { LoadError, Loading } from './shared.tsx'
 const IDLE: Loadable<FindingDetail> = { status: 'idle' }
 
 /** Ordered detail sections; tests assert this order. */
-export const DETAIL_SECTIONS = ['problem', 'sure', 'evidence', 'fix', 'recheck'] as const
+export const DETAIL_SECTIONS = ['problem', 'evidence', 'review', 'fix'] as const
 
 export function FindingDetailView(props: {
   readonly scan: ScanSummary
@@ -53,67 +53,78 @@ function DetailBody(props: {
   const tr = useT()
   const { detail, scan } = props
   const preconditions = asArray(detail.preconditions).filter(p => typeof p === 'string' && p.trim())
+  const impact = typeof detail.impact === 'string' && detail.impact.trim() ? detail.impact : undefined
   return (
     <article className="dshsec-detail" aria-labelledby={`dshsec-detail-${detail.id}`}>
       <header className="dshsec-detail-head">
-        <div className="dshsec-detail-tags">
-          <SeverityBadge severity={detail.severity} />
+        <p className="dshsec-detail-tags">
+          <SeverityLabel severity={detail.severity} />
+          <VerificationLabel verification={detail.verification} />
           {detail.isNew ? <Badge tone="brand">{tr.t('findings.new')}</Badge> : null}
-        </div>
+          <TriageBadge triage={detail.triage} />
+        </p>
         <h2 className="dshsec-detail-title" id={`dshsec-detail-${detail.id}`} ref={props.headingRef} tabIndex={-1}>
           {text(detail.title)}
         </h2>
         <p className="dshsec-detail-loc">{formatLocation(detail.location)}</p>
+        <FixActions detail={detail} scan={scan} />
       </header>
 
       <DetailSection id="problem" title={tr.t('detail.problem')}>
         <Paragraphs text={detail.summary} />
-        {detail.impact ? (
-          <div className="dshsec-stack-sm">
-            <h4 className="dshsec-h4">{tr.t('detail.impact')}</h4>
-            <Paragraphs text={detail.impact} />
-          </div>
+        {impact || preconditions.length ? (
+          <dl className="dshsec-kv dshsec-kv--detail">
+            {impact ? (
+              <div className="dshsec-kv-row">
+                <dt>{tr.t('detail.impact')}</dt>
+                <dd>
+                  <Paragraphs text={impact} />
+                </dd>
+              </div>
+            ) : null}
+            {preconditions.length ? (
+              <div className="dshsec-kv-row">
+                <dt>{tr.t('detail.preconditions')}</dt>
+                <dd>
+                  <ul className="dshsec-plain-list">
+                    {preconditions.map(p => (
+                      <li key={p}>{p}</li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+            ) : null}
+          </dl>
         ) : null}
-        {preconditions.length ? (
-          <div className="dshsec-stack-sm">
-            <h4 className="dshsec-h4">{tr.t('detail.preconditions')}</h4>
-            <ul className="dshsec-list">
-              {preconditions.map(p => (
-                <li key={p}>{p}</li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </DetailSection>
-
-      <DetailSection id="sure" title={tr.t('detail.sure')}>
-        <div className="dshsec-sure">
-          <VerificationBadge verification={detail.verification} withTitle={false} />
-          <p>{tr.lookup(`verification.${detail.verification}.explain`) ?? '—'}</p>
-        </div>
-        <div className="dshsec-stack-sm">
-          <h4 className="dshsec-h4">{tr.t('detail.review')}</h4>
-          {detail.review ? (
-            <div className="dshsec-review">
-              <p className="dshsec-review-verdict">
-                <strong>{tr.lookup(`review.${detail.review.verdict}`) ?? text(detail.review.verdict)}</strong>
-                {detail.review.model ? (
-                  <span className="dshsec-muted"> — {tr.t('detail.reviewBy', { model: detail.review.model })}</span>
-                ) : null}
-              </p>
-              <Paragraphs text={detail.review.reasoning} />
-            </div>
-          ) : (
-            <p className="dshsec-muted">{tr.t('detail.noReview')}</p>
-          )}
-        </div>
       </DetailSection>
 
       <EvidenceSection detail={detail} />
 
-      <FixSection detail={detail} scan={scan} />
+      <DetailSection id="review" title={tr.t('detail.review')}>
+        {detail.review ? (
+          <div className="dshsec-review">
+            <p className="dshsec-review-verdict">
+              <strong>{tr.lookup(`review.${detail.review.verdict}`) ?? text(detail.review.verdict)}</strong>
+              {detail.review.model ? (
+                <span className="dshsec-muted"> · {tr.t('detail.reviewBy', { model: detail.review.model })}</span>
+              ) : null}
+            </p>
+            <Paragraphs text={detail.review.reasoning} />
+          </div>
+        ) : (
+          <p className="dshsec-muted">{tr.t('detail.noReview')}</p>
+        )}
+        <p className="dshsec-hint">{tr.lookup(`verification.${detail.verification}.explain`) ?? ''}</p>
+      </DetailSection>
 
-      <RecheckSection scan={scan} />
+      <DetailSection id="fix" title={tr.t('detail.fix')}>
+        {typeof detail.recommendation === 'string' && detail.recommendation.trim() ? (
+          <Paragraphs text={detail.recommendation} />
+        ) : (
+          <p className="dshsec-muted">{tr.t('detail.noRecommendation')}</p>
+        )}
+        <Recheck scan={scan} />
+      </DetailSection>
 
       <TriageControl key={detail.id} detail={detail} scanId={scan.id} />
 
@@ -138,10 +149,21 @@ function DetailSection(props: {
   )
 }
 
+/** Identity of a cited excerpt; the same code quoted twice is shown once. */
+function excerptKey(location: CodeRef | undefined, snippet: unknown): string {
+  return `${formatLocation(location)}\u0000${typeof snippet === 'string' ? snippet.trim() : ''}`
+}
+
 function EvidenceSection(props: { readonly detail: FindingDetail }) {
   const tr = useT()
   const steps = [...asArray(props.detail.attackPath)].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-  const evidence = asArray(props.detail.evidence)
+  const shown = new Set(steps.map(step => excerptKey(step.location, step.snippet)))
+  const evidence = asArray(props.detail.evidence).filter(item => {
+    const key = excerptKey(item.location, item.snippet)
+    if (shown.has(key)) return false
+    shown.add(key)
+    return true
+  })
   const counter = asArray(props.detail.counterevidence)
   const limitations = asArray(props.detail.limitations).filter(l => typeof l === 'string' && l.trim())
   const empty = !steps.length && !evidence.length && !counter.length && !limitations.length
@@ -149,15 +171,12 @@ function EvidenceSection(props: { readonly detail: FindingDetail }) {
     <DetailSection id="evidence" title={tr.t('detail.evidence')}>
       {empty ? <p className="dshsec-muted">{tr.t('detail.noEvidence')}</p> : null}
       {steps.length ? (
-        <div className="dshsec-stack-sm">
-          <h4 className="dshsec-h4">{tr.t('detail.attackPath')}</h4>
-          <ol className="dshsec-path">
-            {steps.map((step, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: steps are positional; order may repeat
-              <AttackStep key={`${step.order}-${i}`} step={step} index={i} />
-            ))}
-          </ol>
-        </div>
+        <ol className="dshsec-path" aria-label={tr.t('detail.attackPath')}>
+          {steps.map((step, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: steps are positional; order may repeat
+            <AttackStep key={`${step.order}-${i}`} step={step} index={i} total={steps.length} />
+          ))}
+        </ol>
       ) : null}
       {evidence.length ? <EvidenceList title={tr.t('detail.supporting')} items={evidence} /> : null}
       {counter.length ? <EvidenceList title={tr.t('detail.counter')} items={counter} /> : null}
@@ -175,21 +194,39 @@ function EvidenceSection(props: { readonly detail: FindingDetail }) {
   )
 }
 
-function AttackStep(props: { readonly step: AttackStepView; readonly index: number }) {
+/** A cited excerpt with its location and the host's quote check in the caption. */
+function Excerpt(props: {
+  readonly snippet: unknown
+  readonly location: CodeRef | undefined
+  readonly check: QuoteCheck
+}) {
+  const { snippet, location, check } = props
+  if (typeof snippet === 'string' && snippet) {
+    return <CodeBlock snippet={snippet} location={location} aside={<QuoteCheckLabel check={check} />} />
+  }
+  if (!location) return check === 'unchecked' ? null : <QuoteCheckLabel check={check} />
+  return (
+    <p className="dshsec-detail-loc">
+      {formatLocation(location)} <QuoteCheckLabel check={check} />
+    </p>
+  )
+}
+
+function AttackStep(props: { readonly step: AttackStepView; readonly index: number; readonly total: number }) {
   const tr = useT()
   const { step } = props
   return (
-    <li className={`dshsec-path-step ${step.quoteCheck === 'mismatch' ? 'is-unverified' : ''}`}>
-      <div className="dshsec-path-head">
-        <span className="dshsec-path-n">{tr.t('detail.step', { n: props.index + 1 })}</span>
-        <QuoteBadge check={step.quoteCheck} />
+    <li className={`dshsec-path-step${step.quoteCheck === 'mismatch' ? ' is-unverified' : ''}`}>
+      <div className="dshsec-path-text">
+        {props.total > 1 ? (
+          <span className="dshsec-path-n">
+            <span aria-hidden="true">{props.index + 1}</span>
+            <span className="dshsec-visually-hidden">{tr.t('detail.step', { n: props.index + 1 })}</span>
+          </span>
+        ) : null}
+        <Paragraphs text={step.description} />
       </div>
-      <Paragraphs text={step.description} />
-      {typeof step.snippet === 'string' && step.snippet ? (
-        <CodeBlock snippet={step.snippet} location={step.location} />
-      ) : step.location ? (
-        <p className="dshsec-detail-loc">{formatLocation(step.location)}</p>
-      ) : null}
+      <Excerpt snippet={step.snippet} location={step.location} check={step.quoteCheck} />
     </li>
   )
 }
@@ -202,16 +239,13 @@ function EvidenceList(props: { readonly title: string; readonly items: readonly 
       <ul className="dshsec-evidence">
         {props.items.map(item => (
           <li key={item.id} className={item.quoteCheck === 'mismatch' ? 'is-unverified' : ''}>
-            <div className="dshsec-path-head">
-              <Badge tone="quiet">{tr.lookup(`trust.${item.trust}`) ?? text(item.trust)}</Badge>
-              <QuoteBadge check={item.quoteCheck} />
+            <div className="dshsec-evidence-claim">
+              <Paragraphs text={item.claim} />
+              <span className="dshsec-muted dshsec-evidence-source">
+                {tr.lookup(`trust.${item.trust}`) ?? text(item.trust)}
+              </span>
             </div>
-            <Paragraphs text={item.claim} />
-            {typeof item.snippet === 'string' && item.snippet ? (
-              <CodeBlock snippet={item.snippet} location={item.location} />
-            ) : item.location ? (
-              <p className="dshsec-detail-loc">{formatLocation(item.location)}</p>
-            ) : null}
+            <Excerpt snippet={item.snippet} location={item.location} check={item.quoteCheck} />
           </li>
         ))}
       </ul>
@@ -221,7 +255,8 @@ function EvidenceList(props: { readonly title: string; readonly items: readonly 
 
 type ActionNote = { readonly tone: 'success' | 'error'; readonly text: string } | undefined
 
-function FixSection(props: { readonly detail: FindingDetail; readonly scan: ScanSummary }) {
+/** Hand the fix to DSH's coding agent, or copy the prompt. The plugin itself never edits code. */
+function FixActions(props: { readonly detail: FindingDetail; readonly scan: ScanSummary }) {
   const controller = useController()
   const tr = useT()
   const { detail, scan } = props
@@ -257,33 +292,29 @@ function FixSection(props: { readonly detail: FindingDetail; readonly scan: Scan
   }
 
   return (
-    <DetailSection id="fix" title={tr.t('detail.fix')}>
-      {typeof detail.recommendation === 'string' && detail.recommendation.trim() ? (
-        <Paragraphs text={detail.recommendation} />
-      ) : (
-        <p className="dshsec-muted">{tr.t('detail.noRecommendation')}</p>
-      )}
+    <div className="dshsec-stack-sm">
       <div className="dshsec-actions">
         {canChat ? (
           <Button
             variant="primary"
-            icon={<IconChat size={16} />}
+            size="sm"
+            icon={<IconChat size={15} />}
             busy={busy === 'chat'}
             onClick={() => void openChat()}
           >
             {tr.t('detail.fixInChat')}
           </Button>
         ) : null}
-        <Button icon={<IconCopy size={16} />} busy={busy === 'copy'} onClick={() => void copy()}>
+        <Button size="sm" icon={<IconCopy size={15} />} busy={busy === 'copy'} onClick={() => void copy()}>
           {tr.t('detail.copyPrompt')}
         </Button>
       </div>
       {note ? <Callout tone={note.tone}>{note.text}</Callout> : null}
-    </DetailSection>
+    </div>
   )
 }
 
-function RecheckSection(props: { readonly scan: ScanSummary }) {
+function Recheck(props: { readonly scan: ScanSummary }) {
   const controller = useController()
   const tr = useT()
   const [busy, setBusy] = useState(false)
@@ -293,14 +324,12 @@ function RecheckSection(props: { readonly scan: ScanSummary }) {
     setBusy(false)
   }
   return (
-    <DetailSection id="recheck" title={tr.t('detail.recheck')}>
-      <p>{tr.t('detail.recheckBody')}</p>
-      <div className="dshsec-actions">
-        <Button icon={<IconRefresh size={16} />} busy={busy} onClick={() => void run()}>
-          {tr.t('detail.runRecheck', { mode: tr.t(`mode.${props.scan.mode}`) })}
-        </Button>
-      </div>
-    </DetailSection>
+    <div className="dshsec-recheck">
+      <p className="dshsec-hint">{tr.t('detail.recheckBody')}</p>
+      <Button size="sm" icon={<IconRefresh size={14} />} busy={busy} onClick={() => void run()}>
+        {tr.t('detail.runRecheck', { mode: tr.t(`mode.${props.scan.mode}`) })}
+      </Button>
+    </div>
   )
 }
 
@@ -350,9 +379,9 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
   }
 
   return (
-    <section className="dshsec-triage" aria-labelledby={`${helpId}-title`}>
+    <section className="dshsec-dsec dshsec-triage" aria-labelledby={`${helpId}-title`}>
       <fieldset className="dshsec-fieldset">
-        <legend className="dshsec-h3" id={`${helpId}-title`}>
+        <legend className="dshsec-dsec-title" id={`${helpId}-title`}>
           {tr.t('detail.decision')}
         </legend>
         <p className="dshsec-hint" id={helpId}>
@@ -395,11 +424,11 @@ function TriageControl(props: { readonly detail: FindingDetail; readonly scanId:
         />
       </div>
       <div className="dshsec-actions">
-        <Button busy={busy} disabled={!dirty} onClick={() => void save()}>
+        <Button size="sm" busy={busy} disabled={!dirty} onClick={() => void save()}>
           {tr.t('detail.saveDecision')}
         </Button>
+        {dirty && !busy ? <span className="dshsec-hint">{tr.t('settings.unsaved')}</span> : null}
       </div>
-      {dirty && !busy ? <p className="dshsec-hint">{tr.t('settings.unsaved')}</p> : null}
       {result ? <Callout tone={result.tone}>{result.text}</Callout> : null}
     </section>
   )
@@ -461,7 +490,6 @@ function ReferenceSection(props: { readonly detail: FindingDetail }) {
     : undefined
   return (
     <footer className="dshsec-refs">
-      <h3 className="dshsec-h4">{tr.t('detail.reference')}</h3>
       <dl className="dshsec-kv dshsec-kv--compact">
         <div className="dshsec-kv-row">
           <dt>{tr.t('detail.cwe')}</dt>
@@ -477,28 +505,30 @@ function ReferenceSection(props: { readonly detail: FindingDetail }) {
           <dt>{tr.t('detail.foundBy')}</dt>
           <dd>
             {tr.lookup(`source.${detail.source}`) ?? text(detail.source)}
-            {foundBy ? <span className="dshsec-muted"> — {foundBy}</span> : null}
+            {foundBy ? <span className="dshsec-muted"> · {foundBy}</span> : null}
           </dd>
         </div>
+        {references.length ? (
+          <div className="dshsec-kv-row">
+            <dt>{tr.t('detail.references')}</dt>
+            <dd>
+              <ul className="dshsec-plain-list dshsec-refs-list">
+                {references.map(ref => (
+                  <li key={ref}>
+                    {isLinkableReference(ref) ? (
+                      <a href={ref} target="_blank" rel="noopener noreferrer" className="dshsec-link">
+                        {ref}
+                      </a>
+                    ) : (
+                      ref
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </div>
+        ) : null}
       </dl>
-      {references.length ? (
-        <div className="dshsec-stack-sm">
-          <h4 className="dshsec-h4">{tr.t('detail.references')}</h4>
-          <ul className="dshsec-list dshsec-refs-list">
-            {references.map(ref => (
-              <li key={ref}>
-                {isLinkableReference(ref) ? (
-                  <a href={ref} target="_blank" rel="noopener noreferrer" className="dshsec-link">
-                    {ref}
-                  </a>
-                ) : (
-                  ref
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
     </footer>
   )
 }

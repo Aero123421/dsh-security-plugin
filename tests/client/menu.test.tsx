@@ -235,3 +235,27 @@ describe('MenuButton portal', () => {
     expect(winRemove.mock.calls.some(([type]) => type === 'resize')).toBe(true)
   })
 })
+
+describe('checkable MenuButton', () => {
+  it('exposes checked state, stays open for several choices and marks an applied filter', async () => {
+    const chosen = vi.fn()
+    const entries: MenuItem[] = [
+      { id: 'critical', label: 'Critical', checked: true, onSelect: () => chosen('critical') },
+      { id: 'high', label: 'High', checked: false, onSelect: () => chosen('high') },
+    ]
+    const menu = renderMenu({ items: entries })
+    mounted!.rerender(menu.content({ keepOpen: true, active: true }))
+    expect(menu.trigger.classList.contains('is-active')).toBe(true)
+    await click(menu.trigger)
+    const options = [...(menu.panel()?.querySelectorAll<HTMLButtonElement>('[role="menuitemcheckbox"]') ?? [])]
+    expect(options.map(o => [o.textContent, o.getAttribute('aria-checked')])).toEqual([
+      ['Critical', 'true'],
+      ['High', 'false'],
+    ])
+    expect(menu.entriesInMenu()).toHaveLength(0)
+    await click(options[1])
+    expect(chosen).toHaveBeenCalledWith('high')
+    // A multi-select filter keeps its menu open after each choice.
+    expect(menu.panel()).not.toBeNull()
+  })
+})

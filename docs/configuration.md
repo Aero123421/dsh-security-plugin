@@ -9,8 +9,8 @@ DSH Security has two layers of configuration:
 
 ## Scan a subfolder
 
-In **New scan**, set **Subfolder** to a POSIX-style relative path such as `packages/app`, or leave it empty
-for the whole project. The folder must already exist inside the registered DSH project; absolute paths, `..`,
+In **New scan**, choose **Scan only a subfolder** and enter a POSIX-style relative path such as `packages/app`.
+Without it the whole project is scanned. The folder must already exist inside the registered DSH project; absolute paths, `..`,
 empty path segments and symlinks that escape the project are rejected for estimates and scans alike.
 File paths and privacy/exclusion patterns remain workspace-relative. Workers see only files in the selected
 folder. History labels identify the scope, and “new” findings compare only with the last completed scan of that
@@ -167,8 +167,8 @@ further calls receive an error result. Concurrency and retry limits are independ
 
 Token usage is charged at the reported uncached input, cache writes and output at full rate, and cache reads at a
 tenth, approximating typical provider cache pricing; the usage figures shown for a scan use the same charge. When a
-scan ends with work skipped because a budget ran out, its results page offers **Continue with more budget**: the
-scan's own budget grows by the chosen percentage of whichever dimensions ran out (still clamped to
+scan ends with work skipped because a budget ran out, its results page names that budget and offers **Add budget**
+(+50%, +100% or +300%): the scan's own budget grows by the chosen percentage of whichever dimensions ran out (still clamped to
 `maxTokensPerScan` / `maxLlmCallsPerScan`), and the skipped work continues in the same scan. Settings budgets for
 future scans are not changed by extending one scan.
 
