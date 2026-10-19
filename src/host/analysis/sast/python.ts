@@ -383,7 +383,7 @@ const REDIRECT_FUNCS =
 const REDIRECT_CHECK =
   /url_has_allowed_host_and_scheme|is_safe_url|urlparse\([^)]*\)\.netloc|allowed_hosts|ALLOWED_REDIRECT|startswith\s*\(\s*['"]\/['"]\s*\)/
 
-const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd\b|passphrase/i
+const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd?\b|passphrase/i
 const MODEL_CALL =
   /^(?:[A-Z]\w*|[\w.]+\.objects\.(?:create|update|update_or_create|get_or_create|filter\(\)\.update)|[\w.]+\.(?:create|update|insert|update_one|insert_one|update_many|update_or_create|get_or_create|model_validate|parse_obj))$/
 
@@ -834,7 +834,7 @@ function weakCrypto(chk: Checker, call: CallFact, q: string): void {
   }
   if (weakHash) {
     if (/usedforsecurity\s*=\s*False/.test(chk.text(call))) return
-    if (PASSWORD_CONTEXT.test(chk.statementText(call))) chk.certain(WEAK_HASH, call, 'medium')
+    if (PASSWORD_CONTEXT.test(chk.digestUsage(call))) chk.certain(WEAK_HASH, call, 'medium')
     return
   }
   if (
@@ -842,6 +842,7 @@ function weakCrypto(chk: Checker, call: CallFact, q: string): void {
     (/^(?:randint|randrange|choice|choices|getrandbits)$/.test(call.callee) &&
       chk.importedFrom(call.callee, /^random\./))
   ) {
+    if (chk.usedAsNumber(call)) return
     const kind = secretContext(chk.contextNames(call))
     if (kind === 'strong') chk.certain(WEAK_RANDOM, call, 'medium')
     else if (kind === 'weak') chk.report(WEAK_RANDOM, call, { kind: 'sink', confidence: 'low' })

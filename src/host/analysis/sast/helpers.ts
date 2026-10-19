@@ -166,6 +166,115 @@ export class Checker {
     return src.slice(a, b < 0 ? src.length : b)
   }
 
+  /**
+   * Source text saying what a digest computed at `span` is for: its statement, the later lines of the same
+   * function that use a variable it is assigned to (`const h = createHash('md5')` … `h.update(pw)`;
+   * `digest = sha1(…)` … `return digest == user.password_hash`), and the function's name when the function
+   * returns the digest and its name says it hashes or checks something (`def hash_password(raw): return md5(…)`).
+   */
+  digestUsage(span: Span): string {
+    const src = this.model.source
+    const fn = this.fnAt(span.start)
+    const parts = [this.statementText(span)]
+    let returned = fn !== undefined && this.#resultStart(fn, span.start) === span.start
+    const end = fn?.end ?? src.length
+    for (const assign of this.model.assigns) {
+      if (assign.fn !== fn || assign.value.start > span.start || span.end > assign.value.end) continue
+      for (const { name } of assign.targets) {
+        if (!/^[A-Za-z_$][\w$]*$/.test(name)) continue
+        const word = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`)
+        let lineStart = src.indexOf('\n', assign.end) + 1
+        for (let n = 0; lineStart > 0 && lineStart < end && n < 40; n++) {
+          const next = src.indexOf('\n', lineStart)
+          const line = src.slice(lineStart, next < 0 ? end : Math.min(next, end))
+          const use = word.exec(line)
+          if (use) {
+            parts.push(line)
+            const at = lineStart + use.index
+            if (fn && !returned) returned = this.#resultStart(fn, at) === at
+          }
+          lineStart = next + 1
+        }
+      }
+    }
+    if (returned && fn?.name && identifierWords(fn.name).some(w => HASHING_WORDS.has(w))) parts.push(fn.name)
+    return parts.join('\n')
+  }
+
+  /**
+   * Name of the function whose result a value at `span` is part of: the innermost enclosing function when it
+   * has a name; through anonymous callbacks, the nearest named function when each callback returns the value
+   * and the outermost one is in that function's `return`
+   * (`function newApiKey() { return [...Array(32)].map(() => hex(Math.random())).join('') }`).
+   */
+  resultFnName(span: Span): string | undefined {
+    let fn = this.fnAt(span.start)
+    if (fn?.name) return fn.name
+    let offset = span.start
+    while (fn && !fn.name) {
+      if (this.#resultStart(fn, offset) === undefined) return undefined
+      offset = fn.start
+      fn = fn.parent
+    }
+    return fn && this.#resultStart(fn, offset) !== undefined ? fn.name : undefined
+  }
+
+  /** The call at `span` is compared or offset (`Math.random() < 0.5`, `random() - 0.5`): a coin flip or a shuffle. */
+  usedAsNumber(span: Span): boolean {
+    const { tokens } = this.model
+    const [a, b] = this.ex.range(span)
+    const isOp = (t: Token | undefined, ops: readonly string[]) => t?.type === 'punct' && ops.includes(t.value)
+    return isOp(tokens[b], ['<', '>', '<=', '>=', '-']) || isOp(tokens[a - 1], ['<', '>', '<=', '>='])
+  }
+
+  /**
+   * Where the value `fn` returns starts, when `offset` lies in it: the body of an expression-bodied arrow, or
+   * the expression of the `return` statement holding `offset` (`if (ok) return …` included).
+   */
+  #resultStart(fn: FnFact, offset: number): number | undefined {
+    if (offset < fn.body.start || offset >= fn.body.end) return undefined
+    const { tokens, match } = this.model
+    const first = tokenIndexAt(tokens, fn.body.start)
+    const open = tokens[first]
+    if (!open) return undefined
+    let ret: number
+    if (this.model.lang === 'py') ret = this.#returnAt(first, tokenIndexAt(tokens, fn.body.end), offset)
+    else if (open.type !== 'punct' || open.value !== '{') return open.start
+    else ret = this.#returnAt(first + 1, match[first]! > first ? match[first]! : tokens.length, offset)
+    if (ret < 0) return undefined
+    let k = ret + 1
+    while (tokens[k] && (tokens[k]!.value === 'await' || tokens[k]!.value === '(') && tokens[k]!.start < offset) k++
+    return tokens[k]?.start
+  }
+
+  /** Token index of the `return` keyword of the statement holding `offset` among tokens `[from, to)`, else -1. */
+  #returnAt(from: number, to: number, offset: number): number {
+    const { tokens, match } = this.model
+    const js = this.model.lang === 'js'
+    let ret = -1
+    let prev: Token | undefined
+    for (let k = from; k < to; k++) {
+      const t = tokens[k]!
+      if (t.start > offset) break
+      if (prev && ((prev.type === 'punct' && prev.value === ';') || (t.nl && (!js || jsStatementBreak(prev, t))))) {
+        ret = -1
+      }
+      if (t.type === 'ident' && t.value === 'return' && !(prev?.type === 'punct' && prev.value === '.')) ret = k
+      const close = t.type === 'punct' && (t.value === '(' || t.value === '[' || t.value === '{') ? match[k]! : -1
+      if (close > k) {
+        // Inside this bracket pair: a JS block holds statements of its own.
+        if (offset < tokens[close]!.end)
+          return js && t.value === '{' && opensBlock(prev) ? this.#returnAt(k + 1, close, offset) : ret
+        prev = tokens[close]
+        k = close
+        continue
+      }
+      if (offset < t.end) break
+      prev = t
+    }
+    return ret
+  }
+
   /** Report a classified match. */
   report(rule: RuleMeta, span: Span, cls: Classification, extra: Partial<Omit<Hit, 'rule' | 'span'>> = {}): void {
     const note = [cls.note, extra.note].filter(Boolean).join(' ')
@@ -304,8 +413,8 @@ export class Checker {
       }
       if (t.type === 'punct' && (t.value === ',' || t.value === ';' || t.value === '{' || t.value === '(')) break
     }
-    const fn = this.fnAt(span.start)
-    if (fn?.name) names.push(fn.name)
+    const fn = this.resultFnName(span)
+    if (fn) names.push(fn)
     return names
   }
 
@@ -377,6 +486,67 @@ export function lastName(chain: string): string {
 /** First identifier of a chain. */
 export function rootName(chain: string): string {
   return /^[A-Za-z_$][\w$]*/.exec(chain)?.[0] ?? ''
+}
+
+/** Function-name words for computing or checking a digest (`hashPassword`, `verify_password`, `passwordDigest`). */
+const HASHING_WORDS: ReadonlySet<string> = new Set([
+  'hash',
+  'hashed',
+  'hashing',
+  'digest',
+  'crypt',
+  'encrypt',
+  'encode',
+  'verify',
+  'check',
+  'compare',
+  'match',
+  'matches',
+])
+
+/** Words after which a JavaScript line break does not end the statement (`return\n  value`, `a\n  instanceof B`). */
+const JS_JOINING_WORDS: ReadonlySet<string> = new Set([
+  'return',
+  'throw',
+  'typeof',
+  'new',
+  'await',
+  'yield',
+  'void',
+  'delete',
+  'case',
+  'do',
+  'else',
+  'in',
+  'of',
+  'instanceof',
+  'as',
+  'satisfies',
+])
+
+/** Whether the line break before `t` ends the JavaScript statement that `prev` belongs to (automatic semicolons, roughly). */
+function jsStatementBreak(prev: Token, t: Token): boolean {
+  const ends =
+    prev.type === 'num' ||
+    prev.type === 'regex' ||
+    (prev.type === 'str' && (prev.part === undefined || prev.part === 'tail')) ||
+    (prev.type === 'ident' && !JS_JOINING_WORDS.has(prev.value)) ||
+    (prev.type === 'punct' && [')', ']', '}', '++', '--'].includes(prev.value))
+  const starts =
+    t.type === 'num' ||
+    t.type === 'regex' ||
+    t.type === 'str' ||
+    (t.type === 'ident' &&
+      !['in', 'of', 'instanceof', 'as', 'satisfies', 'else', 'catch', 'finally'].includes(t.value)) ||
+    (t.type === 'punct' && ['!', '~', '++', '--'].includes(t.value))
+  return ends && starts
+}
+
+/** Whether a `{` after `prev` opens a block statement rather than an object literal. */
+function opensBlock(prev: Token | undefined): boolean {
+  if (!prev) return true
+  if (prev.type === 'punct') return [')', ';', '{', '}'].includes(prev.value)
+  return prev.type === 'ident' && ['else', 'try', 'finally', 'do'].includes(prev.value)
 }
 
 function tokenIndexAt(tokens: readonly Token[], offset: number): number {

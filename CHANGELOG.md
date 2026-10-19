@@ -145,6 +145,12 @@ changes; they are called out explicitly.
   enforce (`requireRole.ts`, `tenantScope.ts`, `tokens.ts`, `crypto.ts`, `upload.ts`, configuration
   directories) before size, so large CRUD repositories and utility middleware no longer take those slots.
   Camel-case names (`requireAuth`) now count.
+- Find MD5/SHA-1 password hashing split over statements or named by its function (`const h =
+  createHash('md5')` then `h.update(pw)`, `def hash_password(raw): return md5(...)`, a digest compared with
+  `user.password_hash`), and random tokens built in callbacks (`newApiKey() { return [...].map(() =>
+  Math.random()...) }`). Only the statement computing the digest or the random value was read before. Random
+  numbers that are compared or subtracted (`Math.random() < 0.1`, `sort(() => Math.random() - 0.5)`) are no
+  longer reported in functions named after tokens.
 - Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
   and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
 

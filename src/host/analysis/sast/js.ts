@@ -566,7 +566,7 @@ const ORM_RECEIVER =
 /** Names that are services, controllers, clients or framework objects even when capitalized. */
 const NOT_A_MODEL =
   /(?:Service|Services|Controller|Handler|Client|Api|API|Error|Exception|Response|Request|Router|Factory|Helper|Manager|Validator|Schema|Dto|DTO|Store|Cache|Map|Set)$|^(?:res|response|req|request|ctx|map|cache|headers|searchParams|params|formData|localStorage|sessionStorage|Object|Array|Promise|Reflect|JSON|Math|Date)$/
-const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd\b|passphrase/i
+const PASSWORD_CONTEXT = /passw(?:or)?d|passwd|\bpwd?\b|passphrase/i
 const AUTH_HEADER_READ =
   /headers\s*(?:\.\s*authorization|\[\s*['"`]authorization['"`]\s*\])|\.(?:get|header)\s*\(\s*['"`]authorization['"`]\s*\)/i
 const SAFE_SENTINEL_OBJECT = /^\{\s*\}$/
@@ -1082,7 +1082,7 @@ function deserialization(chk: Checker, call: CallFact, q: string): void {
 function weakCrypto(chk: Checker, call: CallFact, q: string): void {
   if (/^crypto\.createHash$/.test(q) || (call.callee === 'createHash' && chk.importedFrom('createHash', /^crypto/))) {
     const alg = chk.ex.literal(chk.positional(call, 0) ?? { start: 0, end: 0 })
-    if (alg && /^(?:md5|md4|sha1|sha-1|ripemd160)$/i.test(alg) && PASSWORD_CONTEXT.test(chk.statementText(call))) {
+    if (alg && /^(?:md5|md4|sha1|sha-1|ripemd160)$/i.test(alg) && PASSWORD_CONTEXT.test(chk.digestUsage(call))) {
       chk.certain(WEAK_HASH, call, 'medium')
     }
     return
@@ -1098,6 +1098,7 @@ function weakCrypto(chk: Checker, call: CallFact, q: string): void {
     return
   }
   if (call.callee === 'Math.random') {
+    if (chk.usedAsNumber(call)) return
     const kind = secretContext(chk.contextNames(call))
     if (kind === 'strong') chk.certain(WEAK_RANDOM, call, 'medium')
     else if (kind === 'weak') chk.report(WEAK_RANDOM, call, { kind: 'sink', confidence: 'low' })

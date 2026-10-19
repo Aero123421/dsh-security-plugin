@@ -133,6 +133,16 @@ delegate (`prisma.user`), a model or repository instance (`this.userRepository`,
 `js.cookie-without-httponly` leaves out `res.cookie('<name>', …)` (and `setCookie`/`serialize`) when the literal
 name does not suggest a session, credential or CSRF token (`theme`, `locale`): page scripts are meant to read those.
 
+`js.weak-password-hash` and `py.weak-password-hash` need a password word (`password`, `passwd`, `pwd`, `pw`,
+`passphrase`) in the statement that computes the MD5/SHA-1 digest (with chained calls on the following lines), in
+a later line of the same function that uses the variable holding the digest or hash object (`h.update(pw)`,
+`return digest == user.password_hash`), or in the name of the function that returns the digest when that name
+says it hashes or checks (`hashPassword`, `verify_password`). `js.insecure-random` and `py.insecure-random` read
+the names the value is assigned to and the enclosing function's name; inside anonymous callbacks
+(`.map(() => …)`) they use the nearest named function when each callback returns the value and the outermost one
+is in that function's `return`. A random number that is compared or subtracted (`Math.random() < 0.1`,
+`sort(() => Math.random() - 0.5)`) is not reported.
+
 `js.path-traversal`, `js.ssrf` and `js.open-redirect` also emit a low `sink` when the value is dynamic but its
 origin is not visible (a parameter, a stored record, another module): file reads, writes, deletes and downloads
 (not `stat`, `mkdir`, `exists`-style calls) unless `root` is set or every dynamic part goes through
