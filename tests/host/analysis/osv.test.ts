@@ -163,6 +163,25 @@ describe('queryOsv', () => {
     expect(result.signals[0]!.severity).toBe('medium')
   })
 
+  it.each([0, 2])('warns when a follow-up page returns %i results for one query', async count => {
+    const { fetch } = fakeFetch(req => {
+      if (req.url.endsWith('/querybatch')) {
+        const query = (req.body as { queries: { page_token?: string }[] }).queries[0]!
+        return {
+          json: {
+            results: query.page_token
+              ? Array.from({ length: count }, () => ({ vulns: [{ id: 'OSV-2' }] }))
+              : [{ vulns: [{ id: 'OSV-1' }], next_page_token: 'p2' }],
+          },
+        }
+      }
+      return { json: { id: req.url.split('/').pop()! } }
+    })
+    const result = await queryOsv([dep({ name: 'pkg', version: '1.0.0' })], { endpoint: ENDPOINT, fetch })
+    expect(result.signals.map(s => s.ruleId)).toEqual(['OSV-1'])
+    expect(result.warnings).toEqual([`OSV returned ${count} results for 1 pagination query; page ignored`])
+  })
+
   it('keeps partial results and warns on failures', async () => {
     const { fetch } = fakeFetch(req => {
       if (req.url.endsWith('/querybatch')) {

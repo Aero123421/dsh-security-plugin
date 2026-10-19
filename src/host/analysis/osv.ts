@@ -163,8 +163,12 @@ export async function queryOsv(deps: readonly Dependency[], options: OsvQueryOpt
           },
           batchResponseSchema,
         )
-        const nextResult = next?.results[0]
-        if (!nextResult) break
+        if (!next) break
+        if (next.results.length !== 1) {
+          warnings.push(`OSV returned ${next.results.length} results for 1 pagination query; page ignored`)
+          break
+        }
+        const nextResult = next.results[0]!
         for (const v of nextResult.vulns ?? []) ids.add(v.id)
         token = nextResult.next_page_token
         if (token && page === MAX_PAGES_PER_QUERY) {

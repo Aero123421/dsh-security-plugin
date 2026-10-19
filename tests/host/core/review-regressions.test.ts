@@ -177,17 +177,22 @@ describe('review regressions', () => {
   })
 
   it.each([
-    { succeeds: false, range: false },
-    { succeeds: true, range: false },
-    { succeeds: true, range: true },
-  ])('exports truthful OSV coverage for success=$succeeds range=$range', async ({ succeeds, range }) => {
-    const complete = succeeds && !range
+    { succeeds: false, range: false, missingPage: false },
+    { succeeds: true, range: false, missingPage: false },
+    { succeeds: true, range: true, missingPage: false },
+    { succeeds: true, range: false, missingPage: true },
+  ])('exports truthful OSV coverage for %j', async ({ succeeds, range, missingPage }) => {
+    const complete = succeeds && !range && !missingPage
     const dir = await mkdtemp(join(tmpdir(), 'dsh-osv-'))
     const workspaces = [{ id: 'ws', title: 'dependencies', path: dir }]
     const fetcher: typeof fetch = async (_input, init) => {
       if (!succeeds) throw new Error('test network failure')
-      const body = JSON.parse(String(init?.body)) as { queries: unknown[] }
-      return new Response(JSON.stringify({ results: body.queries.map(() => ({})) }))
+      const body = JSON.parse(String(init?.body)) as { queries: { page_token?: string }[] }
+      const results =
+        missingPage && body.queries[0]?.page_token
+          ? []
+          : body.queries.map(() => (missingPage ? { next_page_token: 'p2' } : {}))
+      return new Response(JSON.stringify({ results }))
     }
     const h = createHarness({ workspaces, fetch: fetcher, settings: { privacy: { allowDependencyLookup: true } } })
     try {

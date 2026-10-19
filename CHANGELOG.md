@@ -8,6 +8,13 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-20
+
+### Fixed
+
+- Treat missing or extra OSV pagination results as incomplete dependency lookup. Preserve already retrieved
+  findings, and include the coverage limitation in JSON, Markdown and SARIF reports.
+
 ## [0.4.0] - 2026-10-18
 
 ### Changed
@@ -313,7 +320,8 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.2.1...v0.2.2
