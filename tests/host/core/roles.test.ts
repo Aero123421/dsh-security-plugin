@@ -14,7 +14,7 @@ import {
 import { hunterSubmitTool, hunterSystem, hunterTask } from '../../../src/host/agents/roles/hunter.ts'
 import { plannerSubmitTool, plannerSystem, plannerTask } from '../../../src/host/agents/roles/planner.ts'
 import { skepticSubmitTool, skepticSystem, skepticTask } from '../../../src/host/agents/roles/skeptic.ts'
-import type { WorkerTool } from '../../../src/host/agents/runtime/tool.ts'
+import { coerceToolArgs, type TerminalContext, type WorkerTool } from '../../../src/host/agents/runtime/tool.ts'
 import { Redactor } from '../../../src/host/analysis/secrets.ts'
 import type { Inventory } from '../../../src/host/analysis/types.ts'
 import { snapshotQuoteSource } from '../../../src/host/evidence/quote.ts'
@@ -88,12 +88,17 @@ function hunterFindingArgs(attackPath: unknown[]) {
   }
 }
 
-/** Parse arguments like the worker does, then run the terminal validation. */
-function validate<A, T>(tool: WorkerTool<A, T>, args: unknown): { error?: string; output?: T } {
-  const parsed = tool.input.parse(args)
-  const error = tool.terminal?.validate?.(parsed)
+/** Repair and parse arguments like the worker does, then run the terminal validation. */
+function validate<A, T>(
+  tool: WorkerTool<A, T>,
+  args: unknown,
+  context: Partial<TerminalContext> = {},
+): { error?: string; output?: T } {
+  const parsed = tool.input.parse(coerceToolArgs(tool, args))
+  const full: TerminalContext = { final: false, toolCalls: 3, ...context }
+  const error = tool.terminal?.validate?.(parsed, full)
   if (error) return { error }
-  return { output: tool.terminal?.toOutput(parsed) }
+  return { output: tool.terminal?.toOutput(parsed, full) }
 }
 
 const LANGUAGES: readonly [ReportLanguage, string][] = [

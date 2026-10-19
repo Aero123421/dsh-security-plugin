@@ -6,10 +6,20 @@
 
 import type { LlmTokenUsage } from '../../dsh/ports.ts'
 
+/** Why a gate refused a request. */
+export type BudgetRefusal = 'calls' | 'tokens' | 'time' | 'cancelled'
+
 /** Admission control for a worker's model requests. */
 export interface BudgetGate {
-  /** Called before each model request; return a reason to stop instead. */
-  admit(): { readonly ok: true } | { readonly ok: false; readonly reason: 'calls' | 'tokens' | 'time' | 'cancelled' }
+  /**
+   * Called before each model request; return a reason to stop instead. When a
+   * worker that already did some work is refused, it asks once more with
+   * `wrapUp: true` for a last request in which it may only submit; a gate
+   * that keeps a reserve for such requests admits it from there.
+   */
+  admit(request?: {
+    readonly wrapUp?: boolean
+  }): { readonly ok: true } | { readonly ok: false; readonly reason: BudgetRefusal }
   /**
    * Called after each request with the reported usage (zero usage when absent).
    * Every admitted request is recorded exactly once, including failed ones.

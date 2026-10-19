@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { LlmStreamChunk, LlmToolResultMessage } from '../../../../src/host/dsh/ports.ts'
-import { defineTool, type WorkerTool } from '../../../../src/host/agents/runtime/tool.ts'
+import { defineTool, type TerminalContext, type WorkerTool } from '../../../../src/host/agents/runtime/tool.ts'
 import {
   backoffDelayMs,
+  DEFAULT_FIRST_CHUNK_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
   MAX_TOOL_CALLS_PER_TURN,
   runWorker,
@@ -33,6 +34,12 @@ function lastToolText(llm: FakeLlm, call: number): string {
   const tools = toolMessages(llm.messages(call))
   const last = tools.at(-1)
   const block = last?.content[0] as { text?: string } | undefined
+  return block?.text ?? ''
+}
+
+/** Text of the last block of the last message sent with call `n` (a user note when the worker added one). */
+function lastNote(llm: FakeLlm, call: number): string {
+  const block = llm.messages(call).at(-1)?.content.at(-1) as { text?: string } | undefined
   return block?.text ?? ''
 }
 
@@ -309,16 +316,18 @@ describe('runWorker: terminal tools', () => {
     expect(toolMessages(llm.messages(1))[0]).toMatchObject({ toolCallId: 'c1', isError: true })
   })
 
-  it('a validate rejection counts against maxTurns', async () => {
+  it('a validate rejection counts against maxTurns; a rejected final turn gets one grace request', async () => {
     const llm = new FakeLlm([
       callReply('c1', 'submit_report', { summary: 's', findings: [] }),
       callReply('c2', 'submit_report', { summary: 's', findings: [] }),
+      callReply('c3', 'submit_report', { summary: 's', findings: [] }),
     ])
     const result = await runWorker(makeSpec(llm, { tools: [readFile, validated], maxTurns: 2 }).spec)
     expect(result.status).toBe('no_submission')
     expect(result.stopReason).toBe('max-turns')
-    expect(result.turns).toBe(2)
-    expect(llm.calls).toHaveLength(2)
+    expect(result.turns).toBe(3)
+    expect(llm.calls).toHaveLength(3)
+    expect(lastNote(llm, 2)).toContain('Your final turn ended without an accepted submit_report call.')
   })
 
   it('submits on a valid terminal call and ignores sibling calls', async () => {
@@ -408,7 +417,10 @@ describe('runWorker: nudges and the final turn', () => {
     expect(second[2]).toEqual({
       role: 'user',
       content: [
-        { type: 'text', text: 'You must finish by calling one of: submit_report. Do not reply with plain text.' },
+        {
+          type: 'text',
+          text: 'Plain text is not read. Continue with a tool call, or call submit_report when you are done.',
+        },
       ],
     })
   })
@@ -427,7 +439,7 @@ describe('runWorker: nudges and the final turn', () => {
     expect(llm.messages(1)[0]?.content).toHaveLength(2)
   })
 
-  it('offers only terminal tools on the final turn, with a final-turn note', async () => {
+  it('offers the same tools on every turn and asks for the submission on the final turn', async () => {
     const llm = new FakeLlm([
       callReply('c1', 'read_file', { path: 'a' }),
       callReply('c2', 'read_file', { path: 'b' }),
@@ -435,22 +447,22 @@ describe('runWorker: nudges and the final turn', () => {
     ])
     const result = await runWorker(makeSpec(llm, { maxTurns: 3 }).spec)
     expect(result.status).toBe('submitted')
-    expect(llm.calls[0]?.tools?.map(t => t.name)).toEqual(['read_file', 'submit_report'])
-    expect(llm.calls[1]?.tools?.map(t => t.name)).toEqual(['read_file', 'submit_report'])
-    expect(llm.calls[2]?.tools?.map(t => t.name)).toEqual(['submit_report'])
+    // A constant tool list keeps the request prefix (and the provider's prompt cache) stable.
+    for (const call of llm.calls) expect(call.tools?.map(t => t.name)).toEqual(['read_file', 'submit_report'])
+    expect(llm.calls[2]?.tools).toBe(llm.calls[0]?.tools)
     const last = llm.messages(2).at(-1)
     expect(last).toEqual({
       role: 'user',
       content: [
         {
           type: 'text',
-          text: 'This is your final turn: submit now with submit_report using what you have verified so far.',
+          text: 'This is your final turn: call submit_report now with what you have verified so far. Other tools will not run on this turn.',
         },
       ],
     })
   })
 
-  it('rejects a non-terminal call on the final turn and ends with no_submission', async () => {
+  it('rejects non-terminal calls on the final turn and its grace request, then ends with no_submission', async () => {
     const execute = vi.fn(async () => ({ text: 'x' }))
     const reader = defineTool({
       name: 'read_file',
@@ -458,12 +470,21 @@ describe('runWorker: nudges and the final turn', () => {
       input: z.object({ path: z.string() }),
       execute,
     })
-    const llm = new FakeLlm([callReply('c1', 'read_file', { path: 'a' })])
+    const llm = new FakeLlm([callReply('c1', 'read_file', { path: 'a' }), callReply('c2', 'read_file', { path: 'b' })])
     const result = await runWorker(makeSpec(llm, { tools: [reader, submitReport], maxTurns: 1 }).spec)
     expect(result.status).toBe('no_submission')
     expect(result.stopReason).toBe('max-turns')
     expect(execute).not.toHaveBeenCalled()
-    expect(result.turns).toBe(1)
+    expect(result.turns).toBe(2)
+    expect(lastToolText(llm, 1)).toBe(
+      'Not run: this is your last request, so only submit_report is accepted. Call submit_report now with what you have verified so far.',
+    )
+  })
+
+  it('accepts a submission on the grace request after a final turn spent on another tool', async () => {
+    const llm = new FakeLlm([callReply('c1', 'read_file', { path: 'a' }), callReply('c2', 'submit_report', SUBMISSION)])
+    const result = await runWorker(makeSpec(llm, { maxTurns: 1 }).spec)
+    expect(result).toMatchObject({ status: 'submitted', output: SUBMISSION, turns: 2 })
   })
 
   it('merges the final-turn note into a pending nudge so user messages never repeat', async () => {
@@ -474,7 +495,7 @@ describe('runWorker: nudges and the final turn', () => {
     expect(second[2]?.content).toHaveLength(2)
   })
 
-  it('asks for a shorter submission when max-tokens truncated the call', async () => {
+  it('drops a tool call cut off by max-tokens instead of replaying it, and asks for shorter arguments', async () => {
     const llm = new FakeLlm([
       reply([callBlock(0, 'c1', 'submit_report', '{"summary":"long long long')], { finish: 'max-tokens' }),
       callReply('c2', 'submit_report', SUBMISSION),
@@ -482,10 +503,13 @@ describe('runWorker: nudges and the final turn', () => {
     const result = await runWorker(makeSpec(llm).spec)
     expect(result.status).toBe('submitted')
     expect(result.turns).toBe(2)
-    const text = lastToolText(llm, 1)
-    expect(text).toContain('output token limit')
-    expect(text).toContain('shorter submission')
-    expect(toolMessages(llm.messages(1))[0]?.isError).toBe(true)
+    // Like DSH's BlockAssembler: no partial JSON arguments and no tool result for the dropped call.
+    const second = llm.messages(1)
+    expect(second.map(m => m.role)).toEqual(['user'])
+    expect(toolMessages(second)).toEqual([])
+    const note = lastNote(llm, 1)
+    expect(note).toContain('hit the output token limit, so its tool calls were cut off and not run: submit_report')
+    expect(note).toContain('shorter arguments')
   })
 })
 
@@ -671,7 +695,10 @@ describe('runWorker: context overflow', () => {
     const after = toolMessages(llm.messages(4))
     expect(after.map(m => m.toolCallId)).toEqual(['c1', 'c2', 'c3'])
     expect(after[0]?.content).toEqual([
-      { type: 'text', text: '[earlier tool output elided to fit the context window: 502 chars]' },
+      {
+        type: 'text',
+        text: '[output of read_file {"path":"a"} elided to fit the context window (502 chars); call the tool again if you still need it]',
+      },
     ])
     expect(after[0]?.id).toBe(before[0]?.id)
     expect(after[1]).toEqual(before[1])
@@ -928,7 +955,8 @@ describe('runWorker: output and transcript', () => {
     const result = await runWorker(makeSpec(llm, { maxTurns: 5 }).spec)
     expect(result.status).toBe('no_submission')
     expect(result.stopReason).toBe('max-turns')
-    expect(llm.calls).toHaveLength(5)
+    // maxTurns plus the single grace request.
+    expect(llm.calls).toHaveLength(6)
   })
 })
 
@@ -1090,7 +1118,7 @@ describe('runWorker: stalled streams', () => {
     expect(llm.calls).toHaveLength(1)
 
     const stuck = new FakeLlm([stalled(), stalled(), stalled(), stalled()])
-    const failing = runWorker(makeSpec(stuck, { idleTimeoutMs: 5_000 }).spec)
+    const failing = runWorker(makeSpec(stuck, { idleTimeoutMs: 5_000, firstChunkTimeoutMs: 5_000 }).spec)
     await vi.advanceTimersByTimeAsync(20_000)
     const failed = await failing
     expect(failed).toMatchObject({ status: 'failed', stopReason: 'retries-exhausted', error: { code: 'TIMEOUT' } })
@@ -1110,5 +1138,326 @@ describe('runWorker: stalled streams', () => {
 
   it('rejects a non-positive idle timeout', async () => {
     await expect(runWorker(makeSpec(new FakeLlm([]), { idleTimeoutMs: 0 }).spec)).rejects.toThrow(/idleTimeoutMs/)
+    await expect(runWorker(makeSpec(new FakeLlm([]), { firstChunkTimeoutMs: -1 }).spec)).rejects.toThrow(
+      /firstChunkTimeoutMs/,
+    )
+  })
+
+  it('waits longer for the first chunk than between chunks', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const queued = () =>
+      (async function* (): AsyncGenerator<LlmStreamChunk> {
+        // A provider queue that holds the request (keep-alive comments are not surfaced as chunks).
+        await new Promise(resolve => setTimeout(resolve, DEFAULT_IDLE_TIMEOUT_MS * 3))
+        yield* callReply('c1', 'submit_report', SUBMISSION)
+      })()
+    const llm = new FakeLlm([queued])
+    const pending = runWorker(makeSpec(llm).spec)
+    await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_TIMEOUT_MS * 3)
+    expect((await pending).status).toBe('submitted')
+    expect(llm.calls).toHaveLength(1)
+
+    const never = new FakeLlm([stalled(), callReply('c2', 'submit_report', SUBMISSION)])
+    const { spec, events } = makeSpec(never, { idleTimeoutMs: 10_000, firstChunkTimeoutMs: 30_000 })
+    const retried = runWorker(spec)
+    await vi.advanceTimersByTimeAsync(30_000)
+    const result = await retried
+    expect(result.status).toBe('submitted')
+    expect(events).toContainEqual(expect.objectContaining({ type: 'retry', code: 'TIMEOUT' }))
+    expect(result.transcript).toContainEqual(
+      expect.objectContaining({
+        kind: 'error',
+        message: 'The model did not start responding within 30 s; the request was abandoned',
+      }),
+    )
+    expect(DEFAULT_FIRST_CHUNK_TIMEOUT_MS).toBe(600_000)
+  })
+})
+
+describe('runWorker: last-chance turns', () => {
+  /** A terminal tool that records the context of every validation. */
+  function recordingSubmit(reject: (args: Report) => string | undefined = () => undefined) {
+    const contexts: TerminalContext[] = []
+    const tool = defineTool({
+      name: 'submit_report',
+      description: 'Submit.',
+      input: z.object({ summary: z.string().min(1), findings: z.array(z.string().min(1)).max(3) }),
+      terminal: {
+        validate: (args, context) => {
+          contexts.push(context)
+          return context.final ? undefined : reject(args)
+        },
+        toOutput: (args): Report => args,
+      },
+    })
+    return { tool, contexts }
+  }
+
+  it('counts only consecutive plain-text replies toward the nudge limit', async () => {
+    const llm = new FakeLlm([
+      reply([textBlock(0, 'Reading the route first.')]),
+      callReply('c1', 'read_file', { path: 'a' }),
+      reply([textBlock(0, 'Now the middleware.')]),
+      reply([textBlock(0, 'Still thinking.')]),
+      callReply('c2', 'read_file', { path: 'b' }),
+      reply([textBlock(0, 'Ready to report.')]),
+      callReply('c3', 'submit_report', SUBMISSION),
+    ])
+    const { spec, events } = makeSpec(llm, { maxTurns: 12 })
+    const result = await runWorker(spec)
+    expect(result.status).toBe('submitted')
+    expect(events.filter(e => e.type === 'nudge')).toHaveLength(4)
+  })
+
+  it('warns at three quarters of maxTurns how many turns are left', async () => {
+    const llm = new FakeLlm([
+      ...Array.from({ length: 6 }, (_, i) => callReply(`r${i}`, 'read_file', { path: `f${i}` })),
+      callReply('s', 'submit_report', SUBMISSION),
+    ])
+    await runWorker(makeSpec(llm, { maxTurns: 8 }).spec)
+    const warned = llm.calls.findIndex(call =>
+      JSON.stringify(call.messages.at(-1)).includes('You have used 5 of 8 turns'),
+    )
+    expect(warned).toBe(5)
+    expect(lastNote(llm, 5)).toBe(
+      'You have used 5 of 8 turns. Finish the checks that matter most and call submit_report within the next 3 turns.',
+    )
+    // No warning for very short runs.
+    const short = new FakeLlm([callReply('a', 'read_file', { path: 'a' }), callReply('b', 'submit_report', SUBMISSION)])
+    await runWorker(makeSpec(short, { maxTurns: 3 }).spec)
+    expect(JSON.stringify(short.calls.map(c => c.messages))).not.toContain('You have used')
+  })
+
+  it('validates with final: true on the last turn and passes the tool calls run so far', async () => {
+    const { tool, contexts } = recordingSubmit(() => 'Not yet.')
+    const llm = new FakeLlm([
+      callReply('c1', 'read_file', { path: 'a' }),
+      callReply('c2', 'submit_report', SUBMISSION),
+      callReply('c3', 'submit_report', SUBMISSION),
+    ])
+    const result = await runWorker(makeSpec(llm, { tools: [readFile, tool], maxTurns: 3 }).spec)
+    expect(result.status).toBe('submitted')
+    expect(contexts).toEqual([
+      { final: false, toolCalls: 1 },
+      { final: true, toolCalls: 1 },
+    ])
+  })
+
+  it('a plain-text final turn gets one grace request', async () => {
+    const llm = new FakeLlm([
+      callReply('c1', 'read_file', { path: 'a' }),
+      reply([textBlock(0, 'I am done.')]),
+      callReply('c2', 'submit_report', SUBMISSION),
+    ])
+    const result = await runWorker(makeSpec(llm, { maxTurns: 2 }).spec)
+    expect(result).toMatchObject({ status: 'submitted', turns: 3 })
+    expect(lastNote(llm, 2)).toContain('This is one extra request: call submit_report now')
+  })
+
+  it('drops the invalid list items of a final submission and keeps the rest', async () => {
+    const { tool } = recordingSubmit()
+    const args = { summary: 'Two real findings', findings: ['real one', '', 'real two', 'extra', 'more'] }
+    const strict = new FakeLlm([callReply('c1', 'submit_report', args), callReply('c2', 'submit_report', SUBMISSION)])
+    // Earlier turns still send the submission back so the model can fix it.
+    expect((await runWorker(makeSpec(strict, { tools: [readFile, tool] }).spec)).output).toEqual(SUBMISSION)
+    expect(lastToolText(strict, 1)).toContain('- findings: Too big')
+
+    const last = new FakeLlm([callReply('c1', 'submit_report', args)])
+    const result = await runWorker(makeSpec(last, { tools: [readFile, tool], maxTurns: 1 }).spec)
+    expect(result.status).toBe('submitted')
+    expect(result.output).toEqual({ summary: 'Two real findings', findings: ['real one', 'real two', 'extra'] })
+    expect(result.droppedItems).toBe(2)
+  })
+
+  it('cannot salvage a final submission whose required top-level field is invalid', async () => {
+    const llm = new FakeLlm([
+      callReply('c1', 'submit_report', { summary: '', findings: ['x'] }),
+      callReply('c2', 'submit_report', { findings: ['x'] }),
+    ])
+    const result = await runWorker(makeSpec(llm, { maxTurns: 1 }).spec)
+    expect(result.status).toBe('no_submission')
+    expect(result.turns).toBe(2)
+  })
+})
+
+describe('runWorker: argument repair', () => {
+  it('repairs ordinary slips before validation: null, numeric strings, camelCase keys, a lone object', async () => {
+    const seen: unknown[] = []
+    const reader = defineTool({
+      name: 'read_file',
+      description: 'Read.',
+      input: z.object({
+        path: z.string(),
+        start_line: z.number().int().positive().optional(),
+        end_line: z.number().int().positive().optional(),
+      }),
+      execute: async args => {
+        seen.push(args)
+        return { text: 'ok' }
+      },
+    })
+    const submit = defineTool({
+      name: 'submit_report',
+      description: 'Submit.',
+      input: z.object({ summary: z.string(), findings: z.array(z.object({ line: z.number().int() })) }),
+      terminal: { toOutput: args => ({ summary: args.summary, findings: args.findings.map(f => String(f.line)) }) },
+    })
+    const llm = new FakeLlm([
+      callReply('c1', 'read_file', { path: 'a.ts', startLine: '10', end_line: null }),
+      callReply('c2', 'submit_report', { summary: 's', findings: { line: '26' } }),
+    ])
+    const result = await runWorker(makeSpec(llm, { tools: [reader, submit] }).spec)
+    expect(seen).toEqual([{ path: 'a.ts', start_line: 10 }])
+    expect(result.output).toEqual({ summary: 's', findings: ['26'] })
+  })
+})
+
+describe('runWorker: budget wrap-up', () => {
+  /** Refuses ordinary requests after `normal` admissions; wrap-up requests while `reserve` lasts. */
+  function reservingBudget(normal: number, reserve: number, reason: 'calls' | 'tokens' | 'time' = 'calls') {
+    const gate = {
+      normal: 0,
+      wrapUps: 0,
+      admit: (request?: { wrapUp?: boolean }) => {
+        if (request?.wrapUp) {
+          if (gate.wrapUps >= reserve) return { ok: false as const, reason }
+          gate.wrapUps++
+          return { ok: true as const }
+        }
+        if (gate.normal >= normal) return { ok: false as const, reason }
+        gate.normal++
+        return { ok: true as const }
+      },
+      record: () => {},
+    }
+    return gate
+  }
+
+  it('asks a refused worker that already worked for one submit-only request and keeps its work', async () => {
+    const llm = new FakeLlm([
+      callReply('c1', 'read_file', { path: 'a' }),
+      callReply('c2', 'read_file', { path: 'b' }),
+      reply([callBlock(0, 'c3', 'read_file', { path: 'c' }), callBlock(1, 'c4', 'submit_report', SUBMISSION)]),
+    ])
+    const budget = reservingBudget(2, 1, 'tokens')
+    const { spec, events } = makeSpec(llm, { budget })
+    const result = await runWorker(spec)
+    expect(result).toMatchObject({ status: 'submitted', output: SUBMISSION, turns: 3 })
+    expect(budget.wrapUps).toBe(1)
+    expect(events).toContainEqual({ type: 'wrap-up', turn: 3, reason: 'tokens' })
+    expect(lastNote(llm, 2)).toBe(
+      "The scan's token budget for this work is used up. Call submit_report now with what you have verified so far; other tools will not run, and this is your last request.",
+    )
+    expect(llm.calls[2]?.tools?.map(t => t.name)).toEqual(['read_file', 'submit_report'])
+  })
+
+  it('ends as budget_exhausted when the wrap-up request brings no submission or is refused too', async () => {
+    const reads = new FakeLlm([
+      callReply('c1', 'read_file', { path: 'a' }),
+      callReply('c2', 'read_file', { path: 'b' }),
+    ])
+    const missed = await runWorker(makeSpec(reads, { budget: reservingBudget(1, 1) }).spec)
+    expect(missed).toMatchObject({ status: 'budget_exhausted', stopReason: 'calls', turns: 2 })
+
+    const none = new FakeLlm([callReply('c1', 'read_file', { path: 'a' })])
+    const refused = await runWorker(makeSpec(none, { budget: reservingBudget(1, 0) }).spec)
+    expect(refused).toMatchObject({ status: 'budget_exhausted', stopReason: 'calls', turns: 1 })
+  })
+
+  it('does not wrap up a worker refused before its first reply', async () => {
+    const budget = reservingBudget(0, 1)
+    const result = await runWorker(makeSpec(new FakeLlm([]), { budget }).spec)
+    expect(result).toMatchObject({ status: 'budget_exhausted', stopReason: 'calls', turns: 0 })
+    expect(budget.wrapUps).toBe(0)
+  })
+})
+
+describe('runWorker: provider quirks', () => {
+  it('drops a temperature the provider rejects and retries at once', async () => {
+    const llm = new FakeLlm([
+      errorFinish('INVALID_REQUEST', "400 Unsupported value: 'temperature' does not support 0.2 with this model."),
+      callReply('c1', 'read_file', { path: 'a' }),
+      callReply('c2', 'submit_report', SUBMISSION),
+    ])
+    const { spec, events, sleeps } = makeSpec(llm, { temperature: 0.2 })
+    const result = await runWorker(spec)
+    expect(result.status).toBe('submitted')
+    expect(llm.calls.map(call => call.temperature)).toEqual([0.2, undefined, undefined])
+    expect(events).toContainEqual({ type: 'option-dropped', turn: 1, option: 'temperature' })
+    expect(sleeps).toEqual([])
+    // Without a temperature the same failure is fatal as before.
+    const plain = new FakeLlm([errorFinish('INVALID_REQUEST', 'temperature is not supported')])
+    expect((await runWorker(makeSpec(plain).spec)).stopReason).toBe('fatal')
+  })
+
+  it('keeps text and reasoning of a max-tokens reply, drops its complete tool calls too, and prunes replay state', async () => {
+    const execute = vi.fn(async () => ({ text: 'x' }))
+    const reader = defineTool({
+      name: 'read_file',
+      description: 'Read.',
+      input: z.object({ path: z.string() }),
+      execute,
+    })
+    const replay = { response: { id: 'r1' }, blocks: [{ sig: 'thinking' }, { call: 1 }, { call: 2 }] }
+    const llm = new FakeLlm([
+      reply(
+        [
+          reasoningBlock(0, 'Two files to read.'),
+          callBlock(1, 'c1', 'read_file', { path: 'a' }),
+          callBlock(2, 'c2', 'read_file', '{"path":"b'),
+        ],
+        { finish: 'max-tokens', replayState: replay },
+      ),
+      callReply('c3', 'submit_report', SUBMISSION),
+    ])
+    const result = await runWorker(makeSpec(llm, { tools: [reader, submitReport] }).spec)
+    expect(result.status).toBe('submitted')
+    expect(execute).not.toHaveBeenCalled()
+    const [, assistant, note] = llm.messages(1)
+    expect(assistant).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'reasoning', text: 'Two files to read.' }],
+      source: { replayState: { response: { id: 'r1' }, blocks: [{ sig: 'thinking' }] } },
+    })
+    expect(JSON.stringify(note)).toContain('cut off and not run: read_file ×2')
+
+    // Replay entries that do not line up with the blocks are dropped rather than misapplied.
+    const misaligned = new FakeLlm([
+      reply([textBlock(0, 'x'), callBlock(1, 'c1', 'read_file', { path: 'a' })], {
+        finish: 'max-tokens',
+        replayState: { blocks: [{ only: 'one' }] },
+      }),
+      callReply('c2', 'submit_report', SUBMISSION),
+    ])
+    await runWorker(makeSpec(misaligned).spec)
+    expect('replayState' in (misaligned.messages(1)[1] as { source: object }).source).toBe(false)
+  })
+
+  it('compacts the oldest tool results before a request that would come close to a known context window', async () => {
+    const reader = defineTool({
+      name: 'read_file',
+      description: 'Read.',
+      input: z.object({ path: z.string() }),
+      execute: async ({ path }) => ({ text: `${path}:${'x'.repeat(3_000)}` }),
+    })
+    // No usage reported: the default estimate of 3 characters per token applies.
+    const call = (id: string, path: string) => callBlock(0, id, 'read_file', { path })
+    const llm = new FakeLlm([
+      reply([call('c1', 'a')], { usage: null }),
+      reply([call('c2', 'b')], { usage: null }),
+      reply([call('c3', 'c'), callBlock(1, 'c4', 'read_file', { path: 'd' })], { usage: null }),
+      reply([callBlock(0, 'c5', 'submit_report', SUBMISSION)], { usage: null }),
+    ])
+    const { spec, events } = makeSpec(llm, { tools: [reader, submitReport], contextWindow: 4_000 })
+    const result = await runWorker(spec)
+    expect(result.status).toBe('submitted')
+    const last = toolMessages(llm.messages(3))
+    expect(last.map(m => (m.content[0] as { text: string }).text.slice(0, 18))).toEqual([
+      '[output of read_fi',
+      '[output of read_fi',
+      `c:${'x'.repeat(16)}`,
+      `d:${'x'.repeat(16)}`,
+    ])
+    expect(events).toContainEqual(expect.objectContaining({ type: 'compact', proactive: true }))
   })
 })

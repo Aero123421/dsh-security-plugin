@@ -5,13 +5,25 @@
  * rather than as DSH chat sessions, so they never appear in or inherit from the
  * user's chats. One `stream()` call is one provider attempt; this loop owns
  * retries, context compaction, nudging, budgets, and cancellation, and always
- * terminates (at most `maxTurns × 4` model requests).
+ * terminates (at most `(maxTurns + 1) × 4` model requests: the extra turn is
+ * the single grace or wrap-up request described below).
+ *
+ * The same tools are offered on every request, so the request prefix (and the
+ * provider's prompt cache) stays stable. Late in a run the loop warns the
+ * model, and on the final turn it accepts only a submission: other tool calls
+ * get an error result. A final turn without an accepted submission gets one
+ * grace request. When the budget refuses a worker that already did some work,
+ * the worker asks the gate for one wrap-up request in which it may only
+ * submit. Submissions on these last-chance requests are validated with
+ * `final: true`, so terminal tools keep what they can verify instead of
+ * sending everything back.
  *
  * Hostile or confused models are bounded per reply as well: at most
  * {@link MAX_TOOL_CALLS_PER_TURN} tool calls run per model reply (the rest get
  * an error result), the worker yields to the event loop after every tool
- * execution, and a request that produces no stream chunk for
- * `idleTimeoutMs` is abandoned and retried as a `TIMEOUT`.
+ * execution, and a request whose first stream chunk takes longer than
+ * `firstChunkTimeoutMs`, or that then goes `idleTimeoutMs` without a chunk, is
+ * abandoned and retried as a `TIMEOUT`.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -30,9 +42,17 @@ import type {
   LlmToolSchema,
   LlmUserInput,
 } from '../../dsh/ports.ts'
-import { type BudgetGate, chargedCacheReadTokens } from './budget.ts'
+import { type BudgetGate, type BudgetRefusal, chargedCacheReadTokens } from './budget.ts'
 import { classifyFailure } from './failure.ts'
-import { assertValidTool, type ToolResult, toolSchema, type WorkerTool } from './tool.ts'
+import { salvageArgs } from './lenient.ts'
+import {
+  assertValidTool,
+  coerceToolArgs,
+  type TerminalContext,
+  type ToolResult,
+  toolSchema,
+  type WorkerTool,
+} from './tool.ts'
 
 /** Which model a worker talks to. */
 export interface ModelRoute {
@@ -65,18 +85,33 @@ export interface WorkerSpec<T> {
   readonly signal: AbortSignal
   /** Default 24 000; longer tool results are truncated with a marker. */
   readonly maxToolResultChars?: number
-  /** Sent only when set. */
+  /**
+   * Sent only when set. A provider that rejects the parameter (an `INVALID_REQUEST`
+   * naming `temperature`) is retried at once without it for the rest of the run.
+   */
   readonly temperature?: number
   /** Progress listener. Thrown errors (and rejected promises) are swallowed. */
   readonly onEvent?: (event: WorkerEvent) => void
   /** Abortable sleep used for retry backoff; injectable for tests. Defaults to a timer. */
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>
   /**
-   * Abandon a request when no stream chunk arrives for this long (the wait for
-   * the first chunk included); the attempt fails as a retryable `TIMEOUT`.
-   * Default {@link DEFAULT_IDLE_TIMEOUT_MS}.
+   * Abandon a request when its stream, once started, sends no chunk for this
+   * long; the attempt fails as a retryable `TIMEOUT`. Default
+   * {@link DEFAULT_IDLE_TIMEOUT_MS}.
    */
   readonly idleTimeoutMs?: number
+  /**
+   * How long to wait for a request's first chunk. Providers can hold a queued
+   * request for minutes under load, sending only keep-alive comments the
+   * adapters do not surface. Default {@link DEFAULT_FIRST_CHUNK_TIMEOUT_MS};
+   * never shorter than `idleTimeoutMs`.
+   */
+  readonly firstChunkTimeoutMs?: number
+  /**
+   * The model's context window in tokens, when known. Before a request that
+   * would come close to it, the oldest tool results are elided.
+   */
+  readonly contextWindow?: number
 }
 
 /** Progress notifications emitted while a worker runs. */
@@ -86,6 +121,12 @@ export type WorkerEvent =
   | { type: 'tool'; turn: number; name: string; ok: boolean; ms: number }
   | { type: 'retry'; turn: number; code: string; delayMs: number }
   | { type: 'nudge'; turn: number; reason: string }
+  /** The budget refused the next request; the worker asks for one submit-only request. */
+  | { type: 'wrap-up'; turn: number; reason: BudgetRefusal }
+  /** The provider rejected a request option; the worker continues without it. */
+  | { type: 'option-dropped'; turn: number; option: 'temperature' }
+  /** Older tool results were elided; `proactive` when done before a request instead of after an overflow. */
+  | { type: 'compact'; turn: number; elided: number; proactive: boolean }
 
 /** How a worker ended. */
 export type WorkerStatus =
@@ -103,7 +144,7 @@ export interface WorkerResult<T> {
   readonly output?: T
   /** Name of the accepted terminal tool. */
   readonly terminalTool?: string
-  /** Model turns started (retries excluded). */
+  /** Model turns started (retries excluded; the grace or wrap-up request counts as a turn). */
   readonly turns: number
   /** Tool calls handled: executed, rejected, or accepted as the submission. */
   readonly toolCalls: number
@@ -124,6 +165,8 @@ export interface WorkerResult<T> {
    * `context-overflow`, `blocked`, or `fatal`.
    */
   readonly stopReason?: string
+  /** Items a last-chance submission dropped because they failed validation. */
+  readonly droppedItems?: number
 }
 
 /**
@@ -141,12 +184,19 @@ export type TranscriptEntry =
 export const DEFAULT_MAX_TOOL_RESULT_CHARS = 24_000
 /** Provider attempts per turn, the compaction retry included. */
 export const MAX_ATTEMPTS_PER_TURN = 4
-/** Plain-text replies tolerated (each answered with a nudge) before `no_submission`. */
+/**
+ * Consecutive plain-text replies tolerated (each answered with a nudge)
+ * before `no_submission`. Any tool call resets the count.
+ */
 export const MAX_NUDGES = 2
 /** Tool calls run per model reply; further calls in the same reply get an error result instead. */
 export const MAX_TOOL_CALLS_PER_TURN = 48
 /** Default for {@link WorkerSpec.idleTimeoutMs}: two minutes without a stream chunk. */
 export const DEFAULT_IDLE_TIMEOUT_MS = 120_000
+/** Default for {@link WorkerSpec.firstChunkTimeoutMs}: ten minutes until the first chunk. */
+export const DEFAULT_FIRST_CHUNK_TIMEOUT_MS = 600_000
+/** Share of `maxTurns` after which the model is told how many turns are left. */
+export const TURN_WARNING_FRACTION = 0.75
 
 const BACKOFF_BASE_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
@@ -154,7 +204,15 @@ const BACKOFF_JITTER = 0.2
 const RETRY_AFTER_CAP_MS = 60_000
 const MAX_ISSUE_TEXT = 2_048
 const MAX_ERROR_MESSAGE = 500
-const KEEP_RECENT_TOOL_RESULTS = 2
+/** Without a known context window, an overflow elides tool results older than the latest two turns. */
+const KEEP_RECENT_TURNS = 2
+/** Compact before a request estimated above this share of the context window... */
+const PROACTIVE_COMPACT_AT = 0.85
+/** ...down to this share. */
+const COMPACT_TARGET = 0.6
+/** Characters per token assumed until a response reports usage. */
+const DEFAULT_CHARS_PER_TOKEN = 3
+const TEMPERATURE_REJECTED = /temperature/i
 
 /**
  * Delay before retrying after failed attempt number `attempt` (1-based).
@@ -195,8 +253,13 @@ function validateSpec<T>(spec: WorkerSpec<T>): void {
   ) {
     throw new TypeError(`Worker ${spec.id}: maxToolResultChars must be a positive integer`)
   }
-  if (spec.idleTimeoutMs !== undefined && (!Number.isFinite(spec.idleTimeoutMs) || spec.idleTimeoutMs <= 0)) {
-    throw new TypeError(`Worker ${spec.id}: idleTimeoutMs must be a positive number`)
+  for (const [name, value] of [
+    ['idleTimeoutMs', spec.idleTimeoutMs],
+    ['firstChunkTimeoutMs', spec.firstChunkTimeoutMs],
+  ] as const) {
+    if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+      throw new TypeError(`Worker ${spec.id}: ${name} must be a positive number`)
+    }
   }
   const names = new Set<string>()
   for (const tool of spec.tools) {
@@ -228,7 +291,21 @@ interface Reply {
   readonly blocks: readonly LlmContentBlock[]
   readonly finish: string
   readonly replayState: unknown
+  /** Names of tool calls dropped because the reply hit the output token limit. */
+  readonly droppedCalls: readonly string[]
 }
+
+type RequestOutcome<T> =
+  | Reply
+  | { readonly kind: 'refused'; readonly reason: Exclude<BudgetRefusal, 'cancelled'> }
+  | { readonly kind: 'stop'; readonly result: WorkerResult<T> }
+
+/** What one handled reply means for the loop. */
+type TurnOutcome<T> =
+  | { readonly kind: 'done'; readonly result: WorkerResult<T> }
+  | { readonly kind: 'continue' }
+  /** A last-chance turn ended without an accepted submission. */
+  | { readonly kind: 'missed' }
 
 type AttemptOutcome = { readonly receivedAnyStreamChunk: boolean } & (
   | {
@@ -237,6 +314,7 @@ type AttemptOutcome = { readonly receivedAnyStreamChunk: boolean } & (
       readonly usage: LlmTokenUsage | undefined
       readonly finish: string
       readonly replayState: unknown
+      readonly droppedCalls: readonly string[]
     }
   | {
       readonly ok: false
@@ -246,51 +324,93 @@ type AttemptOutcome = { readonly receivedAnyStreamChunk: boolean } & (
     }
 )
 
-type Verdict<T> = { readonly ok: true; readonly output: T } | { readonly ok: false; readonly result: ToolResult }
+type Verdict<T> =
+  | { readonly ok: true; readonly output: T; readonly dropped: number }
+  | { readonly ok: false; readonly result: ToolResult }
 
 class WorkerRun<T> {
   private readonly messages: LlmRequestMessage[] = []
   private readonly transcript: TranscriptEntry[] = []
-  private readonly toolsByName = new Map<string, WorkerTool<unknown, T>>()
-  private readonly allTools: readonly WorkerTool<unknown, T>[]
+  private readonly tools: readonly WorkerTool<unknown, T>[]
+  private readonly toolsByName: ReadonlyMap<string, WorkerTool<unknown, T>>
+  private readonly schemas: LlmToolSchema[]
+  private readonly schemaChars: number
   private readonly terminalTools: readonly WorkerTool<unknown, T>[]
   private readonly maxChars: number
   private readonly sessionId: string
   private readonly elided = new WeakSet<LlmRequestMessage>()
   private turns = 0
   private toolCalls = 0
-  private nudges = 0
+  /** Non-terminal tool calls actually run. */
+  private executedTools = 0
+  /** Plain-text replies in a row. */
+  private consecutiveText = 0
   private inputTokens = 0
   private outputTokens = 0
   private llmCalls = 0
   private receivedAnyStreamChunk = false
+  private temperature: number | undefined
+  /** Set once the budget refused and the worker switched to its single submit-only request. */
+  private wrapUp: Exclude<BudgetRefusal, 'cancelled'> | undefined
+  private charsPerToken = DEFAULT_CHARS_PER_TOKEN
 
   constructor(private readonly spec: WorkerSpec<T>) {
     this.sessionId = spec.sessionId ?? randomUUID()
-    this.allTools = spec.tools
+    this.tools = spec.tools
+    this.toolsByName = new Map(spec.tools.map(tool => [tool.name, tool]))
+    this.schemas = spec.tools.map(toolSchema)
+    this.schemaChars = JSON.stringify(this.schemas).length
     this.terminalTools = spec.tools.filter(tool => tool.terminal)
-    for (const tool of spec.tools) this.toolsByName.set(tool.name, tool)
     this.maxChars = spec.maxToolResultChars ?? DEFAULT_MAX_TOOL_RESULT_CHARS
+    this.temperature = spec.temperature
   }
 
   async run(): Promise<WorkerResult<T>> {
     const { spec } = this
     this.transcript.push({ kind: 'system', text: spec.system })
     this.pushMessage({ role: 'user', content: [{ type: 'text', text: spec.task }] })
+    const names = this.terminalNames(' or ')
+    const warnAt = spec.maxTurns >= 4 ? Math.ceil(spec.maxTurns * TURN_WARNING_FRACTION) : 0
+    let lastTurn = spec.maxTurns
+    let grace = false
 
-    for (let turn = 1; turn <= spec.maxTurns; turn++) {
+    for (let turn = 1; turn <= lastTurn; turn++) {
       if (spec.signal.aborted) return this.stop('cancelled', { stopReason: 'aborted' })
-      const final = turn === spec.maxTurns
-      if (final) {
+      if (turn === lastTurn && !this.wrapUp) {
         this.addUserNote(
-          `This is your final turn: submit now with ${this.terminalNames(' or ')} using what you have verified so far.`,
+          grace
+            ? `Your final turn ended without an accepted ${names} call. This is one extra request: call ${names} now with what you have verified so far; other tools will not run.`
+            : `This is your final turn: call ${names} now with what you have verified so far. Other tools will not run on this turn.`,
+        )
+      } else if (turn === warnAt && turn < lastTurn) {
+        const left = lastTurn - turn + 1
+        this.addUserNote(
+          `You have used ${turn - 1} of ${spec.maxTurns} turns. Finish the checks that matter most and call ${names} within the next ${left} turns.`,
         )
       }
-      const offered = final ? this.terminalTools : this.allTools
-      const reply = await this.request(turn, offered.map(toolSchema))
+      let reply = await this.request(turn)
+      if (reply.kind === 'refused') {
+        if (this.wrapUp || turn === 1) return this.stop('budget_exhausted', { stopReason: reply.reason })
+        // Refused after some work: one last request to save it.
+        this.wrapUp = reply.reason
+        lastTurn = turn
+        this.emit({ type: 'wrap-up', turn, reason: reply.reason })
+        this.addUserNote(
+          `The scan's ${budgetName(reply.reason)} budget for this work is used up. Call ${names} now with what you have verified so far; other tools will not run, and this is your last request.`,
+        )
+        reply = await this.request(turn)
+        if (reply.kind === 'refused') return this.stop('budget_exhausted', { stopReason: reply.reason })
+      }
       if (reply.kind === 'stop') return reply.result
-      const ended = await this.handleReply(turn, reply, offered, final)
-      if (ended) return ended
+      const outcome = await this.handleReply(turn, reply, turn === lastTurn)
+      if (outcome.kind === 'done') return outcome.result
+      if (outcome.kind === 'missed') {
+        if (this.wrapUp) return this.stop('budget_exhausted', { stopReason: this.wrapUp })
+        if (!grace) {
+          grace = true
+          lastTurn = turn + 1
+        }
+      }
     }
     return this.stop('no_submission', { stopReason: 'max-turns' })
   }
@@ -298,33 +418,41 @@ class WorkerRun<T> {
   // -- Model requests ------------------------------------------------------
 
   /** Performs one turn's request, retrying and compacting as needed. */
-  private async request(
-    turn: number,
-    tools: LlmToolSchema[],
-  ): Promise<Reply | { readonly kind: 'stop'; readonly result: WorkerResult<T> }> {
+  private async request(turn: number): Promise<RequestOutcome<T>> {
     const { spec } = this
     let compacted = false
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_TURN; attempt++) {
       if (spec.signal.aborted) return { kind: 'stop', result: this.stop('cancelled', { stopReason: 'aborted' }) }
       const refused = this.admit()
-      if (refused) return { kind: 'stop', result: refused }
+      if (refused) return refused
       if (attempt === 1) this.turns = turn
       this.emit({ type: 'request', turn, attempt })
       this.llmCalls++
+      if (!compacted && this.proactiveCompact(turn)) compacted = true
 
+      const chars = this.requestChars()
+      const options = this.options()
+      const idleMs = spec.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
       const outcome = await consumeStream(
         spec.llm,
-        this.options(tools),
+        options,
         spec.signal,
-        spec.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+        Math.max(idleMs, spec.firstChunkTimeoutMs ?? DEFAULT_FIRST_CHUNK_TIMEOUT_MS),
+        idleMs,
       )
       this.receivedAnyStreamChunk ||= outcome.receivedAnyStreamChunk
       const usage: LlmTokenUsage = outcome.usage ? { ...outcome.usage } : { inputTokens: 0, outputTokens: 0 }
-      this.recordUsage(usage)
+      this.recordUsage(usage, chars)
       this.transcript.push({ kind: 'usage', at: now(), turn, usage, finish: outcome.finish })
       this.emit({ type: 'response', turn, usage, finish: outcome.finish })
       if (outcome.ok) {
-        return { kind: 'reply', blocks: outcome.blocks, finish: outcome.finish, replayState: outcome.replayState }
+        return {
+          kind: 'reply',
+          blocks: outcome.blocks,
+          finish: outcome.finish,
+          replayState: outcome.replayState,
+          droppedCalls: outcome.droppedCalls,
+        }
       }
 
       const { failure } = outcome
@@ -337,7 +465,7 @@ class WorkerRun<T> {
         case 'blocked_by_provider':
           return { kind: 'stop', result: this.stop('blocked_by_provider', { error, stopReason: 'blocked' }) }
         case 'context_overflow':
-          if (compacted || attempt >= MAX_ATTEMPTS_PER_TURN || !this.compact()) {
+          if (compacted || attempt >= MAX_ATTEMPTS_PER_TURN || !this.compact(turn, false)) {
             return { kind: 'stop', result: this.stop('failed', { error, stopReason: 'context-overflow' }) }
           }
           compacted = true
@@ -354,6 +482,16 @@ class WorkerRun<T> {
           continue
         }
         default:
+          // Some routes reject sampling parameters outright; the request is still worth sending without it.
+          if (
+            options.temperature !== undefined &&
+            TEMPERATURE_REJECTED.test(String(failure.message)) &&
+            attempt < MAX_ATTEMPTS_PER_TURN
+          ) {
+            this.temperature = undefined
+            this.emit({ type: 'option-dropped', turn, option: 'temperature' })
+            continue
+          }
           return { kind: 'stop', result: this.stop('failed', { error, stopReason: 'fatal' }) }
       }
     }
@@ -361,37 +499,47 @@ class WorkerRun<T> {
     return { kind: 'stop', result: this.stop('failed', { stopReason: 'retries-exhausted' }) }
   }
 
-  private options(tools: LlmToolSchema[]): LlmGenerateOptions {
-    const { route, system, signal, temperature } = this.spec
+  private options(): LlmGenerateOptions {
+    const { route, system, signal } = this.spec
     const options: LlmGenerateOptions = {
       provider: route.provider,
       model: route.model,
       sessionId: this.sessionId,
       messages: this.messages.slice(),
       system,
-      tools,
+      tools: this.schemas,
       signal,
     }
     if (route.reasoningEffort !== undefined) options.reasoningEffort = route.reasoningEffort
     if (route.maxOutputTokens !== undefined) options.maxTokens = route.maxOutputTokens
-    if (temperature !== undefined) options.temperature = temperature
+    if (this.temperature !== undefined) options.temperature = this.temperature
     return options
   }
 
-  /** Returns a stop result when the budget refuses the next request. */
-  private admit(): WorkerResult<T> | undefined {
+  /** A refusal or stop result when the budget refuses the next request. */
+  private admit(): RequestOutcome<T> | undefined {
     let admission: ReturnType<BudgetGate['admit']>
     try {
-      admission = this.spec.budget.admit()
+      admission = this.spec.budget.admit(this.wrapUp ? { wrapUp: true } : undefined)
     } catch (error) {
-      return this.stop('failed', { error: { code: 'INTERNAL', message: errorText(error) }, stopReason: 'fatal' })
+      const result = this.stop('failed', {
+        error: { code: 'INTERNAL', message: errorText(error) },
+        stopReason: 'fatal',
+      })
+      return { kind: 'stop', result }
     }
     if (admission.ok) return undefined
-    if (admission.reason === 'cancelled') return this.stop('cancelled', { stopReason: 'cancelled' })
-    return this.stop('budget_exhausted', { stopReason: admission.reason })
+    if (admission.reason === 'cancelled') {
+      return { kind: 'stop', result: this.stop('cancelled', { stopReason: 'cancelled' }) }
+    }
+    return { kind: 'refused', reason: admission.reason }
   }
 
-  private recordUsage(usage: LlmTokenUsage): void {
+  private recordUsage(usage: LlmTokenUsage, requestChars: number): void {
+    const prompt = count(usage.inputTokens) + count(usage.cacheReadTokens) + count(usage.cacheWriteTokens)
+    if (prompt > 0 && requestChars > 0) {
+      this.charsPerToken = Math.min(8, Math.max(1, requestChars / prompt))
+    }
     this.inputTokens +=
       count(usage.inputTokens) + chargedCacheReadTokens(count(usage.cacheReadTokens)) + count(usage.cacheWriteTokens)
     this.outputTokens += count(usage.outputTokens)
@@ -413,40 +561,67 @@ class WorkerRun<T> {
     return !signal.aborted
   }
 
+  // -- Context size --------------------------------------------------------
+
+  /** Rough size of the next request in characters: system prompt, tool schemas, and messages. */
+  private requestChars(): number {
+    let chars = this.spec.system.length + this.schemaChars
+    for (const message of this.messages) chars += contentChars(message.content)
+    return chars
+  }
+
+  /** Compacts before a request that would come close to a known context window. */
+  private proactiveCompact(turn: number): boolean {
+    const window = this.spec.contextWindow
+    if (window === undefined || !Number.isFinite(window) || window <= 0) return false
+    const output = this.spec.route.maxOutputTokens ?? 0
+    const limit = Math.max(window * 0.5, window * PROACTIVE_COMPACT_AT - output)
+    if (this.requestChars() / this.charsPerToken <= limit) return false
+    return this.compact(turn, true)
+  }
+
   /**
-   * Elides every tool result except the latest two. Returns false when nothing
-   * changed, i.e. retrying could not help.
+   * Elides tool results, oldest first, never those answering the latest
+   * reply. With a known context window it stops once the request is
+   * estimated below {@link COMPACT_TARGET} of it; otherwise it keeps the
+   * results of the latest {@link KEEP_RECENT_TURNS} replies. Each marker names
+   * the call whose output it replaces. Returns false when nothing changed,
+   * i.e. retrying could not help.
    */
-  private compact(): boolean {
-    const toolIndexes: number[] = []
+  private compact(turn: number, proactive: boolean): boolean {
+    const assistants: number[] = []
+    const calls = new Map<string, LlmToolCallBlock>()
     this.messages.forEach((message, index) => {
-      if (message.role === 'tool') toolIndexes.push(index)
+      if (message.role !== 'assistant') return
+      assistants.push(index)
+      for (const block of message.content) if (isToolCall(block)) calls.set(block.id, block)
     })
-    let changed = false
-    for (const index of toolIndexes.slice(0, Math.max(0, toolIndexes.length - KEEP_RECENT_TOOL_RESULTS))) {
+    const window = this.spec.contextWindow
+    const sized = window !== undefined && Number.isFinite(window) && window > 0
+    const protectFrom = sized ? (assistants.at(-1) ?? 0) : (assistants.at(-KEEP_RECENT_TURNS) ?? 0)
+    const target = sized ? window * COMPACT_TARGET : 0
+    let elided = 0
+    for (let index = 0; index < protectFrom; index++) {
+      if (sized && this.requestChars() / this.charsPerToken <= target) break
       const message = this.messages[index]
       if (message?.role !== 'tool' || this.elided.has(message)) continue
-      const chars = textLength(message.content)
+      const call = calls.get(message.toolCallId)
       const replacement: LlmToolResultMessage = {
         ...message,
-        content: [{ type: 'text', text: `[earlier tool output elided to fit the context window: ${chars} chars]` }],
+        content: [{ type: 'text', text: elisionMarker(call, contentChars(message.content)) }],
       }
       this.elided.add(replacement)
       this.messages[index] = replacement
-      changed = true
+      elided++
     }
-    return changed
+    if (elided > 0) this.emit({ type: 'compact', turn, elided, proactive })
+    return elided > 0
   }
 
   // -- Replies and tools ---------------------------------------------------
 
-  /** Handles a completed reply. Returns a result when the worker ends. */
-  private async handleReply(
-    turn: number,
-    reply: Reply,
-    offered: readonly WorkerTool<unknown, T>[],
-    final: boolean,
-  ): Promise<WorkerResult<T> | undefined> {
+  /** Handles a completed reply. `lastChance` marks a final, grace, or wrap-up turn. */
+  private async handleReply(turn: number, reply: Reply, lastChance: boolean): Promise<TurnOutcome<T>> {
     const { spec } = this
     if (reply.blocks.length > 0) {
       const source: Mutable<LlmAssistantMessage['source']> = {
@@ -458,19 +633,37 @@ class WorkerRun<T> {
       this.pushMessage({ id: randomUUID(), role: 'assistant', content: reply.blocks, source })
     }
 
-    const truncated = reply.finish === 'max-tokens'
-    const calls = reply.blocks.filter(isToolCall)
-    if (calls.length === 0) {
-      if (final) return this.stop('no_submission', { stopReason: 'max-turns' })
-      if (this.nudges >= MAX_NUDGES) return this.stop('no_submission', { stopReason: 'nudges-exhausted' })
-      this.nudges++
-      this.emit({ type: 'nudge', turn, reason: truncated ? 'max-tokens' : 'no-tool-call' })
-      const nudge = `You must finish by calling one of: ${this.terminalNames(', ')}. Do not reply with plain text.`
-      this.addUserNote(truncated ? `${nudge} Your previous reply hit the output token limit; keep it short.` : nudge)
-      return undefined
+    const names = this.terminalNames(' or ')
+    if (reply.droppedCalls.length > 0) {
+      // Like DSH's BlockAssembler: a reply cut off by the output limit never runs (or replays) its tool calls.
+      this.consecutiveText = 0
+      this.emit({ type: 'nudge', turn, reason: 'max-tokens' })
+      this.addUserNote(
+        `Your previous reply hit the output token limit, so its tool calls were cut off and not run: ${summarizeNames(reply.droppedCalls)}. ` +
+          'Call them again with shorter arguments: fewer calls or items per reply, more concise text, and brief reasoning.',
+      )
+      return lastChance ? { kind: 'missed' } : { kind: 'continue' }
     }
 
-    const available = new Map(offered.map(tool => [tool.name, tool]))
+    const calls = reply.blocks.filter(isToolCall)
+    if (calls.length === 0) {
+      this.consecutiveText++
+      if (this.consecutiveText > MAX_NUDGES) {
+        return { kind: 'done', result: this.stop('no_submission', { stopReason: 'nudges-exhausted' }) }
+      }
+      if (lastChance) return { kind: 'missed' }
+      const truncated = reply.finish === 'max-tokens'
+      this.emit({ type: 'nudge', turn, reason: truncated ? 'max-tokens' : 'no-tool-call' })
+      const nudge = `Plain text is not read. Continue with a tool call, or call ${names} when you are done.`
+      this.addUserNote(
+        truncated
+          ? `Your previous reply hit the output token limit before it called a tool. Reply with a tool call right away and keep your reasoning short. ${nudge}`
+          : nudge,
+      )
+      return { kind: 'continue' }
+    }
+    this.consecutiveText = 0
+
     // At most MAX_TOOL_CALLS_PER_TURN calls run (terminal evaluations included); every call still gets a result.
     let remaining = MAX_TOOL_CALLS_PER_TURN
     const overLimit = (call: LlmToolCallBlock): ToolResult => {
@@ -481,10 +674,11 @@ class WorkerRun<T> {
           'and call this tool again if you still need it.',
       )
     }
+    const context: TerminalContext = { final: lastChance, toolCalls: this.executedTools }
     // Terminal calls first: the first valid one ends the worker and the rest are ignored.
     const rejected = new Map<number, ToolResult>()
     for (const [index, call] of calls.entries()) {
-      const tool = available.get(call.name)
+      const tool = this.toolsByName.get(call.name)
       if (!tool?.terminal) continue
       if (remaining <= 0) {
         rejected.set(index, overLimit(call))
@@ -492,22 +686,29 @@ class WorkerRun<T> {
       }
       remaining--
       const started = performance.now()
-      const verdict = await this.evaluateTerminal(tool, call, truncated)
+      const verdict = await this.evaluateTerminal(tool, call, context)
       this.emit({ type: 'tool', turn, name: call.name, ok: verdict.ok, ms: elapsed(started) })
       if (verdict.ok) {
         this.toolCalls++
-        return this.stop('submitted', { output: verdict.output, terminalTool: tool.name })
+        const result = this.stop('submitted', { output: verdict.output, terminalTool: tool.name })
+        return { kind: 'done', result: verdict.dropped > 0 ? { ...result, droppedItems: verdict.dropped } : result }
       }
       rejected.set(index, verdict.result)
       await yieldToEventLoop()
     }
 
     for (const [index, call] of calls.entries()) {
-      if (spec.signal.aborted) return this.stop('cancelled', { stopReason: 'aborted' })
+      if (spec.signal.aborted) return { kind: 'done', result: this.stop('cancelled', { stopReason: 'aborted' }) }
       let result = rejected.get(index)
+      if (!result && lastChance) {
+        this.emit({ type: 'tool', turn, name: call.name, ok: false, ms: 0 })
+        result = errorResult(
+          `Not run: this is your last request, so only ${names} is accepted. Call ${names} now with what you have verified so far.`,
+        )
+      }
       if (!result && remaining > 0) {
         remaining--
-        result = await this.execute(turn, call, available, truncated)
+        result = await this.execute(turn, call)
         // A tool may have run synchronously for a while (regex search): let timers, I/O and other workers run.
         await yieldToEventLoop()
       }
@@ -515,54 +716,45 @@ class WorkerRun<T> {
       this.toolCalls++
       this.pushMessage(toolResultMessage(call.id, truncateText(result.text, this.maxChars), result.isError === true))
     }
-    if (spec.signal.aborted) return this.stop('cancelled', { stopReason: 'aborted' })
-    return final ? this.stop('no_submission', { stopReason: 'max-turns' }) : undefined
+    if (spec.signal.aborted) return { kind: 'done', result: this.stop('cancelled', { stopReason: 'aborted' }) }
+    return lastChance ? { kind: 'missed' } : { kind: 'continue' }
   }
 
   private async evaluateTerminal(
     tool: WorkerTool<unknown, T>,
     call: LlmToolCallBlock,
-    truncated: boolean,
+    context: TerminalContext,
   ): Promise<Verdict<T>> {
-    const args = await this.parseArgs(tool, call, truncated)
+    const args = await this.parseArgs(tool, call, context.final)
     if (!args.ok) return { ok: false, result: args.result }
     const terminal = tool.terminal
     if (!terminal) return { ok: false, result: errorResult(`Tool ${tool.name} cannot submit.`) }
     try {
-      const message = terminal.validate?.(args.value)
+      const message = terminal.validate?.(args.value, context)
       if (typeof message === 'string' && message !== '') return { ok: false, result: errorResult(message) }
-      return { ok: true, output: terminal.toOutput(args.value) }
+      return { ok: true, output: terminal.toOutput(args.value, context), dropped: args.dropped }
     } catch (error) {
       return { ok: false, result: errorResult(`Tool failed: ${errorText(error)}`) }
     }
   }
 
-  private async execute(
-    turn: number,
-    call: LlmToolCallBlock,
-    available: ReadonlyMap<string, WorkerTool<unknown, T>>,
-    truncated: boolean,
-  ): Promise<ToolResult> {
+  private async execute(turn: number, call: LlmToolCallBlock): Promise<ToolResult> {
     const started = performance.now()
-    const result = await this.executeUntimed(turn, call, available, truncated)
+    const result = await this.executeUntimed(turn, call)
     this.emit({ type: 'tool', turn, name: call.name, ok: result.isError !== true, ms: elapsed(started) })
     return result
   }
 
-  private async executeUntimed(
-    turn: number,
-    call: LlmToolCallBlock,
-    available: ReadonlyMap<string, WorkerTool<unknown, T>>,
-    truncated: boolean,
-  ): Promise<ToolResult> {
-    const tool = available.get(call.name)
+  private async executeUntimed(turn: number, call: LlmToolCallBlock): Promise<ToolResult> {
+    const tool = this.toolsByName.get(call.name)
     if (!tool) {
-      const names = [...available.keys()].join(', ')
+      const names = this.tools.map(t => t.name).join(', ')
       return errorResult(`Unknown tool ${JSON.stringify(clip(String(call.name), 80))}. Available tools: ${names}.`)
     }
-    const args = await this.parseArgs(tool, call, truncated)
+    const args = await this.parseArgs(tool, call, false)
     if (!args.ok) return args.result
     if (!tool.execute) return errorResult(`Tool failed: ${tool.name} is not executable`)
+    this.executedTools++
     try {
       const { signal, id } = this.spec
       const result: unknown = await raceAbort(tool.execute(args.value, { signal, workerId: id, turn }), signal)
@@ -573,23 +765,21 @@ class WorkerRun<T> {
     }
   }
 
-  /** JSON-decodes and schema-validates a call's arguments. */
+  /**
+   * JSON-decodes, repairs (see `lenient.ts`) and schema-validates a call's
+   * arguments. With `salvage`, list items that still fail are dropped instead
+   * of rejecting the call.
+   */
   private async parseArgs(
     tool: WorkerTool<unknown, T>,
     call: LlmToolCallBlock,
-    truncated: boolean,
-  ): Promise<{ readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly result: ToolResult }> {
+    salvage: boolean,
+  ): Promise<
+    | { readonly ok: true; readonly value: unknown; readonly dropped: number }
+    | { readonly ok: false; readonly result: ToolResult }
+  > {
     const decoded = decodeArguments(call.arguments)
     if (!decoded.ok) {
-      if (truncated) {
-        return {
-          ok: false,
-          result: errorResult(
-            `Your reply hit the output token limit, so the arguments of ${tool.name} were cut off (${decoded.error}). ` +
-              'Call it again with a shorter submission: fewer items and more concise text.',
-          ),
-        }
-      }
       return {
         ok: false,
         result: errorResult(
@@ -598,11 +788,14 @@ class WorkerRun<T> {
       }
     }
     try {
-      const parsed = await tool.input.safeParseAsync(decoded.value)
-      if (parsed.success) return { ok: true, value: parsed.data }
-      const issues = formatIssues(tool.name, parsed.error.issues)
-      const hint = truncated ? 'Your reply hit the output token limit; send a shorter submission.\n' : ''
-      return { ok: false, result: errorResult(clip(hint + issues, MAX_ISSUE_TEXT)) }
+      const repaired = coerceToolArgs(tool, decoded.value)
+      const parsed = await tool.input.safeParseAsync(repaired)
+      if (parsed.success) return { ok: true, value: parsed.data, dropped: 0 }
+      if (salvage) {
+        const kept = await salvageArgs(tool.input, repaired)
+        if (kept.ok) return { ok: true, value: kept.value, dropped: kept.dropped }
+      }
+      return { ok: false, result: errorResult(clip(formatIssues(tool.name, parsed.error.issues), MAX_ISSUE_TEXT)) }
     } catch (error) {
       return { ok: false, result: errorResult(`Tool failed: ${errorText(error)}`) }
     }
@@ -676,20 +869,26 @@ const ABORTED = Symbol('aborted')
 /**
  * Drains one provider attempt. Never throws.
  *
- * The request gets its own signal, linked to `signal`. When no chunk arrives
- * for `idleMs`, or `signal` aborts while the provider ignores it, the request
- * is aborted and the stream abandoned without waiting for it to settle.
+ * The request gets its own signal, linked to `signal`. When the first chunk
+ * takes longer than `firstChunkMs`, a later chunk longer than `idleMs`, or
+ * `signal` aborts while the provider ignores it, the request is aborted and
+ * the stream abandoned without waiting for it to settle. A reply that ends
+ * with `max-tokens` keeps its text and reasoning but loses its tool calls
+ * (their arguments may be cut off), and its replay state is pruned to match,
+ * exactly as DSH's BlockAssembler does.
  */
 async function consumeStream(
   llm: Pick<LlmPort, 'stream'>,
   options: LlmGenerateOptions,
   signal: AbortSignal,
+  firstChunkMs: number,
   idleMs: number,
 ): Promise<AttemptOutcome> {
   // Same open-block tolerance as DSH BlockAssembler; first close wins.
   const blocks = new Map<number, LlmContentBlock>()
   const partials = new Map<number, { type: string; text: string; id: string; name: string; args: string }>()
   let receivedAnyStreamChunk = false
+  let receivedChunk = false
   const partial = (index: number, type: string) => {
     let value = partials.get(index)
     if (!value) {
@@ -710,12 +909,13 @@ async function consumeStream(
   try {
     iterator = llm.stream({ ...options, signal: request.signal })[Symbol.asyncIterator]()
     for (;;) {
-      const next = await nextChunk(iterator, idleMs, request.signal)
+      const next = await nextChunk(iterator, receivedChunk ? idleMs : firstChunkMs, request.signal)
       if (next === IDLE || next === ABORTED) {
         abandoned = next
         break
       }
       if (next.done) break
+      receivedChunk = true
       const chunk = next.value
       // Error finish chunks are also emitted for immediate HTTP rejections.
       if (chunk.type !== 'finish') receivedAnyStreamChunk = true
@@ -773,13 +973,18 @@ async function consumeStream(
     }
   }
   if (abandoned === IDLE) {
-    const seconds = Math.max(1, Math.round(idleMs / 1000))
+    const seconds = Math.max(1, Math.round((receivedChunk ? idleMs : firstChunkMs) / 1000))
     return {
       ok: false,
       receivedAnyStreamChunk,
       usage,
       finish: 'error',
-      failure: { code: 'TIMEOUT', message: `The model sent no data for ${seconds} s; the request was abandoned` },
+      failure: {
+        code: 'TIMEOUT',
+        message: receivedChunk
+          ? `The model sent no data for ${seconds} s; the request was abandoned`
+          : `The model did not start responding within ${seconds} s; the request was abandoned`,
+      },
     }
   }
   if (abandoned === ABORTED) {
@@ -811,8 +1016,46 @@ async function consumeStream(
   }
   const failure = failureOf(reason)
   if (failure) return { ok: false, receivedAnyStreamChunk, usage, finish: reason.kind, failure }
-  const ordered = [...blocks.entries()].sort((a, b) => a[0] - b[0]).map(([, block]) => block)
-  return { ok: true, receivedAnyStreamChunk, blocks: ordered, usage, finish: reason.kind, replayState }
+  const all = [...blocks.entries()].sort((a, b) => a[0] - b[0]).map(([, block]) => block)
+  if (reason.kind !== 'max-tokens') {
+    return { ok: true, receivedAnyStreamChunk, blocks: all, usage, finish: reason.kind, replayState, droppedCalls: [] }
+  }
+  const kept = all.map(block => block.type !== 'tool-call')
+  const droppedCalls = all.filter(block => block.type === 'tool-call').map(block => toolName(block))
+  return {
+    ok: true,
+    receivedAnyStreamChunk,
+    blocks: all.filter((_, position) => kept[position]),
+    usage,
+    finish: reason.kind,
+    replayState: droppedCalls.length === 0 ? replayState : pruneReplay(replayState, kept),
+    droppedCalls,
+  }
+}
+
+/**
+ * Replay state with per-block entries pruned in step with dropped blocks, as
+ * DSH's BlockAssembler does: an envelope whose entries do not align with the
+ * blocks is dropped; one without per-block entries is kept as it is.
+ */
+function pruneReplay(replayState: unknown, kept: readonly boolean[]): unknown {
+  if (typeof replayState !== 'object' || replayState === null) return replayState
+  const entries = (replayState as { blocks?: unknown }).blocks
+  if (entries === undefined) return replayState
+  if (!Array.isArray(entries) || entries.length !== kept.length) return undefined
+  return { ...replayState, blocks: entries.filter((_, position) => kept[position]) }
+}
+
+function toolName(block: LlmContentBlock): string {
+  const name = (block as { name?: unknown }).name
+  return typeof name === 'string' && name !== '' ? clip(name, 60) : 'a tool call'
+}
+
+/** `read_file ×3, submit_findings` */
+function summarizeNames(names: readonly string[]): string {
+  const counts = new Map<string, number>()
+  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1)
+  return [...counts.entries()].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(', ')
 }
 
 /** The next chunk, or {@link IDLE} after `idleMs` without one, or {@link ABORTED} once `signal` aborts. */
@@ -993,6 +1236,22 @@ function errorResult(text: string): ToolResult {
   return { text, isError: true }
 }
 
+/** Replacement text for an elided tool result, naming the call it answered. */
+function elisionMarker(call: LlmToolCallBlock | undefined, chars: number): string {
+  const what = call
+    ? `output of ${clip(call.name, 60)} ${clip(singleLine(String(call.arguments ?? '')), 160)}`
+    : 'earlier tool output'
+  return `[${what} elided to fit the context window (${chars} chars); call the tool again if you still need it]`
+}
+
+function singleLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function budgetName(reason: Exclude<BudgetRefusal, 'cancelled'>): string {
+  return reason === 'calls' ? 'model-request' : reason === 'tokens' ? 'token' : 'time'
+}
+
 /** Truncates to `max` characters (never splitting a surrogate pair) and appends a marker. */
 export function truncateText(text: string, max: number): string {
   if (text.length <= max) return text
@@ -1006,11 +1265,13 @@ function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`
 }
 
-function textLength(content: readonly LlmContentBlock[]): number {
+/** Characters a message's content contributes to a request: text, reasoning, and tool-call arguments. */
+function contentChars(content: readonly LlmContentBlock[]): number {
   let total = 0
   for (const block of content) {
-    const text = (block as { text?: unknown }).text
-    if (block.type === 'text' && typeof text === 'string') total += text.length
+    const { text, arguments: args } = block as { text?: unknown; arguments?: unknown }
+    if (typeof text === 'string') total += text.length
+    if (typeof args === 'string') total += args.length
   }
   return total
 }
