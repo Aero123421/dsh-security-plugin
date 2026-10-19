@@ -33,7 +33,7 @@ flowchart LR
     SC["ScanController<br/>queue · pause/resume/cancel · crash recovery"]
     JOB["ScanJob (pipeline.ts)<br/>deterministic controller"]
     AN["Analysis<br/>snapshot · inventory · secrets/redaction<br/>SAST · deps · OSV · external · routes"]
-    PLAN["planning.ts<br/>stable task keys"]
+    PLAN["planning.ts · units.ts<br/>coverage units · stable task keys"]
     W["runWorker<br/>read-only tool loop"]
     EV["Evidence<br/>quote verification"]
     ST[("security.db<br/>node:sqlite")]
@@ -75,13 +75,13 @@ flowchart LR
 3. **Deterministic phases** (`scan/analysis.ts`): `snapshot` → `inventory` → `deterministic` (secrets and
    redaction, SAST, dependencies, OSV, external tools) → `surface` (routes). All of them work on an in-memory
    snapshot, never on the live tree.
-4. **AI phases** (skipped when no Hunter model or when `aiReview: false`): `threat-model` → `hunt` → `review` →
-   `chain`. Which of these run depends on the mode (see below).
+4. **AI phases** (skipped when no Hunter model or when `aiReview: false`): `threat-model` (reconnaissance) →
+   `hunt` → `review` → `chain`. Which of these run depends on the mode (see below).
 5. **Reconcile.** Findings absent from the previous completed scan of the same project are marked new, and
-   coverage is computed (files, files read by AI, endpoints reviewed, task outcomes, unavailable analyzers,
-   discarded claims, known gaps).
+   coverage is computed (files, files read by AI, endpoints reviewed, task outcomes, the coverage ledger of what was
+   and was not examined, unavailable analyzers, discarded claims, known gaps).
 6. **Report.** The scan is marked `completed`. Reports are rendered on demand by `exportReport` from the stored
-   records.
+   records. The Markdown and JSON reports list the coverage ledger; SARIF does not.
 
 ### Phases
 
@@ -91,8 +91,8 @@ flowchart LR
 | `inventory` | ✓ | ✓ | ✓ | Languages, manifests, frameworks, test files. |
 | `deterministic` | ✓ | ✓ | ✓ | Secret scan (its matches drive redaction), SAST rules, dependency parsing, optional OSV lookup, optional Gitleaks / OSV-Scanner / Semgrep. Reportable signals become findings immediately. |
 | `surface` | ✓ | ✓ | ✓ | HTTP endpoint extraction with handlers, middleware and auth hints. |
-| `threat-model` | – | ✓ | ✓ | One Planner run: assets, actors, trust boundaries, priorities and up to 8 / 16 hypotheses. |
-| `hunt` | ✓ | ✓ | ✓ | Hunter tasks from `planHuntTasks` (Quick: verifying rule hits of medium or higher and dangerous sinks, then endpoint groups). |
+| `threat-model` | ✓ | ✓ | ✓ | Reconnaissance: one Planner run maps the repository and submits the review plan: threat model, components, coverage units and exclusions. Quick allows it at most 10 replies. |
+| `hunt` | ✓ | ✓ | ✓ | Hunter tasks from `planHuntTasks`: one per coverage unit, plus Host-planned tasks for what the plan leaves out. Deep runs one coverage-critic pass and Research up to two, each followed by a wave for the units it adds. |
 | `review` | – | ✓ | ✓ | One Skeptic task per `potential` finding from AI, SAST or external tools at or above the review threshold (Research: Low and above). At most `max(maxTasks, 10)` tasks. |
 | `chain` | – | – | ✓ | One Chain-analyst run over up to 40 non-refuted AI or SAST findings (needs at least 2). |
 | `reconcile`, `report` | ✓ | ✓ | ✓ | New-finding marks, coverage, completion. |
@@ -101,43 +101,74 @@ flowchart LR
 
 All control flow is plain TypeScript in `ScanJob`. It decides which phases run, which tasks exist, how many workers
 run in parallel, when the budget stops work, and what a model's output means. Models never schedule work, call
-other agents or write to the store. They fill in the tasks the controller creates, and their output passes
-host-side checks before anything is stored.
+other agents or write to the store. The Planner and the Critic may *propose* coverage units, but the controller
+validates them against the snapshot and creates the tasks. Every other model output fills in a task the controller
+created, and it passes host-side checks before anything is stored.
 
-**Task planning** (`scan/planning.ts`) is a pure function of the analysis results:
+**Task planning** (`scan/units.ts`, `scan/planning.ts`) lets the AI decide what to review and the controller check
+that it did:
 
-- `hunt-endpoints`: endpoints grouped by handler file, 8 per task. A handler imported from another module (a
-  controller) is resolved to that file, and the task starts from both the handler file and the file that declares
-  the route. The handler file's 12 most severe rule hits are attached to its first task. Every endpoint task looks
-  for broken authorization and authentication, business-logic flaws and untrusted input reaching an interpreter,
-  the shell, the network, the file system or HTML (injection, command execution, SSRF, path traversal, XSS), plus
-  the categories of rule hits in its files. Ranked up for endpoints without auth hints, mutating methods,
-  parameters and nearby rule hits.
-- `hunt-signals`: rule hits (`vulnerability` and `sink`) in files without endpoints, 12 per task. In Deep and
-  Research, `vulnerability` hits of an endpoint file beyond those 12 get their own tasks
-  (`signals:<file>#<n>`), so every reportable rule hit reaches a hunter.
-- `hunt-hypothesis`: one per Planner hypothesis, ranked in the Planner's order. Its target paths are resolved
-  against the snapshot (`scan/planning.ts` `targetIndex`, `agents/tools/paths.ts` `resolveTargetPath`): an exact
-  path, a directory's most review-worthy source files, a unique near match (case, a missing or extra leading
-  directory, `./` or `:12` suffixes), or a symbol's defining file; at most 6 files. A hypothesis whose targets do
-  not resolve still runs, without starting files. `vulnerability` hits in its target files are attached, so the
-  hunter rules on them.
-- `hunt-file`: up to 6 security-sensitive files not otherwise targeted, ranked by what their names say they
-  enforce (auth, role, scope, token, crypto, upload first; configuration next; entity-named data-layer files last),
-  then by size. Deep/Research then append lowest-priority sweeps of remaining source files, 4 per task,
-  only within spare task capacity and only as many as the hunt budget can pay for (12 requests each). Sweeps
-  prefer production files, then sensitive names, then larger files.
-- `triage-signals` (Quick only): medium-or-higher `vulnerability` hits and medium-or-higher `sink`s of high and
-  critical rules (dynamic SQL, shell commands, code evaluation, unsafe deserialization, template injection), 12 per
-  task. Quick fills remaining slots with endpoint groups, prioritizing unguarded mutating endpoints, without raising
-  its task or call caps.
+- **Reconnaissance** (`threat-model`, Planner role, every AI mode). The Planner gets a bounded inventory: file count,
+  languages, frameworks and manifests, a directory overview (at most 60 rows, each with file count, main languages
+  and tests / generated / vendored markers), the first 60 detected endpoints with handler file and auth hints, and
+  the 30 files with the most rule hits. It also has the read-only workspace tools. The analyzers' endpoint and rule
+  detection knows some frameworks better than others, so the prompt calls these facts hints, not the whole
+  surface: entry points can be HTTP handlers, RPC or GraphQL resolvers, CLI arguments, queue consumers, scheduled
+  jobs, webhooks or imports in any language. It submits `submit_review_plan`: a summary, assets, actors, trust
+  boundaries, components, **coverage units** and exclusions.
+- **Coverage units.** A unit is one slice a single hunter examines: a title, component, entry surface, focus
+  categories, 1–8 target paths, priority (critical … low), rationale and an optional hypothesis. Reconnaissance may
+  plan 8 (Quick), 40 (Deep) or 80 (Research) units, never more than the mode's `maxTasks`. `resolveUnits` validates
+  them against the snapshot: each target is resolved (`agents/tools/paths.ts` `resolveTargetPath`) as an exact path,
+  a directory's most review-worthy source files, a unique near match (case, a missing or extra leading directory,
+  `./` or `:12` suffixes) or a symbol's defining file; only in-scope, non-withheld files are kept, at most 8 per
+  unit. A unit none of whose targets exists is sent back once with path suggestions and then dropped, as are a unit
+  with only out-of-scope files, a duplicate (same files and focus), and units beyond the limit. Test files count
+  only when `includeTests` is on.
+- **Exclusions.** The Planner may list directories or files as vendored, generated, documentation or fixtures
+  (at most 50). The Host keeps only existing paths with one of those reasons and never the workspace root. Excluded
+  files get no sweep task and are not counted as unassigned.
+- **Units become tasks.** Each unit is a `hunt-unit` task with key `unit:<hash of sorted target files and focus>`.
+  The task also carries what the deterministic analysis found in the unit's files: up to 12 reportable rule hits
+  (the hunter must rule on each), up to 6 sinks as steering, and up to 20 endpoints whose handler or route file the
+  unit targets. In Deep and Research, units are ranked by the Planner's priority; in Quick they rank below triage.
+- **Gap filling by the Host.** Whatever the plan leaves out is still planned from the deterministic analysis:
+  - `hunt-endpoints`: endpoints in no unit, grouped by handler file, 8 per task. A handler imported from another
+    module (a controller) is resolved to that file, and the task starts from both the handler file and the file
+    that declares the route. The handler file's 12 most severe rule hits are attached to its first task. Every
+    endpoint task looks for broken authorization and authentication, business-logic flaws and untrusted input
+    reaching an interpreter, the shell, the network, the file system or HTML (injection, command execution, SSRF,
+    path traversal, XSS), plus the categories of rule hits in its files. Ranked up for endpoints without auth
+    hints, mutating methods, parameters and nearby rule hits. In Quick they rank below the units, unguarded
+    mutating endpoints first.
+  - `hunt-signals` (Deep, Research): every reportable rule hit (`vulnerability`) no unit or endpoint task took, 12
+    per task, so each reaches a hunter. `sink` hits in files no task targets get tasks too, as steering.
+  - `triage-signals` (Quick): medium-or-higher `vulnerability` hits and medium-or-higher `sink`s of high and
+    critical rules (dynamic SQL, shell commands, code evaluation, unsafe deserialization, template injection), 12
+    per task. Quick plans them first, whatever the plan says.
+  - `hunt-file` sweeps: in-scope, hand-written source files that no task targets, 4 per task, lowest priority.
+    Sweeps fill only the task slots left under `maxTasks` and only as many tasks as the hunt budget can pay for
+    (about 12 requests each; see Budgets). They prefer production files, then names that say what the code enforces
+    (auth, role, scope, token, crypto, upload first; configuration next; entity-named data-layer files last), then
+    larger files. This is the same in all modes, so a Quick scan with spare capacity sweeps too.
+- Candidates are sorted by priority and cut at `maxTasks`, less a fifth of it kept for coverage-critic units. Tasks
+  beyond the limit are stored as `skipped` with error code `task-limit`, so they appear in the ledger as not
+  examined; the number left over is reported as a notice. Source files that still belong to no task are counted as
+  `unassignedFiles`. Unguarded mutating routes and GET routes with `admin`, `internal` or `debug` path segments emit
+  non-reportable `sink` observations: these increase endpoint priority and appear as hunter steering context, never
+  as deterministic findings.
+- Source files means JavaScript, TypeScript, Python, Go, Java, Kotlin, Ruby, PHP, C# and Rust. Files in other
+  languages are examined only when a unit names them, and are neither swept nor counted as unassigned.
 
-Endpoint, signal and file tasks covering a Planner priority (a file, a directory or a `METHOD /route`) are ranked
-up by 6. Test and fixture files are left out unless `includeTests` is on. Candidates are sorted by priority and cut
-at the mode's `maxTasks`; Quick always puts triage first. The number left over is reported as a notice. Unguarded
-mutating routes and GET routes with `admin`, `internal` or `debug` path segments emit non-reportable `sink`
-observations: these increase endpoint priority and appear as hunter steering context, never as deterministic
-findings.
+**Coverage critic** (`agents/roles/critic.ts`, Planner route). After the first hunt wave, Deep runs one pass and
+Research up to two (Quick none). The critic sees the ledger so far (first 80 units), the 60 most review-worthy
+source files no worker read, and up to 40 endpoints no finished task reviewed, and can use the workspace tools. It
+submits `submit_coverage_review`: up to 8 (Deep) or 16 (Research) new units for real gaps, or `done`. The Host
+validates them like reconnaissance units, against the task slots still free. Critic units take only steering
+sinks and unreviewed endpoints, because every reportable rule hit already has a task. A wave runs them, and a
+second Research pass follows only if the first one added units. The critic is skipped without a Planner route,
+when the hunt budget is exhausted, or when its route was already found broken. A pass that fails or adds nothing
+ends the passes.
 
 **Workers** (`agents/runtime/worker.ts`) are short-lived tool-calling loops:
 
@@ -183,8 +214,9 @@ reply, and it gives the severity rubric and the output language. Each role has i
 
 | Role | Terminal tool | Turn cap | Output checks |
 | --- | --- | --- | --- |
-| Planner | `submit_threat_model` | `min(maxTurnsPerWorker, 48)` | Hypotheses beyond N are dropped. A hypothesis none of whose target paths resolves is sent back once with path suggestions. |
-| Hunter | `submit_findings` | `maxTurnsPerWorker` | Findings with at least one verified code step are saved across resubmissions. The rest, verdicts whose evidence does not verify, and (once) missing verdicts for listed rule hits are sent back (up to 3 times) with the exact mismatches and the file's actual lines; after that the submission is accepted and the host drops findings without verified code. An empty submission before any tool call is sent back once. |
+| Planner | `submit_review_plan` | `min(maxTurnsPerWorker, 48)`; Quick 10 | Units beyond the mode's limit, duplicates and units with no in-scope file are dropped. A unit none of whose target paths resolves is sent back once with path suggestions. Exclusions need a valid reason and an existing path. |
+| Critic | `submit_coverage_review` | `min(maxTurnsPerWorker, 24)` | Same unit checks as the Planner, against the task slots still free. `done` or no valid unit ends the passes. |
+| Hunter | `submit_findings` | `maxTurnsPerWorker` | Findings with at least one verified code step are saved across resubmissions. The rest, verdicts whose evidence does not verify, and (once) missing verdicts for listed rule hits are sent back (up to 3 times) with the exact mismatches and the file's actual lines; after that the submission is accepted and the host drops findings without verified code. An empty submission before any tool call is sent back once. An optional `coverage` verdict (`complete`, `partial`, `needs-runtime`) with a note says how completely the hunter examined its unit; an unknown spelling is dropped, never sent back. |
 | Skeptic | `submit_verdict` | `min(maxTurnsPerWorker, 48)` | `refuted` without a verified counter-evidence quote of code (comment-only quotes do not count) is sent back (up to 2 times), then downgraded to `inconclusive`. `confirmed` without any verified step becomes `inconclusive`. |
 | Chain analyst | `submit_chains` | `min(maxTurnsPerWorker, 48)` | A chain needs at least 2 known findings and at least 1 verified step (1 resubmission). |
 
@@ -285,9 +317,15 @@ The AI phases run one after another on this gate, so each phase works below a ce
 phases after it (`phaseCeilings` in `scan/budget.ts`):
 
 - **Review reserve:** 6 requests per finding that is planned for a Skeptic review, at most 30% of the calls in Deep
-  and 35% in Research (none in Quick). The reserve follows the findings as hunters report them. The Planner and
-  the hunters stop at the hunt ceiling; lower-priority hunt tasks that do not start are skipped (reason `budget`,
-  notice `hunt-budget-reserved`).
+  and 35% in Research (none in Quick). The reserve follows the findings as hunters report them. The Planner, the
+  Critic and the hunters stop at the hunt ceiling; lower-priority hunt tasks that do not start are skipped (reason
+  `budget`, notice `hunt-budget-reserved`).
+- **Critic reserve** (Deep, Research): each coverage-critic pass still to run is expected to need 8 requests for the
+  critic plus 12 for each unit it may add (8 / 16 units), at most 20% of the hunt ceiling's calls. Hunt waves stop
+  at the **wave ceiling**, the hunt ceiling less this reserve, so the critic and its units still fit under the hunt
+  ceiling and the review reserve is unchanged. What a wave leaves pending runs afterwards under the full hunt
+  ceiling. With no critic pass left, the wave ceiling equals the hunt ceiling. Up to a fifth of `maxTasks` is kept
+  free for critic units in the same way.
 - **Chain reserve** (Research): 12 requests, at most 5%.
 - **Wrap-up reserve:** 2 requests per parallel worker, at most 5% of the calls and 3% of the time. A worker the gate
   refuses mid-run gets one wrap-up request from it to submit what it found; wrap-up requests may pass a phase
@@ -302,6 +340,31 @@ When any dimension of the scan's own limits runs out, no new task starts. Tasks 
 (`extendScanBudget`): the frozen budget grows (clamped to the operator ceilings), budget-skipped tasks return to
 `pending`, and the scan is queued again with its findings, usage, and completed tasks intact.
 
+## Coverage ledger
+
+Coverage (`coverage` in the scan detail, built in `ScanJob.coverage()`) answers what the AI review did and did not
+examine. For an AI scan it carries a ledger (`units`, `scan/units.ts` `coverageLedger`): one unit per hunt task,
+whether it came from the plan, the critic or the Host's gap filling, so the ledger and the tasks never disagree.
+Each unit has a title, component, surface, focus, up to 8 paths, `origin` (`recon`, `critic` or `gap`) and `kind`
+(what produced it; the UI localizes the titles of Host-made units from it), and a status:
+
+| Status | Rule |
+| --- | --- |
+| `finding` | The task is `done` and at least one non-refuted finding rests on evidence from that task. |
+| `blocked` | The task is `done`, the hunter's `coverage` verdict is `partial` or `needs-runtime`, and no such finding exists. The note it gave is kept. |
+| `covered` | The task is `done` without either of the above. |
+| `not-run` | Any other state, with a reason code from the task's error: `budget`, `task-limit`, `failed`, `consent-revoked`, `provider-rejected`, `no-tools` or `stale-target`. |
+
+On top of the task units, one `unassigned` unit (`not-run`, reason `task-limit`, `budget` or `consent-revoked`) lists
+the in-scope source files that no hunt task targets, whatever became of the task. The number is also
+`unassignedFiles`. Source files the plan excluded as vendored, generated, documentation or fixtures are not counted.
+Two gap diagnostics go with it: `unassigned-files` (count, reason) and `excluded-by-plan` (count). A scan with only
+built-in analyzers has no ledger, no `unassignedFiles` and neither gap.
+
+The ledger appears on the results page (a plan summary, the unassigned-files row, and the parts grouped by status,
+unexamined ones first), in the Markdown report (a *Review units* table, unexamined first, at most 100 rows) and in
+the JSON report. SARIF does not carry it. The critic reads the same ledger without the `unassigned` unit.
+
 ## Pause, resume and crash recovery
 
 - **Pause or cancel** aborts in-flight model requests through the job's `AbortSignal`. Tasks that were `running` go
@@ -314,10 +377,15 @@ When any dimension of the scan's own limits runs out, no new task starts. Tasks 
   deterministic phases run again on a fresh snapshot (they are cheap and reproducible), and a notice appears if the
   snapshot digest changed. AI tasks are idempotent by **stable task keys**: tasks are inserted with
   `ensureTask(scan_id, key)` under a `UNIQUE (scan_id, key)` constraint, and keys come from content rather than from
-  random ids (`endpoints:<file>#<chunk>`, `signals:<file>#<chunk>`, `hypothesis:<sha256 of title and paths>`,
-  `file:<path>`, `review:<finding id>`, `threat-model`, `chain`). Re-planning after a resume therefore finds the
-  same tasks. Tasks marked `done` are not run again, and rule findings are not duplicated because insertion skips
-  existing fingerprints. Usage and elapsed time carry over into the new run.
+  random ids (`unit:<hash of target files and focus>`, `endpoints:<file>#<chunk>`, `signals:<file>#<chunk>`,
+  `triage:<file>#<chunk>`, `sweep:<hash of files>`, `critic:<pass>`, `review:<finding id>`, `threat-model`,
+  `chain`). Re-planning after a resume therefore finds the same tasks. Tasks of scans from older versions
+  (`hypothesis:<hash>`, `file:<path>`) still resume. Reconnaissance is **never planned again**: the stored plan
+  (the scan's `threatModel`, with its units and exclusions) is reused, so a resumed scan reviews the same parts. A
+  scan whose hunt tasks began before reconnaissance existed for its mode simply continues without a plan. Critic
+  passes that already ran are not repeated, and a pass that failed or added nothing ends the passes. Tasks marked
+  `done` are not run again, and rule findings are not duplicated because insertion skips existing fingerprints.
+  Usage and elapsed time carry over into the new run.
 
 ## Why the DSH LLM registry instead of DSH chat sessions
 
@@ -349,7 +417,11 @@ Remediation goes the other way on purpose: "Fix in DSH chat" calls `uiWorkspace.
 keys and versioned, append-only migrations (`store/schema.ts`). A database written by a newer plugin version is
 refused. Tables: `settings` (one row, with a revision for compare-and-set), `scans`, `tasks`, `agent_runs`,
 `transcripts` (gzip, up to 32 MiB of JSON each), `evidence`, `findings`, `triage`, `events`, `meta`. Every per-scan
-table cascades from `scans`. At startup, retention deletes scans created more than `retentionDays` ago, except
+table cascades from `scans`. The scan's threat model is one JSON column; the review plan (`units`, `components`,
+`excluded`) is stored inside it, so the coverage ledger needed no migration, and records written before the plan
+(with `priorities` and `hypotheses`) still read. The reverse does not hold: an older plugin version that opens a
+database containing `hunt-unit` or `critic` tasks treats those task rows as corrupt, so do not downgrade the plugin
+over a database that holds scans from this version. At startup, retention deletes scans created more than `retentionDays` ago, except
 scans that are queued, running or paused.
 
 ### Controller ownership and model catalogs

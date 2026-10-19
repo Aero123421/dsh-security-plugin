@@ -115,8 +115,10 @@ change is a partial patch with optimistic concurrency. If two pages edit at the 
 | per route: `reasoningEffort` | model default | Adapter-specific effort id, offered when the model reports reasoning support. |
 | per route: `maxOutputTokens` | model default | Per-request output cap (1–1,000,000 in the UI). |
 
-An AI scan needs a Hunter route (its own or Default). Without a Planner route the threat model is skipped; without a
-Skeptic route, independent review; without a Chain route, attack chains.
+An AI scan needs a Hunter route (its own or Default). Without a Planner route there is no reconnaissance (the AI
+does not map the repository or plan the review, and no coverage-critic pass runs; the hunters then work only on the
+tasks the Host plans from the built-in analysis); without a Skeptic route, no independent review; without a Chain
+route, no attack chains. The Planner route also runs the coverage critic.
 
 Before snapshotting, scan creation resolves each distinct provider/model and rejects unknown models, unsupported
 reasoning efforts, and output caps above the reported combined context window with `security/no-model`.
@@ -130,7 +132,7 @@ the adapter/provider when requests run.
 | --- | --- | --- | --- |
 | `scan.defaultMode` | `deep` | quick / deep / research | Preselected mode in the New scan dialog. |
 | `scan.excludeGlobs` | `[]` | ≤ 200 patterns, ≤ 300 chars each | Extra gitignore-style excludes for every scan (on top of `.gitignore` and built-in ignores such as `node_modules`, `dist`, `.git`). |
-| `scan.includeTests` | `false` | | Let AI workers see test, fixture and example files. Built-in analyzers always scan them, with severity capped at Low. |
+| `scan.includeTests` | `false` | | Let AI workers see test, fixture and example files. Built-in analyzers always scan them, with severity capped at Low. Without it, test files are left out of review parts and source sweeps, and are not counted as unassigned. |
 | `scan.parallelWorkers` | `2` | 1–64, clamped to `maxParallelWorkers` | AI workers running at once in one scan. |
 | `scan.reviewThreshold` | `medium` | critical … info | *Second opinion from*: Deep mode reviews findings at or above this severity. Research always uses Low. |
 
@@ -149,9 +151,10 @@ up to **three worker runs per task in total**, including interrupted runs. Provi
 retain their separate four-attempts-per-turn bound. Crash recovery does not reset failed tasks. Completed scans with
 failed tasks remain completed with gaps; start a new scan to review them again.
 
-Pending tasks are replanned with current inputs/priority, including after a plugin version change. Tasks whose
-files/endpoints disappeared are skipped without a model request; a Planner hypothesis whose files disappeared still
-runs, starting with a search. Done/running task records are never rewritten;
+Pending tasks are replanned with current inputs/priority, including after a plugin version change. The review plan
+itself is not: the Planner runs once per scan, and a resumed scan reuses its stored coverage units. Tasks whose
+files/endpoints disappeared are skipped without a model request; a hypothesis task of a scan from an older version
+whose files disappeared still runs, starting with a search. Done/running task records are never rewritten;
 new endpoints in an already-completed group get a separate task. Only one queued/running scan is allowed per
 canonical workspace, including when resuming a different scan.
 
@@ -161,7 +164,27 @@ canonical workspace, including when resuming a different scan.
 | `maxTokens` | 1,200,000 | 9,000,000 | 36,000,000 | ≤ `maxTokensPerScan` |
 | `maxMinutes` | 30 | 180 | 720 | UI: 1–1,440 |
 | `maxTurnsPerWorker` (requests per reviewer) | 36 | 72 | 120 | 1–500. Planner, Skeptic and Chain analyst also stop at 48. |
-| `maxTasks` (review tasks) | 18 | 120 | 450 | UI: 1–1,000. The review phase may schedule up to `max(maxTasks, 10)`. |
+| `maxTasks` (review tasks) | 18 | 120 | 450 | UI: 1–1,000. Caps the hunt tasks (see below). The review phase may schedule up to `max(maxTasks, 10)`. |
+
+**What the AI plans, and what limits it.** In every mode the Planner first maps the repository and plans the review
+as *coverage units* (parts of the project, each with up to 8 files). The number of units is limited per mode and by
+`maxTasks`:
+
+| | Quick | Deep | Research |
+| --- | --- | --- | --- |
+| Reconnaissance (Planner) | yes, at most 10 replies | yes | yes |
+| Coverage units | up to 8 | up to 40 | up to 80 |
+| Coverage-critic passes (new units per pass) | none | 1 (up to 8) | up to 2 (up to 16 each) |
+
+Each unit becomes one hunt task, so `maxTasks` bounds units, endpoint and rule-hit tasks the Host adds, and
+sweeps together. Quick spends up to 10 requests on reconnaissance before it hunts. Deep and Research pay for
+the critic passes out of the hunt budget, not on top of it. After the units, the Host adds tasks for endpoints and reportable rule hits no unit covers. It then
+sweeps the in-scope source files no task targets, 4 per task, but only as far as `maxTasks` leaves room and the hunt
+budget can pay for (about 12 AI requests per task). A larger `maxLlmCalls` or `maxTasks` therefore buys more
+sweeping and fewer unexamined files. Tasks cut by `maxTasks` and source files that still belong to no task are
+listed in the results as *not examined* and *unassigned files*; they do not fail the scan. Only
+JavaScript, TypeScript, Python, Go, Java, Kotlin, Ruby, PHP, C# and Rust files are swept and counted; files the plan
+excludes as vendored, generated, documentation or fixtures are neither.
 
 These defaults apply when no budget has been saved. Updating the plugin does not replace saved budgets;
 change them in Settings to use the new values. Each model reply may execute up to 48 tool calls;
@@ -170,9 +193,11 @@ further calls receive an error result. Concurrency and retry limits are independ
 The AI phases share one budget, so hunting stops early enough to leave a reserve: about 6 AI requests for each
 finding that will get an independent review (at most 30% of the AI requests in Deep, 35% in Research, none in
 Quick), 12 for the Research attack-chain run (at most 5%), and 2 per reviewer working at once so that a reviewer
-the budget stops mid-task can still submit what it found (at most 5%). Tokens and minutes are reserved in the same
+the budget stops mid-task can still submit what it found (at most 5%). Deep and Research also keep back what the
+coverage-critic passes still to run need (8 requests for the critic plus 12 per unit it may add), at most 20% of the
+hunt budget, so the first hunt waves leave room for them. Tokens and minutes are reserved in the same
 proportion. Hunt tasks that do not fit are skipped with a notice and run after **Add budget**, and
-Deep and Research schedule low-priority file sweeps only as far as the remaining hunt budget pays for (about 12
+low-priority file sweeps are scheduled only as far as the remaining hunt budget pays for (about 12
 requests each).
 
 Token usage is charged at the reported uncached input, cache writes and output at full rate, and cache reads at a

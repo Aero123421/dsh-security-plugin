@@ -62,7 +62,8 @@ Everything read from the repository is data. The controls:
   review continues. Text taken from the repository and placed in task messages (route names, middleware names,
   rule-hit snippets, finding titles) is clipped and kept on a single line. The Planner's threat model, which a
   hostile repository can steer, reaches hunters only as context labelled as the Planner's reading of the code, not
-  as verified facts; its target paths and priorities only rank and seed tasks within the snapshot.
+  as verified facts; the coverage units it proposes (including their rationale and hypothesis) are validated by the
+  Host, and their target paths and priorities only rank and seed tasks within the snapshot.
 - **Prompt injection is mitigated, not solved.** No prompt reliably stops a determined injection. The real controls
   are structural: what a manipulated worker *can do* is limited (next section), and what it *claims* is checked
   against code (Evidence integrity, below).

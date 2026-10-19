@@ -39,6 +39,17 @@ changes; they are called out explicitly.
   also redacted when a compose file or manifest is shown to the AI review. Values that only point at a secret
   (`${VAR}`, YAML anchors and tags, SOPS `ENC[…]`, ARNs and secret-manager paths) and the example passwords of
   container image docs (`mysecretpassword`) are ignored.
+- Coverage ledger: the results page lists the parts of the project the AI review was planned to examine and what
+  became of each (examined, with findings, undecided, not examined, with the reason), plus the number of source
+  files that belong to no part. The Markdown report has a *Review units* table and the JSON report the same data
+  (`coverage.units`, `coverage.unassignedFiles`); SARIF does not. New coverage gaps: `unassigned-files` and
+  `excluded-by-plan`. Hunters may state how completely they examined their part (complete, partial, needs
+  runtime), which marks the part *Undecided*. Titles of parts the Host adds itself (endpoint, rule-hit and sweep
+  tasks) are shown in the UI language.
+- Coverage critic: after the first hunt wave, Deep runs one pass and Research up to two in which the Planner's model
+  reads the ledger, the source files no reviewer opened and the endpoints no task reviewed, and adds up to 8 (Deep)
+  or 16 (Research) parts for real gaps. The passes are paid out of the hunt budget: waves stop at a ceiling that
+  keeps up to 20% of the hunt requests for them, and a fifth of the task limit stays free for their parts.
 
 ### Changed
 
@@ -106,6 +117,21 @@ changes; they are called out explicitly.
   enforce (`requireRole.ts`, `tenantScope.ts`, `tokens.ts`, `crypto.ts`, `upload.ts`, configuration
   directories) before size, so large CRUD repositories and utility middleware no longer take those slots.
   Camel-case names (`requireAuth`) now count.
+- AI-led planning replaces rule-driven task planning. The `threat-model` phase, now shown as *Review plan*, is
+  reconnaissance in every AI mode: the Planner maps the repository in any language (directory overview, manifests,
+  endpoints with auth hints, rule hits per file, read-only workspace tools) and submits `submit_review_plan` with
+  the threat model, components, coverage units (up to 8 in Quick, 40 in Deep, 80 in Research, never above the task
+  limit, at most 8 files each) and exclusions (vendored, generated, documentation or fixtures only). Each unit
+  becomes a hunt task. The Host still plans what the units leave out: endpoint tasks, a verdict task for every
+  reportable rule hit, and a sweep of source files no task targets, within the task limit and what the hunt
+  budget can pay for. Planner hypotheses, the security-sensitive-file tasks and the planner priority boost are gone.
+  Quick now spends up to 10 requests on reconnaissance, and a Quick scan with no rule hits can run AI tasks.
+  The plan is stored with the scan and never planned again on resume. Source files that no task covers are reported
+  as unassigned instead of being left unmentioned.
+- Downgrade caveat: scans from this version store `hunt-unit` and `critic` tasks and the review plan in the threat
+  model record. An older plugin version that opens a database with such scans treats those task rows as corrupt, so
+  do not downgrade over a database that holds them. Scans from older versions (hypothesis and file tasks) still
+  resume. No database migration is needed.
 
 ### Fixed
 
