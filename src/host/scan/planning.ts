@@ -15,6 +15,8 @@ import {
 } from '../../shared/domain.ts'
 import { resolveTargetPath, type TargetIndex } from '../agents/tools/paths.ts'
 import { MUTATING_METHODS } from '../analysis/routes/signals.ts'
+import { identifierWords } from '../analysis/sast/helpers.ts'
+import { SAST_RULES } from '../analysis/sast/index.ts'
 import type { Endpoint, Signal, Snapshot, SnapshotFile } from '../analysis/types.ts'
 import type { FindingRecord, TaskInput, TaskKind } from '../core/model.ts'
 import type { RoleName } from '../../shared/domain.ts'
@@ -71,8 +73,89 @@ const MAX_SENSITIVE_FILE_TASKS = 6
 const SWEEP_FILES_PER_TASK = 4
 /** Untrusted input reaching an interpreter, the network, the file system or HTML: worth checking in any file. */
 const INPUT_FOCUS: readonly FindingCategory[] = ['injection', 'command-execution', 'ssrf', 'path-traversal', 'xss']
-const SENSITIVE_NAME =
-  /(?:^|[/_.-])(auth|authn|authz|login|logout|session|sessions|permission|permissions|policy|policies|guard|guards|acl|rbac|role|roles|middleware|tenant|tenants|account|accounts|admin|token|tokens|jwt|oauth|password|billing|payment|payments|invite|invites|upload|uploads|config|configuration|settings|cookie|cookies|security|constants|env)(?:[/_.-]|$)/i
+/** Words for code that enforces security: authentication, authorization, secrets, crypto, uploads. */
+const MECHANISM_WORDS: ReadonlySet<string> = new Set([
+  'auth',
+  'authn',
+  'authz',
+  'authenticate',
+  'authentication',
+  'authorize',
+  'authorization',
+  'login',
+  'logout',
+  'signin',
+  'signup',
+  'session',
+  'sessions',
+  'token',
+  'tokens',
+  'jwt',
+  'oauth',
+  'oidc',
+  'saml',
+  'sso',
+  'password',
+  'passwords',
+  'permission',
+  'permissions',
+  'policy',
+  'policies',
+  'guard',
+  'guards',
+  'acl',
+  'rbac',
+  'role',
+  'roles',
+  'scope',
+  'scopes',
+  'impersonate',
+  'impersonation',
+  'crypto',
+  'cipher',
+  'encrypt',
+  'encryption',
+  'secret',
+  'secrets',
+  'security',
+  'csrf',
+  'xsrf',
+  'signature',
+  'signing',
+  'otp',
+  'mfa',
+  'totp',
+  'upload',
+  'uploads',
+])
+/** Configuration words: the file (or its directory) holds settings and secrets. */
+const CONFIG_WORDS: ReadonlySet<string> = new Set([
+  'config',
+  'configuration',
+  'settings',
+  'env',
+  'constants',
+  'cookie',
+  'cookies',
+  'cors',
+])
+/** Domain words: sensitive data, but in a data-layer file usually plain CRUD. */
+const DOMAIN_WORDS: ReadonlySet<string> = new Set([
+  'tenant',
+  'tenants',
+  'account',
+  'accounts',
+  'admin',
+  'billing',
+  'payment',
+  'payments',
+  'invite',
+  'invites',
+  'middleware',
+])
+/** Directories of data-layer and routing files. */
+const LAYER_DIR =
+  /(?:^|\/)(?:repositories|repository|repos|services|service|controllers|controller|models|model|entities|entity|dtos?|schemas|routes|handlers)\//
 const SOURCE_LANGUAGES = new Set([
   'javascript',
   'typescript',
@@ -178,8 +261,23 @@ export function planReviewTasks(
 // Task families
 // ---------------------------------------------------------------------------
 
+/** Base severity of each built-in rule, to tell the sinks of high/critical rules apart. */
+const RULE_SEVERITY: ReadonlyMap<string, Severity> = new Map(SAST_RULES.map(rule => [rule.id, rule.severity]))
+
+/**
+ * Rule hits Quick mode verifies: medium-or-worse vulnerabilities, and medium-or-worse sinks of high/critical
+ * rules (dynamic SQL, shell commands, code evaluation, unsafe deserialization), which in layered code are
+ * often the only trace of an injection two calls away from the request.
+ */
+function triageWorthy(signal: Signal): boolean {
+  if (signal.kind === 'vulnerability') return severityAtLeast(signal.severity, 'medium')
+  if (signal.kind !== 'sink' || !severityAtLeast(signal.severity, 'medium')) return false
+  const base = RULE_SEVERITY.get(signal.ruleId)
+  return base !== undefined && severityAtLeast(base, 'high')
+}
+
 function planTriage(signals: readonly Signal[]): PlannedTask[] {
-  const relevant = signals.filter(s => s.kind === 'vulnerability' && severityAtLeast(s.severity, 'medium'))
+  const relevant = signals.filter(triageWorthy)
   return groupByPath(relevant, s => s.location.path).flatMap(([path, group]) =>
     chunk(sortSignals(group), SIGNALS_PER_TASK).map((part, index) => ({
       key: `triage:${path}#${index}`,
@@ -397,7 +495,7 @@ export function targetIndex(
 function preferForReview(a: SnapshotFile, b: SnapshotFile): number {
   return (
     Number(a.isTest) - Number(b.isTest) ||
-    Number(SENSITIVE_NAME.test(b.path)) - Number(SENSITIVE_NAME.test(a.path)) ||
+    Number(sensitivity(b.path) > 0) - Number(sensitivity(a.path) > 0) ||
     b.size - a.size ||
     (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
   )
@@ -414,10 +512,11 @@ function planSensitiveFiles(
       !f.isGenerated &&
       inScope(f.path) &&
       !targeted.has(f.path) &&
-      SENSITIVE_NAME.test(f.path),
+      sensitivity(f.path) > 0,
   )
+  // Names that say what the code enforces (`requireRole`, `tenantScope`, `tokens`, `upload`) before size.
   return files
-    .sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1))
+    .sort((a, b) => sensitivity(b.path) - sensitivity(a.path) || b.size - a.size || (a.path < b.path ? -1 : 1))
     .slice(0, MAX_SENSITIVE_FILE_TASKS)
     .map(f => ({
       key: `file:${f.path}`,
@@ -460,6 +559,26 @@ function planSweep(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * How strongly a path's words point to security logic, 0 (none) to 3. File-name words count most
+ * (`requireAuth.ts`, `tenantScope.ts`, `crypto.ts`: 3; `upload.ts`, `settings.py`: 2-3); a data-layer file named
+ * after a domain entity (`repositories/payment.repository.ts`) and directory-only matches
+ * (`middleware/rateLimit.ts`) count 1, except configuration directories (`config/index.ts`: 2).
+ */
+function sensitivity(path: string): number {
+  const segments = path.split('/')
+  const base = (segments.pop() ?? '').replace(/\.[^.]+$/, '')
+  const tier = (word: string): number =>
+    MECHANISM_WORDS.has(word) ? 3 : CONFIG_WORDS.has(word) || DOMAIN_WORDS.has(word) ? 2 : 0
+  const words = identifierWords(base)
+  let score = Math.max(0, ...words.map(tier))
+  if (score === 2 && LAYER_DIR.test(path) && !words.some(w => CONFIG_WORDS.has(w))) score = 1
+  for (const word of segments.flatMap(segment => identifierWords(segment))) {
+    score = Math.max(score, CONFIG_WORDS.has(word) ? 2 : tier(word) > 0 ? 1 : 0)
+  }
+  return score
+}
 
 export function endpointPath(endpoint: Endpoint): string {
   return endpoint.handler?.path ?? endpoint.declaredAt.path

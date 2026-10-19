@@ -138,6 +138,13 @@ changes; they are called out explicitly.
   the rule hits that Quick mode triages.
 - Stop reporting SQL injection for a Django view parameter that every URLconf route fills through `<int:…>` or
   `<uuid:…>` (or a digits-only `re_path` group); the URLconf in another file is now read before the views.
+- Quick scans also verify medium sinks of high and critical rules (dynamic SQL, shell commands, code evaluation,
+  unsafe deserialization), which in layered code are often the only trace of an injection; before, Quick
+  triaged only vulnerability hits.
+- Choose the up to six sensitive files that Deep and Research review on their own by what their names say they
+  enforce (`requireRole.ts`, `tenantScope.ts`, `tokens.ts`, `crypto.ts`, `upload.ts`, configuration
+  directories) before size, so large CRUD repositories and utility middleware no longer take those slots.
+  Camel-case names (`requireAuth`) now count.
 - Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
   and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
 

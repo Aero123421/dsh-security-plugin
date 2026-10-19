@@ -61,7 +61,12 @@ describe('planHuntTasks — quick mode', () => {
       hypotheses: [{ title: 'IDOR', category: 'authz', targetPaths: ['src/routes/orders.ts'], rationale: 'r' }],
     })
     expect(result.overflow).toBe(0)
-    expect(result.tasks).toHaveLength(2)
+    // The SQL sink in admin.ts is a sink of a high-severity rule, so it is triaged too.
+    expect(result.tasks.map(t => t.key)).toEqual([
+      'triage:src/lib/db.ts#0',
+      'triage:src/routes/admin.ts#0',
+      'endpoints:src/routes/orders.ts#0',
+    ])
     expect(result.tasks[0]!.priority).toBeGreaterThan(result.tasks[1]!.priority)
     const [task] = result.tasks
     expect(task).toMatchObject({
@@ -321,7 +326,7 @@ describe('planHuntTasks — deep and research modes', () => {
       endpoints: [endpointOf('POST', '/login', 'src/auth/session.ts', 1)],
     })
     const files = tasks.filter(t => t.key.startsWith('file:'))
-    // The 6 largest candidates (src/routes/admin.ts, 30 bytes, is the 7th), ranked by key at equal priority.
+    // The 6 most sensitive names, larger first (src/routes/admin.ts, 30 bytes, is the 7th), ranked by key at equal priority.
     expect(files.map(t => t.key)).toEqual([
       'file:src/admin/panel.ts',
       'file:src/auth/jwt.ts',
