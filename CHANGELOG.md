@@ -155,6 +155,12 @@ changes; they are called out explicitly.
   Next.js `cookies()`, or from a same-file helper that reads the `Authorization` header or a cookie
   (`jwt.decode(getBearer(req))`). Only functions that read the `Authorization` header themselves were checked,
   so admin checks on a decoded cookie token were missed.
+- Find more hard-coded secrets without new false positives on look-alikes: database URLs with a driver scheme
+  (`postgresql+asyncpg://`), Mailgun `key-…` keys and hand-written secrets such as `app-jwt-secret-2024` (both
+  were dropped as identifiers), and unquoted upper-case environment settings in YAML (`- JWT_SECRET=…` and
+  `POSTGRES_PASSWORD: …` in docker-compose, Kubernetes Secret data). These values are now also redacted when a
+  compose file or manifest is shown to the AI review. Values that only point at a secret (`${VAR}`, YAML anchors
+  and tags, SOPS `ENC[…]`, ARNs and secret-manager paths, Helm `existingSecret`) are ignored.
 - Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
   and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
 

@@ -43,7 +43,10 @@ are scanned with severity capped at **Low**. SAST confidence becomes **low**; se
 
 25 rules. The same rules drive redaction of everything shown to models. Generic rules (`generic-secret`,
 `env-secret`) are scan-only and use entropy, placeholder and key-name filters. `generic-secret` also excludes prose
-values dominated by non-ASCII letters, which can have high entropy without being tokens. Known example values (AWS
+values dominated by non-ASCII letters, which can have high entropy without being tokens, and values that read as
+names (`dotted.or-kebab_identifiers`, `ENV_VAR_NAMES`) unless one part looks random (Mailgun `key-…`), the value
+starts with `whsec`, or it calls itself a secret and carries a number (`app-jwt-secret-2024`). Keys that point at a
+stored secret (Helm `existingSecret`) are ignored. Known example values (AWS
 docs keys, the jwt.io sample, the Azurite key) and template values are ignored. Every secret finding is CWE-798.
 
 When a specific secret rule or a CWE-798 SAST rule covers the same sensitive span as `generic-secret`, they produce
@@ -74,9 +77,9 @@ fingerprint is retained for matching across scans. Different credentials, even o
 | `pypi-token` | PyPI upload token | high | high |
 | `azure-storage-key` | Azure storage or service-bus key | critical | high |
 | `jwt` | JSON Web Token | medium | medium |
-| `database-url` | DB / broker URL with inline password (placeholder and default passwords dropped or downgraded) | high | high |
+| `database-url` | DB / broker URL with inline password, including driver schemes such as `postgresql+asyncpg://` (placeholder and default passwords dropped or downgraded) | high | high |
 | `generic-secret` | Hard-coded password / token / API key assignment | medium | low |
-| `env-secret` | Secret value in an `.env`-style file | medium | medium |
+| `env-secret` | Secret value in an `.env`-style file, or an unquoted upper-case environment setting in YAML (compose `environment:`, CI `env:`, Kubernetes Secret data) | medium | medium |
 
 ## Pattern rules (SAST, `src/host/analysis/sast/`)
 
