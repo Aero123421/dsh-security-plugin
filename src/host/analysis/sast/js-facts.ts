@@ -221,11 +221,55 @@ class JsCtx {
   readonly src: string
   readonly tokens: readonly Token[]
   readonly match: Int32Array
+  /** Innermost unmatched-or-enclosing open bracket per token (-1 at top level), built on first use. */
+  #enclosing: Int32Array | undefined
 
   constructor(src: string, tokens: readonly Token[], match: Int32Array) {
     this.src = src
     this.tokens = tokens
     this.match = match
+  }
+
+  /** Index of the innermost bracket (`(`, `[`, `{`, template `${`) enclosing token `i`, or -1. */
+  enclosingOpen(i: number): number {
+    if (!this.#enclosing) {
+      const out = new Int32Array(this.tokens.length).fill(-1)
+      const stack: number[] = []
+      for (let k = 0; k < this.tokens.length; k++) {
+        while (stack.length > 0) {
+          const end = this.match[stack[stack.length - 1]!]!
+          if (end >= 0 && end < k) stack.pop()
+          else break
+        }
+        out[k] = stack[stack.length - 1] ?? -1
+        const t = this.tokens[k]!
+        if (t.type === 'punct' && (t.sub === 'open' || t.value === '(' || t.value === '[' || t.value === '{')) {
+          if (this.match[k]! > k) stack.push(k)
+        }
+      }
+      this.#enclosing = out
+    }
+    return this.#enclosing[i] ?? -1
+  }
+
+  /**
+   * Whether the `=` at `i` gives a default inside a destructuring pattern: `const { a = 1 } = x`,
+   * `({ b = 2 } = y)`, `for (const [c = 3] of z)`, nested `{ d: { e = 4 } }`. Such defaults are not
+   * assignments: the AST mode never records them either.
+   */
+  inPattern(i: number): boolean {
+    let open = this.enclosingOpen(i)
+    for (let guard = 0; guard < 16 && open >= 0; guard++) {
+      if (!this.is(open, '{') && !this.is(open, '[')) return false
+      const prev = this.at(open - 1)
+      if (prev.type === 'ident' && (prev.value === 'const' || prev.value === 'let' || prev.value === 'var')) return true
+      const close = this.match[open]!
+      if (close > open && this.is(close + 1, '=')) return true
+      // Keep walking out only through pattern nesting (`{ a: { b = 1 } }`, `[{ c = 1 }]`, `{ ...{ d = 1 } }`).
+      if (!['{', '[', ',', ':', '...'].some(v => this.is(open - 1, v))) return false
+      open = this.enclosingOpen(open)
+    }
+    return false
   }
 
   at(i: number): Token {
@@ -847,6 +891,8 @@ function splitArgs(ctx: JsCtx, from: number, to: number, lang: 'js' | 'py'): Arg
 /** Assignment operator at `i` (`=`, `+=`, ...): plain or member target. */
 function tokenAssign(ctx: JsCtx, i: number, raw: RawFacts): void {
   const op = ctx.at(i).value
+  // Default values inside destructuring patterns are not assignments.
+  if (op === '=' && ctx.inPattern(i)) return
   const lhsEnd = i - 1
   const lt = ctx.tokens[lhsEnd]
   if (!lt) return
@@ -873,7 +919,6 @@ function tokenAssign(ctx: JsCtx, i: number, raw: RawFacts): void {
     if (isDeclaratorName(ctx, lhsEnd)) return
     if (isJsxAttribute(ctx, lhsEnd)) return
     if (JS_KEYWORDS.has(lt.value) && lt.value !== 'of' && lt.value !== 'get' && lt.value !== 'set') return
-    // Default values inside parameter lists and destructuring patterns are not assignments we track.
     raw.assigns.push({
       targets: [{ name: lt.value }],
       op,
@@ -884,6 +929,28 @@ function tokenAssign(ctx: JsCtx, i: number, raw: RawFacts): void {
       fn: undefined,
     })
     return
+  }
+  // `({ a, b = 1 } = obj)`, `[x, y] = pair`: destructuring assignment (declarations go through tokenDeclaration).
+  if (lt.type === 'punct' && (lt.value === '}' || lt.value === ']') && op === '=') {
+    const open = ctx.match[lhsEnd]!
+    const before = ctx.at(open - 1)
+    const subscript =
+      lt.value === ']' &&
+      (before.type === 'ident' || (before.type === 'punct' && (before.value === ')' || before.value === ']')))
+    const annotation = before.type === 'punct' && (before.value === ':' || before.value === '=>')
+    if (open >= 0 && ctx.at(open).value === (lt.value === '}' ? '{' : '[') && !subscript && !annotation) {
+      if (isDeclaratorName(ctx, open)) return
+      raw.assigns.push({
+        targets: patternTargets(ctx, open, lhsEnd + 1),
+        op,
+        value,
+        destructured: true,
+        start: ctx.at(open).start,
+        end: value.end,
+        fn: undefined,
+      })
+      return
+    }
   }
   if (lt.type === 'punct' && lt.value === ']') {
     const open = ctx.match[lhsEnd]!

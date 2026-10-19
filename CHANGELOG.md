@@ -122,6 +122,10 @@ changes; they are called out explicitly.
 - Follow request data through helpers imported by name, such as `import { join } from 'node:path'` then
   `readFile(join(dir, req.params.name))`, `import * as p from 'path'`, and Python `from os.path import join`.
   Taint only passed through these helpers when they were called as `path.join(...)`.
+- Treat destructuring defaults the same without the native engine: the built-in tokenizer (used when ast-grep is
+  unavailable, for files over 512 KiB and for files with parse errors) recorded `name = 'x'` in
+  `const { name = 'x' } = req.query` as a constant assignment and missed the injection. It also now records
+  destructuring assignments such as `({ sort = 'id' } = req.query)`, as the AST mode does.
 
 ## [0.4.0] - 2026-10-18
 

@@ -58,6 +58,29 @@ export class UsersController {
 }
 `,
   },
+  {
+    rule: 'js.sql-injection',
+    name: 'destructuring defaults do not make request values constant',
+    code: `app.get('/d1', async (req, res) => { const { name: userName } = req.query; res.json(await db.query(\`SELECT \${userName}\`)) }) // VULN
+app.get('/d2', async (req, res) => { const { name = 'x' } = req.query; res.json(await db.query(\`SELECT \${name}\`)) }) // VULN
+app.get('/d3', async (req, res) => { const { name: userName = 'x' } = req.query; res.json(await db.query(\`SELECT \${userName}\`)) }) // VULN
+app.get('/d4', async (req, res) => { const { name, limit = 10 } = req.query; res.json(await db.query(\`SELECT \${limit}\`)) }) // VULN
+app.get('/d5', async (req, res) => {
+  let sort
+  ;({ sort = 'id' } = req.query)
+  res.json(await db.query(\`SELECT * FROM t ORDER BY \${sort}\`)) // VULN
+})
+app.get('/d6', async (req, res) => {
+  const { filters: { status = 'open' } = {} } = req.body
+  res.json(await db.query(\`SELECT * FROM t WHERE status = '\${status}'\`)) // VULN
+})
+app.get('/d7', async (req, res) => {
+  let { sort = 'id' } = req.query
+  sort = 'name'
+  res.json(await db.query(\`SELECT * FROM t ORDER BY \${sort}\`))
+})
+`,
+  },
 ]
 
 const PY_CASES: readonly Case[] = [
