@@ -177,8 +177,9 @@ as *coverage units* (parts of the project, each with up to 8 files). The number 
 | Coverage-critic passes (new units per pass) | none | 1 (up to 8) | up to 2 (up to 16 each) |
 
 Each unit becomes one hunt task, so `maxTasks` bounds units, endpoint and rule-hit tasks the Host adds, and
-sweeps together. Quick spends up to 10 requests on reconnaissance before it hunts. Deep and Research pay for
-the critic passes out of the hunt budget, not on top of it. After the units, the Host adds tasks for endpoints and reportable rule hits no unit covers. It then
+sweeps together. In Quick the Planner gets at most 10 replies before the scan hunts (plus one grace request when its
+last reply submits nothing, and retries of failed requests); each reply is one AI request. Deep and Research pay for
+the critic passes out of the hunt budget, not on top of it. After the units, the Host adds tasks for endpoints and reportable rule hits no unit covers. In every mode, Quick included, it then
 sweeps the in-scope source files no task targets, 4 per task, but only as far as `maxTasks` leaves room and the hunt
 budget can pay for (about 12 AI requests per task). A larger `maxLlmCalls` or `maxTasks` therefore buys more
 sweeping and fewer unexamined files. Tasks cut by `maxTasks` and source files that still belong to no task are

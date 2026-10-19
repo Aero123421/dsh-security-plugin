@@ -109,7 +109,7 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 | | Quick | Deep (default) | Research |
 | --- | --- | --- | --- |
 | Repository map and review plan (Planner) | yes, brief: up to 8 parts | yes: up to 40 parts | yes: up to 80 parts |
-| AI hunting | medium-or-higher rule hits first, then the planned parts and unplanned endpoints | the planned parts, endpoints and rule hits no part covers, then a sweep of source files nothing targets | same as Deep |
+| AI hunting | medium-or-higher rule hits first, then the planned parts and unplanned endpoints, then a sweep of source files nothing targets if task and budget room is left | the planned parts, endpoints and rule hits no part covers, then a sweep of source files nothing targets | same as Deep |
 | Coverage check (Critic) | no | 1 pass, up to 8 more parts | up to 2 passes, up to 16 more parts each |
 | Independent review (Skeptic) | no | findings at or above *Second opinion from* (default Medium) | findings at Low or above |
 | Attack chains | no | no | yes |
@@ -119,9 +119,11 @@ Each finding has two independent ratings. A critical issue can still be only "Po
 | Requests per reviewer | 36 | 72 | 120 |
 | Review tasks | 18 | 120 | 450 |
 
-Quick mode maps the repository briefly (at most 10 AI requests) and reviews a few parts, starting with
-medium-or-higher rule hits. It covers less than Deep: source files that fall in no part are counted as unassigned in
-the results, not read.
+Quick mode maps the repository briefly (the Planner gets at most 10 replies, plus one grace request if its last
+reply submits nothing, and retries of failed requests) and reviews a few parts, starting with medium-or-higher rule
+hits. It covers less than Deep: its small task and request budget usually leaves little room to sweep source files
+that fall in no part. A Quick scan sweeps them when room is left, as Deep does; files no task reaches are counted
+as unassigned in the results, not read.
 
 When an AI budget limit is reached, the scan stops starting new work, finishes, and lists what was skipped. Budgets
 are editable per mode in Settings and are capped by the operator limits (see

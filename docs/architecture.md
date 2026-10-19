@@ -91,7 +91,7 @@ flowchart LR
 | `inventory` | ✓ | ✓ | ✓ | Languages, manifests, frameworks, test files. |
 | `deterministic` | ✓ | ✓ | ✓ | Secret scan (its matches drive redaction), SAST rules, dependency parsing, optional OSV lookup, optional Gitleaks / OSV-Scanner / Semgrep. Reportable signals become findings immediately. |
 | `surface` | ✓ | ✓ | ✓ | HTTP endpoint extraction with handlers, middleware and auth hints. |
-| `threat-model` | ✓ | ✓ | ✓ | Reconnaissance: one Planner run maps the repository and submits the review plan: threat model, components, coverage units and exclusions. Quick allows it at most 10 replies. |
+| `threat-model` | ✓ | ✓ | ✓ | Reconnaissance: one Planner run maps the repository and submits the review plan: threat model, components, coverage units and exclusions. Quick allows the Planner at most 10 replies (plus one grace request if its last reply submits nothing, and retries of failed requests). |
 | `hunt` | ✓ | ✓ | ✓ | Hunter tasks from `planHuntTasks`: one per coverage unit, plus Host-planned tasks for what the plan leaves out. Deep runs one coverage-critic pass and Research up to two, each followed by a wave for the units it adds. |
 | `review` | – | ✓ | ✓ | One Skeptic task per `potential` finding from AI, SAST or external tools at or above the review threshold (Research: Low and above). At most `max(maxTasks, 10)` tasks. |
 | `chain` | – | – | ✓ | One Chain-analyst run over up to 40 non-refuted AI or SAST findings (needs at least 2). |
@@ -167,8 +167,10 @@ submits `submit_coverage_review`: up to 8 (Deep) or 16 (Research) new units for 
 validates them like reconnaissance units, against the task slots still free. Critic units take only steering
 sinks and unreviewed endpoints, because every reportable rule hit already has a task. A wave runs them, and a
 second Research pass follows only if the first one added units. The critic is skipped without a Planner route,
-when the hunt budget is exhausted, or when its route was already found broken. A pass that fails or adds nothing
-ends the passes.
+when the hunt budget is exhausted, or when its route was already found broken. A pass that fails or leaves no valid
+unit ends the passes. The `done` flag is recorded but does not decide: the Host looks only at the units, so a pass
+that submits valid units with `done: true` still gets its wave and, in Research, a second pass; `done` with no
+units, or no valid unit at all, ends the passes.
 
 **Workers** (`agents/runtime/worker.ts`) are short-lived tool-calling loops:
 
@@ -214,8 +216,8 @@ reply, and it gives the severity rubric and the output language. Each role has i
 
 | Role | Terminal tool | Turn cap | Output checks |
 | --- | --- | --- | --- |
-| Planner | `submit_review_plan` | `min(maxTurnsPerWorker, 48)`; Quick 10 | Units beyond the mode's limit, duplicates and units with no in-scope file are dropped. A unit none of whose target paths resolves is sent back once with path suggestions. Exclusions need a valid reason and an existing path. |
-| Critic | `submit_coverage_review` | `min(maxTurnsPerWorker, 24)` | Same unit checks as the Planner, against the task slots still free. `done` or no valid unit ends the passes. |
+| Planner | `submit_review_plan` | `min(maxTurnsPerWorker, 48)` replies; Quick 10 | Units beyond the mode's limit, duplicates and units with no in-scope file are dropped. A unit none of whose target paths resolves is sent back once with path suggestions. Exclusions need a valid reason and an existing path. |
+| Critic | `submit_coverage_review` | `min(maxTurnsPerWorker, 24)` | Same unit checks as the Planner, against the task slots still free. No valid unit ends the passes (`done` with units does not: the Host looks only at the units). |
 | Hunter | `submit_findings` | `maxTurnsPerWorker` | Findings with at least one verified code step are saved across resubmissions. The rest, verdicts whose evidence does not verify, and (once) missing verdicts for listed rule hits are sent back (up to 3 times) with the exact mismatches and the file's actual lines; after that the submission is accepted and the host drops findings without verified code. An empty submission before any tool call is sent back once. An optional `coverage` verdict (`complete`, `partial`, `needs-runtime`) with a note says how completely the hunter examined its unit; an unknown spelling is dropped, never sent back. |
 | Skeptic | `submit_verdict` | `min(maxTurnsPerWorker, 48)` | `refuted` without a verified counter-evidence quote of code (comment-only quotes do not count) is sent back (up to 2 times), then downgraded to `inconclusive`. `confirmed` without any verified step becomes `inconclusive`. |
 | Chain analyst | `submit_chains` | `min(maxTurnsPerWorker, 48)` | A chain needs at least 2 known findings and at least 1 verified step (1 resubmission). |
@@ -240,8 +242,10 @@ again:
 - HTML entities and backslash-escaped quotes; one trailing `;` or `,` the code does not have;
 - then the same on folded text, where every quote character (`'`, `"`, backtick, typographic and full-width quotes)
   compares equal and full-width or compatibility characters compare as their plain forms;
-- finally `...` or `…` as a gap: every fragment of at least 12 normalized characters must occur, in order, within
-  the cited window, spanning at most the quote's lines + 20.
+- finally `...` or `…` as a gap: every fragment with a letter or digit must occur, in order, within the cited
+  window, spanning at most the quote's lines + 20, and at least one fragment must have 12 normalized characters to
+  anchor the quote. Short fragments are checked too, so an invented `exec(cmd)` beside a real line is rejected;
+  only punctuation-only fragments (`})`) are skipped.
 
 The host never stores the model's text for a tolerant match: the stored quote and snippet are the file's own
 contiguous span, and the stored location is the lines that span occupies.

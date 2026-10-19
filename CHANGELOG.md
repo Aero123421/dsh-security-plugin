@@ -49,7 +49,8 @@ changes; they are called out explicitly.
 - Coverage critic: after the first hunt wave, Deep runs one pass and Research up to two in which the Planner's model
   reads the ledger, the source files no reviewer opened and the endpoints no task reviewed, and adds up to 8 (Deep)
   or 16 (Research) parts for real gaps. The passes are paid out of the hunt budget: waves stop at a ceiling that
-  keeps up to 20% of the hunt requests for them, and a fifth of the task limit stays free for their parts.
+  keeps up to 20% of the hunt requests for them, and a fifth of the task limit stays free for their parts. A pass
+  that fails or adds no valid part ends the passes; the critic's `done` flag does not, if it also submits parts.
 
 ### Changed
 
@@ -68,8 +69,8 @@ changes; they are called out explicitly.
 - Tasks skipped because their target file no longer exists no longer count as unfinished AI review work.
 - Deep and Research scans keep part of the budget for the independent review. Hunting stops at a ceiling that
   reserves about 6 AI requests per finding awaiting review (at most 30% in Deep, 35% in Research), the Research
-  attack-chain run, and one wrap-up request per running reviewer. Lower-priority hunt tasks that do not fit are
-  skipped with the notice `hunt-budget-reserved` and run after **Add budget**; low-priority file
+  attack-chain run, and 2 wrap-up requests per worker running in parallel (at most 5%). Lower-priority hunt tasks
+  that do not fit are skipped with the notice `hunt-budget-reserved` and run after **Add budget**; low-priority file
   sweeps are planned only as far as the budget pays for them. Before, hunters could spend the whole budget and
   leave most findings without a review (8 of 56 reviewed in a Deep probe; 46 of 56 now).
 - A reviewer stopped by the budget mid-task now gets one wrap-up request to submit what it found, instead of
@@ -81,8 +82,9 @@ changes; they are called out explicitly.
   not three over the whole run.
 - Quote verification undoes harmless copy mistakes before matching: line-number prefixes of other formats
   (`12: `, `12 | `, `12→`, `L12: `, `cat -n`, `path:12: `), code fences, escaped or typographic quotes, HTML
-  entities, full-width punctuation, a trailing `;`, and `...`/`…` for skipped lines (every fragment of 12 or more
-  characters must occur in order in the cited window). The stored quote and snippet are always the file's own span.
+  entities, full-width punctuation, a trailing `;`, and `...`/`…` for skipped lines (every fragment with a letter or
+  digit must occur in order in the cited window, however short, and one fragment must have 12 or more characters;
+  fragments of punctuation alone are skipped). The stored quote and snippet are always the file's own span.
   Rejected citations now come back with where the quote stops matching and the file's actual lines. In a probe of
   313 realistic citation variants, 275 verify instead of 149.
 - A cited range much wider than its quote is no longer rejected outright: it verifies when the quote occurs once in
@@ -93,11 +95,6 @@ changes; they are called out explicitly.
   `reviewed_paths` and `notes` fields were removed from `submit_findings`; models that still send them are accepted.
   Submit tools accept common argument mistakes (`null`, JSON-encoded strings, numeric strings, enum spelling, camelCase
   keys) instead of rejecting the whole submission.
-- The Planner's hypotheses beyond the mode's limit are dropped instead of sending the whole threat model back. Its
-  target paths are resolved against the snapshot (directories, near matches, symbol names), a hypothesis with no
-  existing file is asked about once with suggestions and otherwise still runs as a search, and hypothesis tasks are
-  no longer skipped as stale. Hunters now receive the threat model's actors and trust boundaries, Planner priorities
-  rank tasks up, and rule hits in a hypothesis's files are attached to it.
 - `search_code` runs a pattern that looks like a regular expression as one when a literal search finds nothing,
   within the same per-call limits, and says so.
 - Workers ask for temperature 0.2 when the model's details show it is not a reasoning model; a provider that
@@ -106,28 +103,29 @@ changes; they are called out explicitly.
   dismissal of a rule hit now makes it `inconclusive`, as it already did without a reviewer.
 - Endpoint review tasks of layered apps target the handler file and the route file instead of only the
   `*.routes.ts` file. Task keys of such endpoint groups change from the route file to the handler file.
-- Tell every endpoint, sensitive-file and sweep review to look for injection, OS command execution, SSRF, path
-  traversal and XSS. Sweeps and sensitive-file reviews were asked only about authentication, authorization,
-  business logic, crypto and configuration, and endpoint reviews added other categories only from rule hits in
-  the handler file; rule hits in the route file now count too.
+- Tell every endpoint and sweep review to look for injection, OS command execution, SSRF, path traversal and XSS.
+  Sweeps were asked only about authentication, authorization, business logic, crypto and configuration, and
+  endpoint reviews added other categories only from rule hits in the handler file; rule hits in the route file
+  now count too.
 - Quick scans also verify medium sinks of high and critical rules (dynamic SQL, shell commands, code evaluation,
   unsafe deserialization), which in layered code are often the only trace of an injection; before, Quick
   triaged only vulnerability hits.
-- Choose the up to six sensitive files that Deep and Research review on their own by what their names say they
-  enforce (`requireRole.ts`, `tenantScope.ts`, `tokens.ts`, `crypto.ts`, `upload.ts`, configuration
-  directories) before size, so large CRUD repositories and utility middleware no longer take those slots.
-  Camel-case names (`requireAuth`) now count.
 - AI-led planning replaces rule-driven task planning. The `threat-model` phase, now shown as *Review plan*, is
   reconnaissance in every AI mode: the Planner maps the repository in any language (directory overview, manifests,
   endpoints with auth hints, rule hits per file, read-only workspace tools) and submits `submit_review_plan` with
   the threat model, components, coverage units (up to 8 in Quick, 40 in Deep, 80 in Research, never above the task
-  limit, at most 8 files each) and exclusions (vendored, generated, documentation or fixtures only). Each unit
-  becomes a hunt task. The Host still plans what the units leave out: endpoint tasks, a verdict task for every
-  reportable rule hit, and a sweep of source files no task targets, within the task limit and what the hunt
-  budget can pay for. Planner hypotheses, the security-sensitive-file tasks and the planner priority boost are gone.
-  Quick now spends up to 10 requests on reconnaissance, and a Quick scan with no rule hits can run AI tasks.
-  The plan is stored with the scan and never planned again on resume. Source files that no task covers are reported
-  as unassigned instead of being left unmentioned.
+  limit, at most 8 files each) and exclusions (vendored, generated, documentation or fixtures only). Units
+  beyond the mode's limit are dropped instead of sending the whole plan back. Target paths are resolved against
+  the snapshot (directories, near matches, symbol names); a unit none of whose paths exists is sent back once with
+  suggestions and otherwise dropped. Each unit becomes a hunt task that carries the unit's rationale and optional
+  hypothesis (unverified), the threat model's actors and trust boundaries, and the rule hits in the unit's files;
+  the unit's priority ranks it in Deep and Research. The Host still plans what the units leave out: endpoint
+  tasks, a verdict task for every reportable rule hit, and a sweep of source files no task targets (all modes,
+  within the task limit and what the hunt budget can pay for; production files and files whose names say what
+  they enforce, such as `requireRole.ts`, `tenantScope.ts` or `upload.ts`, come first). The Planner gets up to 10
+  replies in Quick (plus a grace request if its last reply submits nothing, and retries of failed requests), and
+  a Quick scan with no rule hits can run AI tasks. The plan is stored with the scan and never planned again on
+  resume. Source files that no task covers are reported as unassigned instead of being left unmentioned.
 - Downgrade caveat: scans from this version store `hunt-unit` and `critic` tasks and the review plan in the threat
   model record. An older plugin version that opens a database with such scans treats those task rows as corrupt, so
   do not downgrade over a database that holds them. Scans from older versions (hypothesis and file tasks) still
@@ -140,8 +138,6 @@ changes; they are called out explicitly.
 - The folder browser's breadcrumb has its own accessible name instead of repeating "Folder path".
 - In Deep and Research, rule hits beyond the 12 attached to an endpoint file's first task were never assigned to a
   hunter. They now get their own tasks.
-- Planner hypotheses whose paths were slightly off (a missing directory, a directory, a symbol name) were skipped as
-  stale; in a probe 7 of 8 were lost.
 - Tool calls of a reply cut off at the output limit were parsed from partial arguments and replayed. They are now
   dropped, and the model is told which calls to resend.
 - Context compaction kept only the last two tool results, including in the middle of the latest reply's batch. It
@@ -177,7 +173,8 @@ changes; they are called out explicitly.
   taints its result, a branch restricted by an allow-list (`LIST.includes(x) ? x : 'en'`) is clean, numbers and
   booleans derived from input (`items.length`, comparisons, `.map(Number)`, Python comprehensions over `int()`)
   are not text, and an anchored allow-list pattern with an early exit before `exec`/`subprocess` or a file call
-  turns the hit into a review hint. Some of these were reported as critical command injection. A preference
+  turns the hit into a review hint (not in Python with `re.M`/`re.MULTILINE` or an unreadable flags argument,
+  where `$` also matches before a newline: `"main\n;id"` passes). Some of these were reported as critical command injection. A preference
   cookie such as `theme` set with `httpOnly: false` is no longer reported.
 - Report JavaScript mass assignment only on receivers that write records (model classes, Prisma delegates, model
   and repository instances, Knex builders, records loaded through them). `teamService.create(req.body)` and
