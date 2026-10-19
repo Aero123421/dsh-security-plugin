@@ -376,12 +376,25 @@ function pyCompiledPatterns(model: FileModel): Map<string, string> {
   for (const v of model.assigns) {
     if (v.fn || v.op !== '=' || v.targets.length !== 1) continue
     const text = model.source.slice(v.value.start, v.value.end).trim()
-    const m = /^re\.compile\(\s*([rRbBuU]{0,2}(['"])[\s\S]*\2)\s*(?:,[^)]*)?\)$/.exec(text)
-    if (!m) continue
+    const m = /^re\.compile\(\s*([rRbBuU]{0,2}(['"])[\s\S]*\2)\s*(?:,([^)]*))?\)$/.exec(text)
+    if (!m || !pyFlagsKeepAnchors(m[3])) continue
     const pattern = pyStringValue(m[1]!)
     if (pattern !== undefined) out.set(v.targets[0]!.name, pattern)
   }
   return out
+}
+
+/**
+ * Whether the `flags` argument of a `re` call leaves `^`/`$` anchoring the whole string. With `re.M` `$` also
+ * matches before a newline, so `"main\n;id"` passes. Only `I`/`A`/`S`/`U` combined with `|` are known to be safe; a
+ * missing argument is safe, a flags value that is not such a literal (a variable, `re.M`, `re.X`) is not.
+ */
+function pyFlagsKeepAnchors(flags: string | undefined): boolean {
+  const text = flags?.trim().replace(/^flags\s*=\s*/, '')
+  if (!text) return true
+  return text
+    .split('|')
+    .every(part => /^(?:re\.)?(?:I|IGNORECASE|A|ASCII|S|DOTALL|U|UNICODE)$/.test(part.trim().replace(/^\(|\)$/g, '')))
 }
 
 /** Content of one Python string literal (raw strings as written, others with `\\` collapsed). */
@@ -436,6 +449,7 @@ function pyTest(
   let arg: [number, number] | undefined
   if (m[1] === undefined) {
     if (args.length < 2) return undefined
+    if (args.length > 2 && !pyFlagsKeepAnchors(subjectText(model, args[2]![0], args[2]![1]))) return undefined
     const lit = args[0]!
     if (lit[1] - lit[0] !== 1 || tokens[lit[0]]!.type !== 'str' || tokens[lit[0]]!.interp) return undefined
     pattern = pyStringValue(tokens[lit[0]]!.value) ?? stringContent(tokens[lit[0]]!)
@@ -444,7 +458,7 @@ function pyTest(
     pattern = compiled.get(m[1])
     arg = args[0]
   }
-  if (pattern === undefined || !arg) return undefined
+  if (pattern === undefined || !arg || /\(\?[a-zA-Z]*m/.test(pattern)) return undefined
   const charset = pyPatternCharset(pattern, m[2]!)
   return charset ? { negated, subject: subjectText(model, arg[0], arg[1]), charset } : undefined
 }
