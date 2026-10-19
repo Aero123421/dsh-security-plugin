@@ -15,9 +15,11 @@
  * its lines), with HTML entities and backslash-escaped quotes undone, without
  * one added trailing `;` or `,`, and with compatibility forms (full-width
  * punctuation, typographic quotes, `'` for `"`) folded on both sides. A quote
- * that elides code with `...` or `…` is accepted when every fragment of at
- * least {@link MIN_GAP_FRAGMENT_CHARS} characters occurs, in order, within the
- * cited window. In every case the host stores its own contiguous text, never
+ * that elides code with `...` or `…` is accepted when every fragment holding a
+ * letter or digit occurs, in order, within the cited window, and at least one
+ * fragment has {@link MIN_GAP_FRAGMENT_CHARS} characters to anchor it; short
+ * fragments such as `exec(cmd)` are checked too, only punctuation-only ones
+ * (`})`) are skipped. In every case the host stores its own contiguous text, never
  * the model's: the stored quote and snippet are the file's lines.
  */
 
@@ -106,7 +108,10 @@ export const SNIPPET_MAX_LINES = 12
 export const SNIPPET_MAX_CHARS = 1500
 /** Default for {@link VerifyQuoteOptions.maxExtraLines}: a citation may span at most the quote's lines + 40. */
 export const MAX_EXTRA_CITED_LINES = 40
-/** Shortest normalized fragment of a `...`-elided quote that has to be found; shorter ones are ignored. */
+/**
+ * A `...`-elided quote needs at least one fragment this long (normalized) to anchor it. Every other fragment
+ * with a letter or digit is checked as well, however short; only punctuation-only fragments are skipped.
+ */
 export const MIN_GAP_FRAGMENT_CHARS = 12
 /** Lines a `...` gap may skip beyond the quote's own lines. */
 export const MAX_GAP_LINES = 20
@@ -130,6 +135,8 @@ const FENCE_OPEN = /^\s*(?:```|~~~)[\w+#.-]*\s*$/
 const FENCE_CLOSE = /^\s*(?:```|~~~)\s*$/
 /** `...` or `…` used to skip code, alone or behind a comment marker. */
 const GAP = /(?:\/\/|#|\/\*|<!--)?[ \t]*(?:\.{3,}|…+)[ \t]*(?:\*\/|-->)?/g
+/** A gap fragment with a letter or digit is code that must be found; punctuation alone (`})`) is skipped. */
+const HAS_WORD_CHAR = /[\p{L}\p{N}]/u
 const ENTITY = /&(?:lt|gt|amp|quot|apos|#39|#x27);/g
 const ENTITIES: Record<string, string> = {
   '&lt;': '<',
@@ -423,10 +430,12 @@ function verifyPrepared(
 }
 
 /**
- * Verify a quote that elides code with `...`/`…`: its fragments of at least
- * {@link MIN_GAP_FRAGMENT_CHARS} normalized characters must occur in order
- * within the cited window, spanning at most the quote's own lines +
- * {@link MAX_GAP_LINES}. `undefined` when the quote has no gap marker.
+ * Verify a quote that elides code with `...`/`…`: every fragment holding a
+ * letter or digit must occur in order within the cited window, spanning at
+ * most the quote's own lines + {@link MAX_GAP_LINES}, and one fragment has to
+ * reach {@link MIN_GAP_FRAGMENT_CHARS} normalized characters. Short fragments
+ * are never ignored: a model could otherwise invent `exec(cmd)` next to a real
+ * anchor. `undefined` when the quote has no gap marker.
  */
 function verifyGap(
   prepared: PreparedFile,
@@ -442,8 +451,8 @@ function verifyGap(
   const parts = quote
     .split(GAP)
     .map(foldForMatch)
-    .filter(part => part.length >= MIN_GAP_FRAGMENT_CHARS)
-  if (parts.length === 0) {
+    .filter(part => HAS_WORD_CHAR.test(part))
+  if (!parts.some(part => part.length >= MIN_GAP_FRAGMENT_CHARS)) {
     return miss(
       'too-short',
       `quote too short: every part between "..." has fewer than ${MIN_GAP_FRAGMENT_CHARS} characters`,

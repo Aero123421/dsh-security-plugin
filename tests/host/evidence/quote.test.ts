@@ -192,12 +192,29 @@ describe('verifyQuote: harmless copy mistakes', () => {
     expect(result.quote).toBe(lines.slice(5, 10).join('\n').trim())
     expect(at(6, 10, elided.replace('...', '…')).check).toBe('match')
     expect(at(6, 10, elided.replace('  ...', '  // ...')).check).toBe('match')
-    // Inline gaps, and fragments shorter than 12 characters ("})") are not required.
+    // Inline gaps, and punctuation-only fragments ("})") are not required.
     expect(at(8, 8, "'SELECT * FROM users WHERE id = ' ... req.params.id")).toMatchObject({
       check: 'match',
       location: { startLine: 8, endLine: 8 },
     })
     expect(at(6, 11, `${lines[5]}\n...\n})`)).toMatchObject({ check: 'match', location: { startLine: 6, endLine: 6 } })
+  })
+
+  it('checks short gap fragments too, and only skips punctuation-only ones', () => {
+    // A legitimate short fragment ("res.json" is 8 characters) next to a long anchor still matches.
+    expect(at(6, 10, "app.get('/users/:id', async (req, res) => {\n...\nres.json(user)\n...\n})").check).toBe('match')
+    expect(at(6, 10, "app.get('/users/:id', async (req, res) => {\n...\nres.json\n...\n(user)").check).toBe('match')
+    // A fabricated short fragment between real ones used to be dropped silently.
+    for (const quote of [
+      '... exec(cmd) ... res.json(user)',
+      "app.get('/users/:id', async (req, res) => {\n...\nexec(cmd)\n...\nres.json(user)",
+      "app.get('/users/:id', async (req, res) => {\n...\nres.json(user)\n... eval(x)",
+    ]) {
+      expect(at(6, 10, quote).check).toBe('mismatch')
+    }
+    // Short fragments alone cannot anchor a quote.
+    expect(at(6, 10, 'res ... json').check).toBe('mismatch')
+    expect(at(6, 10, 'res.json ... (user)').check).toBe('mismatch')
   })
 
   it('rejects gaps whose fragments are invented, out of order, outside the cited window, or too far apart', () => {
