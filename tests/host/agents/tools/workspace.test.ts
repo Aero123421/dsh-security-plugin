@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { type ToolResult, toolSchema, type WorkerTool } from '../../../../src/host/agents/runtime/tool.ts'
 import {
   createWorkspaceTools,
+  looksLikeRegex,
   WORKSPACE_TOOL_NAMES,
   type WorkspaceToolOptions,
   type WorkspaceView,
@@ -504,6 +505,54 @@ describe('search_code', () => {
     // Case-sensitive regex.
     const sensitive = await h.call('search_code', { pattern: '^IMPORT', regex: true, case_sensitive: true })
     expect(sensitive.text).toMatch(/^No matches/)
+  })
+
+  it('runs a regex-looking pattern as a regular expression when regex is unset and nothing matches literally', async () => {
+    const h = await harness()
+    const { text } = await h.call('search_code', { pattern: 'usersRouter\\.(get|post)\\(' })
+    expect(text.split('\n')).toEqual([
+      'No literal matches for "usersRouter\\\\.(get|post)\\\\("; it looks like a regular expression, so it was run as one (set regex=false to search literally only).',
+      '1 match for regex "usersRouter\\\\.(get|post)\\\\(":',
+      "src/routes/users.ts:6: usersRouter.get('/:id', async (req, res) => {",
+      '(2 withheld files not searched.)',
+      '(2 test/fixture/example files not searched; set path_glob to a test location to include them.)',
+    ])
+    expect((await h.call('search_code', { pattern: 'req.params.id|DATABASE_URL' })).text).toContain(
+      '2 matches for regex "req.params.id|DATABASE_URL":',
+    )
+    // regex=false keeps the literal meaning, and a literal hit is never second-guessed.
+    expect((await h.call('search_code', { pattern: 'req.params.id|req.query', regex: false })).text).toMatch(
+      /^No matches for text/,
+    )
+    expect((await h.call('search_code', { pattern: 'req.params.id' })).text).toMatch(/^1 match for text/)
+  })
+
+  it.each([
+    ['a|b', true],
+    ['router\\.get', true],
+    ['\\bauth\\b', true],
+    ['select.*from', true],
+    ['^import', true],
+    ['req.body$', true],
+    ['[A-Z]+Error', true],
+    ['(?:get|post)', true],
+    ['db.query(', false],
+    ['req.params.id', false],
+    ['$scope.user', false],
+    ['a || b', true],
+  ])('recognizes regex syntax in %j: %s', (pattern, expected) => {
+    expect(looksLikeRegex(pattern)).toBe(expected)
+  })
+
+  it('says how to fix a regex-looking pattern that is not a valid regular expression, and skips match-all ones', async () => {
+    const h = await harness()
+    const { text, isError } = await h.call('search_code', { pattern: 'query\\(|(unclosed' })
+    expect(isError).toBeUndefined()
+    expect(text.split('\n')[0]).toMatch(
+      /^The pattern looks like a regular expression but is not a valid one \(Invalid regular expression: .+\)\. Set regex=true with a valid pattern, or search for a literal fragment\.$/,
+    )
+    // An empty alternative would match every line: the literal answer stands.
+    expect((await h.call('search_code', { pattern: 'a || b' })).text).toMatch(/^No matches for text "a \|\| b"/)
   })
 
   it('caps results and says more exist', async () => {

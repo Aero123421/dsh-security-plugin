@@ -21,7 +21,7 @@ import { clipText, countLines, maskRoot, numberLines, stripCr } from '../../evid
 import { defineTool, type ToolResult, type WorkerTool } from '../runtime/tool.ts'
 import { compileGlob, type GlobMatcher, normalizeGlob } from './glob.ts'
 import { isUnder, normalizeDir, suggestPaths } from './paths.ts'
-import { compileLineMatcher, DEFAULT_REGEX_TIME_BUDGET_MS, MAX_PATTERN_LENGTH } from './search.ts'
+import { compileLineMatcher, DEFAULT_REGEX_TIME_BUDGET_MS, type LineMatcher, MAX_PATTERN_LENGTH } from './search.ts'
 
 /** What the workspace tools can see. */
 export interface WorkspaceView {
@@ -439,6 +439,28 @@ function readFileTool(ws: Workspace) {
 // search_code
 // ---------------------------------------------------------------------------
 
+/**
+ * Syntax that only means something in a regular expression: alternation, escapes such as `\.` `\(` `\s` `\b`,
+ * `.*`/`.+`, anchors, character classes, and `(?:` groups.
+ */
+const REGEX_SYNTAX = /(?<!\\)\||\\[.()[\]{}|*+?^$/sSdDwWbB]|\.[*+?]|^\^|(?<!\\)\$$|\[[^\]\s]+\]|\(\?[:=!<]/
+
+/** Whether a pattern written as a literal looks like a regular expression. */
+export function looksLikeRegex(pattern: string): boolean {
+  return REGEX_SYNTAX.test(pattern)
+}
+
+interface SearchOutcome {
+  readonly results: readonly string[]
+  readonly more: boolean
+  readonly withheld: number
+  readonly hiddenTests: number
+  readonly scannedFiles: number
+  readonly scannedBytes: number
+  readonly byteCapHit: boolean
+  readonly timedOut: boolean
+}
+
 function searchCodeTool(ws: Workspace) {
   return defineTool({
     name: 'search_code',
@@ -452,7 +474,12 @@ function searchCodeTool(ws: Workspace) {
         .string()
         .min(1)
         .describe(`Text or regular expression to find (at most ${MAX_PATTERN_LENGTH} characters, single line).`),
-      regex: z.boolean().optional().describe('Treat pattern as a regular expression. Default false (literal).'),
+      regex: z
+        .boolean()
+        .optional()
+        .describe(
+          'Treat pattern as a regular expression. When unset, a literal search that finds nothing is run again as a regular expression if the pattern looks like one (|, \\., .*, \\s, \\b, ^, $, [...]); set false to search literally only.',
+        ),
       case_sensitive: z.boolean().optional().describe('Match case exactly. Default false.'),
       path_glob: z
         .string()
@@ -466,13 +493,13 @@ function searchCodeTool(ws: Workspace) {
         .describe(`Maximum matching lines to return (default and maximum ${ws.maxSearchResults}).`),
     }),
     execute: async (args, ctx) => {
+      const caseSensitive = args.case_sensitive === true
       const compiled = compileLineMatcher(args.pattern, {
         regex: args.regex === true,
-        caseSensitive: args.case_sensitive === true,
+        caseSensitive,
         timeBudgetMs: ws.regexTimeBudgetMs,
       })
       if (!compiled.ok) return ws.error(compiled.error)
-      const { matcher } = compiled
       let glob: GlobMatcher | undefined
       if (args.path_glob !== undefined && args.path_glob.trim() !== '') {
         const g = compileGlobSafe(args.path_glob)
@@ -481,77 +508,43 @@ function searchCodeTool(ws: Workspace) {
       }
       const showTests = ws.includeTests || targetsTests(args.path_glob)
       const limit = Math.min(args.max_results ?? ws.maxSearchResults, ws.maxSearchResults)
+      const search = (matcher: LineMatcher, maxBytes: number) =>
+        searchFiles(ws, matcher, glob, showTests, limit, maxBytes, ctx.signal)
 
-      const results: string[] = []
-      let more = false
-      let withheld = 0
-      let hiddenTests = 0
-      let scannedFiles = 0
-      let scannedBytes = 0
-      let byteCapHit = false
-      let timedOut = false
-      let batch: { path: string; text: string }[] = []
-      let batchChars = 0
-
-      const flush = async (): Promise<void> => {
-        if (batch.length === 0) return
-        const current = batch
-        batch = []
-        batchChars = 0
-        const outcome = matcher.scan(
-          current.map(entry => entry.text),
-          limit + 1 - results.length,
-        )
-        if (outcome.timedOut) timedOut = true
-        const split = new Map<number, string[]>()
-        for (const hit of outcome.hits) {
-          if (results.length >= limit) {
-            more = true
-            break
-          }
-          const entry = current[hit.text]
-          if (!entry) continue
-          let lines = split.get(hit.text)
-          if (!lines) {
-            lines = entry.text.split('\n')
-            split.set(hit.text, lines)
-          }
-          const line = stripCr(lines[hit.line] ?? '')
-          results.push(`${entry.path}:${hit.line + 1}: ${clipAround(line, hit.column, MAX_SEARCH_LINE_CHARS)}`)
+      let matcher = compiled.matcher
+      let outcome = await search(matcher, ws.maxSearchScanBytes)
+      const notes: string[] = []
+      // Models often write regular expressions without regex=true; a literal search for them finds nothing.
+      // The retry shares the call's byte cap (and has the call's only regex time budget).
+      if (
+        outcome.results.length === 0 &&
+        !outcome.byteCapHit &&
+        args.regex === undefined &&
+        looksLikeRegex(args.pattern)
+      ) {
+        const retry = compileLineMatcher(args.pattern, {
+          regex: true,
+          caseSensitive,
+          timeBudgetMs: ws.regexTimeBudgetMs,
+        })
+        if (!retry.ok) {
+          notes.push(
+            `The pattern looks like a regular expression but is not a valid one (${retry.error.replace(/\. Fix the pattern.*$/, '')}). Set regex=true with a valid pattern, or search for a literal fragment.`,
+          )
+        } else if (!matchesEmptyLine(args.pattern, caseSensitive)) {
+          notes.push(
+            `No literal matches for ${JSON.stringify(args.pattern)}; it looks like a regular expression, so it was run as one (set regex=false to search literally only).`,
+          )
+          matcher = retry.matcher
+          const literalBytes = outcome.scannedBytes
+          const retried = await search(matcher, ws.maxSearchScanBytes - literalBytes)
+          outcome = { ...retried, scannedBytes: retried.scannedBytes + literalBytes }
         }
-        await yieldToEventLoop()
-        ctx.signal.throwIfAborted()
       }
 
-      for (const path of ws.sortedPaths()) {
-        if (more || timedOut || results.length > limit) break
-        ctx.signal.throwIfAborted()
-        if (glob && !glob(path)) continue
-        const file = ws.snapshot.files.get(path)
-        if (!file) continue
-        if (ws.isWithheld(path)) {
-          withheld++
-          continue
-        }
-        if (file.isTest && !showTests) {
-          hiddenTests++
-          continue
-        }
-        if (scannedBytes + file.size > ws.maxSearchScanBytes) {
-          byteCapHit = true
-          break
-        }
-        scannedBytes += file.size
-        scannedFiles++
-        const text = ws.redacted(file)
-        batch.push({ path, text })
-        batchChars += text.length
-        if (batchChars >= SEARCH_BATCH_CHARS || batch.length >= SEARCH_BATCH_FILES) await flush()
-      }
-      if (!more && !timedOut) await flush()
-
+      const { results, more, scannedFiles } = outcome
       const what = `${matcher.kind === 'regex' ? 'regex' : 'text'} ${JSON.stringify(args.pattern)}`
-      const out: string[] = []
+      const out: string[] = [...notes]
       if (results.length === 0) {
         out.push(`No matches for ${what} in ${scannedFiles} file${scannedFiles === 1 ? '' : 's'}.`)
       } else {
@@ -561,19 +554,20 @@ function searchCodeTool(ws: Workspace) {
       if (more) {
         out.push(`[More matches exist beyond ${limit}; narrow with path_glob or a more specific pattern.]`)
       }
-      if (timedOut) {
+      if (outcome.timedOut) {
         out.push(
           '[Search stopped early: the regular expression took too long (it may backtrack heavily). ' +
             `${results.length > 0 ? 'Only the matches found before it stopped are listed; ' : ''}` +
             'results are incomplete. Simplify the pattern or use a literal search.]',
         )
       }
-      if (byteCapHit) {
+      if (outcome.byteCapHit) {
         out.push(
-          `[Search stopped after ${scannedFiles} file${scannedFiles === 1 ? '' : 's'} (${formatBytes(scannedBytes)}): ` +
+          `[Search stopped after ${scannedFiles} file${scannedFiles === 1 ? '' : 's'} (${formatBytes(outcome.scannedBytes)}): ` +
             `the per-call scan limit is ${formatBytes(ws.maxSearchScanBytes)}. Results are incomplete; narrow with path_glob.]`,
         )
       }
+      const { withheld, hiddenTests } = outcome
       if (withheld > 0) out.push(`(${withheld} withheld file${withheld === 1 ? '' : 's'} not searched.)`)
       if (hiddenTests > 0) {
         out.push(
@@ -583,6 +577,95 @@ function searchCodeTool(ws: Workspace) {
       return ws.finish(out.join('\n'))
     },
   })
+}
+
+/** A pattern whose regex matches an empty line (`a||b`, `x?`) would match every line: never worth running. */
+function matchesEmptyLine(pattern: string, caseSensitive: boolean): boolean {
+  try {
+    return new RegExp(pattern, caseSensitive ? '' : 'i').test('')
+  } catch {
+    return true
+  }
+}
+
+/** One pass of `matcher` over the searchable files, within the per-call byte cap and regex time budget. */
+async function searchFiles(
+  ws: Workspace,
+  matcher: LineMatcher,
+  glob: GlobMatcher | undefined,
+  showTests: boolean,
+  limit: number,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<SearchOutcome> {
+  const results: string[] = []
+  let more = false
+  let withheld = 0
+  let hiddenTests = 0
+  let scannedFiles = 0
+  let scannedBytes = 0
+  let byteCapHit = false
+  let timedOut = false
+  let batch: { path: string; text: string }[] = []
+  let batchChars = 0
+
+  const flush = async (): Promise<void> => {
+    if (batch.length === 0) return
+    const current = batch
+    batch = []
+    batchChars = 0
+    const outcome = matcher.scan(
+      current.map(entry => entry.text),
+      limit + 1 - results.length,
+    )
+    if (outcome.timedOut) timedOut = true
+    const split = new Map<number, string[]>()
+    for (const hit of outcome.hits) {
+      if (results.length >= limit) {
+        more = true
+        break
+      }
+      const entry = current[hit.text]
+      if (!entry) continue
+      let lines = split.get(hit.text)
+      if (!lines) {
+        lines = entry.text.split('\n')
+        split.set(hit.text, lines)
+      }
+      const line = stripCr(lines[hit.line] ?? '')
+      results.push(`${entry.path}:${hit.line + 1}: ${clipAround(line, hit.column, MAX_SEARCH_LINE_CHARS)}`)
+    }
+    await yieldToEventLoop()
+    signal.throwIfAborted()
+  }
+
+  for (const path of ws.sortedPaths()) {
+    if (more || timedOut || results.length > limit) break
+    signal.throwIfAborted()
+    if (glob && !glob(path)) continue
+    const file = ws.snapshot.files.get(path)
+    if (!file) continue
+    if (ws.isWithheld(path)) {
+      withheld++
+      continue
+    }
+    if (file.isTest && !showTests) {
+      hiddenTests++
+      continue
+    }
+    if (scannedBytes + file.size > maxBytes) {
+      byteCapHit = true
+      break
+    }
+    scannedBytes += file.size
+    scannedFiles++
+    const text = ws.redacted(file)
+    batch.push({ path, text })
+    batchChars += text.length
+    if (batchChars >= SEARCH_BATCH_CHARS || batch.length >= SEARCH_BATCH_FILES) await flush()
+  }
+  if (!more && !timedOut) await flush()
+  return { results, more, withheld, hiddenTests, scannedFiles, scannedBytes, byteCapHit, timedOut }
 }
 
 // ---------------------------------------------------------------------------
