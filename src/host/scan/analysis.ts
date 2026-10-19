@@ -6,6 +6,7 @@
  */
 
 import type { AnalyzerStatus } from '../../shared/contracts.ts'
+import { severityRank } from '../../shared/domain.ts'
 import type { SecuritySettings } from '../../shared/settings.ts'
 import type { AstGrepHandle } from '../analysis/astgrep.ts'
 import { parseDependencies } from '../analysis/dependencies.ts'
@@ -275,18 +276,98 @@ export async function analyzeWorkspace(options: AnalysisOptions): Promise<Analys
   }
 }
 
-/** Builtin and external analyzers can report the same issue; keep the first per location and category. */
-function dedupeSignals(signals: readonly Signal[]): Signal[] {
-  const seen = new Set<string>()
-  const out: Signal[] = []
-  for (const signal of signals) {
-    const key =
-      signal.kind === 'dependency'
-        ? `dep\u0000${signal.ruleId}\u0000${signal.snippet}`
-        : `${signal.kind}\u0000${signal.category}\u0000${signal.location.path}\u0000${signal.location.startLine}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(signal)
+const EXTERNAL_ANALYZERS: ReadonlySet<Signal['analyzer']> = new Set(['gitleaks', 'osv-scanner', 'semgrep'])
+
+/**
+ * Drop repeated observations of one issue, in input order:
+ * - one dependency advisory for one package version (the built-in OSV lookup and OSV-Scanner both report it);
+ * - an external result (Gitleaks, Semgrep) at the start line of a built-in signal of the same kind and
+ *   category (for secrets, with overlapping columns when both sides know them): it is merged into the
+ *   built-in signal, preferring one with the same CWE;
+ * - the same rule reported twice at one line and secret span.
+ * A merged signal keeps the higher severity. Different rules on one line (`algorithms: ['none']` next to
+ * `ignoreExpiration: true`), and different credentials on one line, stay separate.
+ */
+export function dedupeSignals(signals: readonly Signal[]): Signal[] {
+  const kept: (Signal | undefined)[] = [...signals]
+  const firstOf = new Map<string, number>()
+  const builtinAt = new Map<string, number[]>()
+  const raise = (index: number, other: Signal): void => {
+    const signal = kept[index]!
+    if (severityRank(other.severity) < severityRank(signal.severity))
+      kept[index] = { ...signal, severity: other.severity }
   }
-  return out
+  // Built-in signals first, so an external result can merge into one reported later in the list.
+  for (const external of [false, true]) {
+    signals.forEach((signal, index) => {
+      if (signal.kind !== 'dependency' && EXTERNAL_ANALYZERS.has(signal.analyzer) !== external) return
+      if (signal.kind === 'dependency' && external) return
+      const key =
+        signal.kind === 'dependency'
+          ? `dep\u0000${signal.ruleId}\u0000${signal.snippet}`
+          : [
+              signal.analyzer,
+              signal.ruleId,
+              signal.kind,
+              signal.location.path,
+              signal.location.startLine,
+              spanKey(signal),
+            ].join('\u0000')
+      const first = firstOf.get(key)
+      if (first !== undefined) {
+        raise(first, signal)
+        kept[index] = undefined
+        return
+      }
+      const lineKey = `${signal.kind}\u0000${signal.category}\u0000${signal.location.path}\u0000${signal.location.startLine}`
+      if (external) {
+        const candidates = (builtinAt.get(lineKey) ?? []).filter(i => sameSpan(kept[i]!, signal))
+        const match = candidates.find(i => signal.cwe !== undefined && kept[i]!.cwe === signal.cwe) ?? candidates[0]
+        if (match !== undefined) {
+          raise(match, signal)
+          kept[index] = undefined
+          return
+        }
+      } else if (signal.kind !== 'dependency') {
+        const list = builtinAt.get(lineKey)
+        if (list) list.push(index)
+        else builtinAt.set(lineKey, [index])
+      }
+      firstOf.set(key, index)
+    })
+  }
+  return kept.filter((signal): signal is Signal => signal !== undefined)
+}
+
+/** What distinguishes two hits of one rule on one line: the secret span, else the reported column. */
+function spanKey(signal: Signal): string {
+  const start = signal.metadata?.secretStart
+  const end = signal.metadata?.secretEnd
+  if (typeof start === 'number' && typeof end === 'number') return `${start}-${end}`
+  const column = signal.metadata?.column
+  return typeof column === 'number' ? `col${column}` : ''
+}
+
+/** 1-based column range `[from, to)` on the start line, when the signal records one. */
+function columnRange(signal: Signal): readonly [number, number] | undefined {
+  const column = signal.metadata?.column
+  if (typeof column !== 'number') return undefined
+  const endColumn = signal.metadata?.endColumn
+  if (typeof endColumn === 'number' && endColumn > column) return [column, endColumn]
+  const start = signal.metadata?.secretStart
+  const end = signal.metadata?.secretEnd
+  if (typeof start === 'number' && typeof end === 'number' && signal.location.endLine === signal.location.startLine)
+    return [column, column + Math.max(1, end - start)]
+  return undefined
+}
+
+/**
+ * A secret span the external tool located elsewhere on the line is a different credential. Columns are
+ * compared with one character of slack: Gitleaks counts bytes and is off by one after the first line.
+ */
+function sameSpan(builtin: Signal, external: Signal): boolean {
+  if (builtin.kind !== 'secret') return true
+  const a = columnRange(builtin)
+  const b = columnRange(external)
+  return a === undefined || b === undefined || (a[0] <= b[1] && b[0] <= a[1])
 }

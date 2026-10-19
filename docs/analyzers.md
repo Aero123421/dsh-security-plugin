@@ -252,7 +252,10 @@ staged target contains no repository Git configuration; disabled package-manager
 remain defense in depth in both runner versions. Report polling bounds ongoing growth, but
 writes between polls can exceed the threshold briefly; the oversized report is never parsed.
 
-Builtin and external results for the same location and category are de-duplicated (the first one wins).
+A built-in and an external result for the same issue (same file, start line, kind and category; for secrets
+also overlapping columns when both report them) become one signal: the built-in one, preferring a hit with the
+same CWE, with the higher of the two severities. Different rules on one line, such as a JWT `none` algorithm next
+to `ignoreExpiration: true`, and different credentials on one line stay separate.
 
 ### Installing external tools
 

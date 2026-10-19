@@ -94,6 +94,11 @@ changes; they are called out explicitly.
 - Tool schemas no longer carry meaningless `minimum`/`maximum` bounds of ±(2^53 − 1) on integer fields.
 - Skeptic task messages label host-checked excerpts as "quote found in the repository (not a verdict)", and the
   reviewer is told that a SQL string alone or a search without callers does not refute a finding.
+- Keep every distinct rule hit and credential on a line. Scan-level de-duplication merged any two signals of
+  the same kind and category on one line, so a JWT `none` algorithm next to `ignoreExpiration: true`,
+  `httpOnly: false` next to `secure: false`, an AWS secret key next to its key ID, or a Slack token next to a
+  database URL lost a finding (sometimes the more severe one). Now only a built-in and an external result for
+  the same issue are merged, and the merged signal keeps the higher severity.
 
 ## [0.4.0] - 2026-10-18
 
