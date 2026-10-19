@@ -567,9 +567,10 @@ export class ScanJob {
     this.criticPassesLeft = Math.max(0, passes - passesRun)
     this.updateReviewDemand()
     const threatModel = this.scan.threatModel
-    const criticTargets = store
+    // Files stored hunt tasks already target (critic units, tasks of an older plan); sweeps are planned anew.
+    const storedTargets = store
       .listTasks(this.scan.id)
-      .filter(t => t.input.origin === 'critic')
+      .filter(t => HUNT_TASK_KINDS.has(t.kind) && !t.key.startsWith('sweep:'))
       .flatMap(t => t.input.targetPaths)
     const plan = planHuntTasks({
       mode: this.scan.mode,
@@ -578,7 +579,7 @@ export class ScanJob {
       signals: this.analysis.signals,
       units: threatModel?.units ?? [],
       excluded: [...(threatModel?.excluded ?? []).map(entry => entry.path)],
-      targeted: new Set(criticTargets),
+      targeted: new Set(storedTargets),
       includeTests: this.scan.settings.scan.includeTests,
       // Task slots for the critic's units stay free (at most a fifth of the task limit).
       maxTasks: Math.max(

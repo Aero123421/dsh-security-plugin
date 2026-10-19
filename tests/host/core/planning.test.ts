@@ -219,6 +219,28 @@ describe('planHuntTasks — coverage units', () => {
     expect(targeted).not.toContain('src/plain9.ts')
   })
 
+  it('keeps sweep keys and the other groups when files become targeted on resume', () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 12 }, (_, i) => [
+        `src/mod${String(i).padStart(2, '0')}.ts`,
+        `export const x${i} = ${i}\n`.repeat(20 - i),
+      ]),
+    )
+    const input = { mode: 'research' as const, snapshot: snapshotOf(files), maxTasks: 50 }
+    const sweeps = (targeted?: ReadonlySet<string>) =>
+      plan({ ...input, ...(targeted ? { targeted } : {}) }).tasks.filter(t => t.key.startsWith('sweep:'))
+    const first = sweeps()
+    expect(first).toHaveLength(3)
+    // A critic unit (or a task of an older plan) now targets one file: only its group loses that file.
+    const resumed = sweeps(new Set(['src/mod01.ts']))
+    expect(resumed.map(t => t.key)).toEqual(first.map(t => t.key))
+    expect(resumed[0]?.input.targetPaths).toEqual(first[0]?.input.targetPaths.filter(p => p !== 'src/mod01.ts'))
+    expect(resumed.slice(1).map(t => t.input.targetPaths)).toEqual(first.slice(1).map(t => t.input.targetPaths))
+    // A group whose files are all targeted elsewhere is dropped; the others keep their keys.
+    const emptied = sweeps(new Set(first[1]?.input.targetPaths))
+    expect(emptied.map(t => t.key)).toEqual([first[0]?.key, first[2]?.key])
+  })
+
   it('plans units in any language, and sweeps Java, PHP and Go sources', () => {
     const snap = snapshotOf({
       'src/main/java/com/shop/OrderController.java': 'class OrderController {}\n',

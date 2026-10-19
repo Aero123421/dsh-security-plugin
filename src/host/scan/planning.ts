@@ -44,7 +44,11 @@ export interface HuntPlanInput {
   readonly units: readonly PlanUnitRecord[]
   /** Files and directories reconnaissance left out of the sweep (vendored, generated, docs, fixtures). */
   readonly excluded?: readonly string[]
-  /** Files other tasks already target (critic units of a resumed scan); the sweep leaves them out. */
+  /**
+   * Files that stored tasks outside this plan already target (critic units,
+   * tasks of an older plan); the sweep leaves them out without regrouping the
+   * other files, so sweep keys stay the same on resume.
+   */
   readonly targeted?: ReadonlySet<string>
   readonly includeTests: boolean
   /** Hunt tasks this plan may hold (task slots kept for later critic waves already subtracted). */
@@ -240,12 +244,14 @@ export function planHuntTasks(input: HuntPlanInput): HuntPlan {
   const slots = Math.max(0, Math.floor(input.maxTasks))
   const tasks = ranked.slice(0, slots)
   const cut = ranked.slice(slots)
-  const targeted = new Set([...(input.targeted ?? []), ...ranked.flatMap(task => task.input.targetPaths)])
+  // Sweep groups form from what this plan's own tasks leave (the same on every re-planning), then lose the files
+  // other stored tasks target: a new critic unit never shifts the other groups and their keys.
+  const planned = new Set(ranked.flatMap(task => task.input.targetPaths))
   const budgetRoom = Math.max(0, Math.floor(input.budgetTasks ?? slots))
   const room = Math.min(slots, budgetRoom)
   const excluded = input.excluded ?? []
-  const files = sweepCandidates(input.snapshot, path => inScope(path) && !isExcludedPath(path, excluded), targeted)
-  const sweep = planSweep(files, Math.max(0, room - tasks.length))
+  const files = sweepCandidates(input.snapshot, path => inScope(path) && !isExcludedPath(path, excluded), planned)
+  const sweep = planSweep(files, input.targeted ?? new Set(), Math.max(0, room - tasks.length))
   // Append only: sweep work must never displace an existing task family.
   tasks.push(...sweep.tasks)
   return {
@@ -528,14 +534,25 @@ export function preferForReview(a: SnapshotFile, b: SnapshotFile): number {
   )
 }
 
+/**
+ * Sweep groups of 4 files in review order. A group's key is the hash of all
+ * its files; files in `skip` are then left out of the group (an emptied group
+ * is dropped), so skipping files never changes the other groups or keys.
+ */
 function planSweep(
   files: readonly SnapshotFile[],
+  skip: ReadonlySet<string>,
   remaining: number,
 ): { tasks: PlannedTask[]; overflow: number; unassigned: string[] } {
   const groups = chunk(files, SWEEP_FILES_PER_TASK)
+    .map(group => ({
+      key: `sweep:${shortHash(group.map(f => f.path).join('\u0000'))}`,
+      part: group.filter(f => !skip.has(f.path)),
+    }))
+    .filter(group => group.part.length > 0)
   return {
-    tasks: groups.slice(0, remaining).map((part, index) => ({
-      key: `sweep:${shortHash(part.map(f => f.path).join('\u0000'))}`,
+    tasks: groups.slice(0, remaining).map(({ key, part }, index) => ({
+      key,
       kind: 'hunt-file',
       role: 'hunter',
       title: `Sweep ${part.length} otherwise-untargeted source file${part.length === 1 ? '' : 's'}`,
@@ -544,7 +561,7 @@ function planSweep(
       input: { targetPaths: part.map(f => f.path), focus: SWEEP_FOCUS, origin: 'gap' },
     })),
     overflow: Math.max(0, groups.length - remaining),
-    unassigned: groups.slice(remaining).flatMap(part => part.map(f => f.path)),
+    unassigned: groups.slice(remaining).flatMap(({ part }) => part.map(f => f.path)),
   }
 }
 
