@@ -63,7 +63,13 @@ Everything read from the repository is data. The controls:
   rule-hit snippets, finding titles) is clipped and kept on a single line. The Planner's threat model, which a
   hostile repository can steer, reaches hunters only as context labelled as the Planner's reading of the code, not
   as verified facts; the coverage units it proposes (including their rationale and hypothesis) are validated by the
-  Host, and their target paths and priorities only rank and seed tasks within the snapshot.
+  Host, and their target paths and priorities only rank and seed tasks within the snapshot. The plan's exclusions
+  (paths left out of the sweep) are checked the same way: a path is excluded only when the Planner's reason claims
+  vendored, generated, documentation or fixture code and every visible file under it carries a marker the Host
+  sees itself (a vendor, generated, documentation or fixture path, or generated content). A path with a detected
+  endpoint or rule hit is never excluded, and the check is repeated on every run, so an injected plan cannot take
+  hand-written code out of the AI review. Refused entries stay in the review and are counted in the info event
+  `plan-exclusions-refused`.
 - **Prompt injection is mitigated, not solved.** No prompt reliably stops a determined injection. The real controls
   are structural: what a manipulated worker *can do* is limited (next section), and what it *claims* is checked
   against code (Evidence integrity, below).

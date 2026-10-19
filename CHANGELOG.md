@@ -131,8 +131,34 @@ changes; they are called out explicitly.
   do not downgrade over a database that holds them. Scans from older versions (hypothesis and file tasks) still
   resume. No database migration is needed.
 
+### Security
+
+- The review plan's exclusions can no longer take hand-written code out of the AI review. A path is excluded from
+  the sweep only when the Planner's reason claims vendored, generated, documentation or fixture code and every
+  visible file under it carries a marker the Host sees itself: a vendor or third-party directory, generated
+  content or a generator's directory or file name, a documentation directory or `.md`/`.rst`/`.txt` file, or a
+  fixture, example, sample or mock directory. Paths with detected endpoints or rule hits and the workspace root are
+  never excluded. The check runs again on every run, so resumed scans and plans stored by earlier versions are
+  covered. Refused entries stay in the review and are logged as the info event `plan-exclusions-refused`. The
+  `excluded-by-plan` diagnostic now lists the excluded paths (`params.paths`, the first 10 and `(+N more)`). Before,
+  words like "external" or "docker" in the reason and any existing path were enough.
+
 ### Fixed
 
+- A task the model provider refused (content policy) now keeps the error code `blocked_by_provider`, with the
+  provider's code at the start of the message, so the coverage ledger shows its unit as *provider-rejected*. It
+  stored the provider's own code (such as `CONTENT_FILTER`) and showed as failed.
+- The coverage critic listed hunt tasks that were still waiting for a later wave as not run and their files and
+  endpoints as never opened or given, so it planned duplicates. It now sees them in a separate *queued* list ("will
+  run, do not plan again") and their files and endpoints are left out of the gap lists. In the final ledger a hunt
+  task still pending or running without an error counts as not examined for `budget`, not as failed.
+- The critic reserve now holds under parallel hunters. Wave hunters work under the wave ceiling and get the usual
+  wrap-up request there; before, they ran under the full hunt ceiling and tasks started just below the wave
+  ceiling could use up the reserve, so the critic never ran. A wave hunter refused before its first request goes
+  back to pending for a later pool instead of being skipped. The final pool keeps the full hunt ceiling.
+- A resumed scan could plan duplicate sweeps. Sweep groups of 4 files are now built from the files the plan's own
+  tasks leave and keyed by all of their files; files that other stored hunt tasks target (critic units, legacy
+  `file:` and `hypothesis:` tasks) are removed afterwards without regrouping, so re-planning finds the same tasks.
 - Closing a dialog no longer moves focus back to its opener when another dialog has already taken focus. Escape
   closes the topmost dialog even when focus has left it.
 - The folder browser's breadcrumb has its own accessible name instead of repeating "Folder path".

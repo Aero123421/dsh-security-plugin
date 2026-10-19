@@ -184,8 +184,10 @@ sweeps the in-scope source files no task targets, 4 per task, but only as far as
 budget can pay for (about 12 AI requests per task). A larger `maxLlmCalls` or `maxTasks` therefore buys more
 sweeping and fewer unexamined files. Tasks cut by `maxTasks` and source files that still belong to no task are
 listed in the results as *not examined* and *unassigned files*; they do not fail the scan. Only
-JavaScript, TypeScript, Python, Go, Java, Kotlin, Ruby, PHP, C# and Rust files are swept and counted; files the plan
-excludes as vendored, generated, documentation or fixtures are neither.
+JavaScript, TypeScript, Python, Go, Java, Kotlin, Ruby, PHP, C# and Rust files are swept and counted; files under a
+plan exclusion (vendored, generated, documentation or fixtures) are neither, but only where the Host itself sees a
+vendor directory, generated content, a documentation directory or file type, or a fixture or example directory on
+every file under the excluded path. The plan cannot exclude paths with endpoints or rule hits.
 
 These defaults apply when no budget has been saved. Updating the plugin does not replace saved budgets;
 change them in Settings to use the new values. Each model reply may execute up to 48 tool calls;
@@ -196,8 +198,8 @@ finding that will get an independent review (at most 30% of the AI requests in D
 Quick), 12 for the Research attack-chain run (at most 5%), and 2 per reviewer working at once so that a reviewer
 the budget stops mid-task can still submit what it found (at most 5%). Deep and Research also keep back what the
 coverage-critic passes still to run need (8 requests for the critic plus 12 per unit it may add), at most 20% of the
-hunt budget, so the first hunt waves leave room for them. Tokens and minutes are reserved in the same
-proportion. Hunt tasks that do not fit are skipped with a notice and run after **Add budget**, and
+hunt budget, so the first hunt waves, hunters included, stop short of it and leave room for them. Tokens and
+minutes are reserved in the same proportion. Hunt tasks that do not fit are skipped with a notice and run after **Add budget**, and
 low-priority file sweeps are scheduled only as far as the remaining hunt budget pays for (about 12
 requests each).
 

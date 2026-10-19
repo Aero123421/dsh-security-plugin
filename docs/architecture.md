@@ -126,8 +126,18 @@ that it did:
   with only out-of-scope files, a duplicate (same files and focus), and units beyond the limit. Test files count
   only when `includeTests` is on.
 - **Exclusions.** The Planner may list directories or files as vendored, generated, documentation or fixtures
-  (at most 50). The Host keeps only existing paths with one of those reasons and never the workspace root. Excluded
-  files get no sweep task and are not counted as unassigned.
+  (at most 50). The Host does not take the reason on trust: the reason text must claim one of those four, and every
+  visible (non-withheld) snapshot file under the path must carry a marker the Host sees itself: a vendor or
+  third-party directory (`vendor`, `third_party`, `external`, `deps`, `node_modules` …), generated content
+  (`isGenerated`, or a generator's directory or file name such as `generated/`, `.pb.go`, `.min.js`, `_pb2.py`), a
+  documentation directory or file type (`docs/`, `.md`, `.rst`, `.txt` …), or a fixture or example directory
+  (`fixtures`, `testdata`, `examples`, `samples`, `mocks` …). Test directories are not a marker: whether tests are
+  reviewed is the `includeTests` setting. A path that holds a detected endpoint file or a rule hit is never excluded,
+  nor is the workspace root or a path with no visible file. The stored reason is the claimed one when every file bears
+  it out, otherwise the most common marker. The check runs again on every run against that run's snapshot, so it
+  also covers resumed scans and plans stored by older versions. When the plan is made, entries the Host refuses are
+  counted in the info event `plan-exclusions-refused`; those paths stay in the review. Excluded files get no sweep
+  task and are not counted as unassigned.
 - **Units become tasks.** Each unit is a `hunt-unit` task with key `unit:<hash of sorted target files and focus>`.
   The task also carries what the deterministic analysis found in the unit's files: up to 12 reportable rule hits
   (the hunter must rule on each), up to 6 sinks as steering, and up to 20 endpoints whose handler or route file the
@@ -150,7 +160,11 @@ that it did:
     Sweeps fill only the task slots left under `maxTasks` and only as many tasks as the hunt budget can pay for
     (about 12 requests each; see Budgets). They prefer production files, then names that say what the code enforces
     (auth, role, scope, token, crypto, upload first; configuration next; entity-named data-layer files last), then
-    larger files. This is the same in all modes, so a Quick scan with spare capacity sweeps too.
+    larger files. This is the same in all modes, so a Quick scan with spare capacity sweeps too. Groups form from the
+    files this plan's own tasks leave, and a group's key hashes all of its files. Files that other stored hunt tasks
+    already target (critic units, tasks of an older plan, including legacy `file:` and `hypothesis:` tasks) are then
+    dropped from their group without regrouping, and a group left empty is dropped. A new critic unit therefore
+    never moves the other groups or their keys, and a resumed scan plans the same sweeps.
 - Candidates are sorted by priority and cut at `maxTasks`, less a fifth of it kept for coverage-critic units. Tasks
   beyond the limit are stored as `skipped` with error code `task-limit`, so they appear in the ledger as not
   examined; the number left over is reported as a notice. Source files that still belong to no task are counted as
@@ -161,12 +175,14 @@ that it did:
   languages are examined only when a unit names them, and are neither swept nor counted as unassigned.
 
 **Coverage critic** (`agents/roles/critic.ts`, Planner route). After the first hunt wave, Deep runs one pass and
-Research up to two (Quick none). The critic sees the ledger so far (first 80 units), the 60 most review-worthy
-source files no worker read, and up to 40 endpoints no finished task reviewed, and can use the workspace tools. It
-submits `submit_coverage_review`: up to 8 (Deep) or 16 (Research) new units for real gaps, or `done`. The Host
-validates them like reconnaissance units, against the task slots still free. Critic units take only steering
-sinks and unreviewed endpoints, because every reportable rule hit already has a task. A wave runs them, and a
-second Research pass follows only if the first one added units. The critic is skipped without a Planner route,
+Research up to two (Quick none). The critic sees the ledger of the tasks that started (first 80 units), the units
+still queued for a later wave, the 60 most review-worthy source files, and up to 40 endpoints, and can use the
+workspace tools. Tasks still `pending` or `running` are listed separately as *queued* ("they will run, so do not
+plan them again"), not as not-run gaps, and their target files and endpoints are left out of the lists of source
+files no worker read and endpoints no finished task reviewed. It submits `submit_coverage_review`: up to 8 (Deep) or
+16 (Research) new units for real gaps, or `done`. The Host validates them like reconnaissance units, against the
+task slots still free. Critic units take only steering sinks and unreviewed endpoints, because every reportable rule
+hit already has a task. A wave runs them, and a second Research pass follows only if the first one added units. The critic is skipped without a Planner route,
 when the hunt budget is exhausted, or when its route was already found broken. A pass that fails or leaves no valid
 unit ends the passes. The `done` flag is recorded but does not decide: the Host looks only at the units, so a pass
 that submits valid units with `done: true` still gets its wave and, in Research, a second pass; `done` with no
@@ -196,7 +212,8 @@ units, or no valid unit at all, ends the passes.
   before a request estimated above 85% of it (less the output limit) or after `CONTEXT_WINDOW_EXCEEDED`. Without a
   known window, an overflow keeps the results of the latest two replies. A turn compacts at most once.
 - Provider content-policy refusals end the worker as `blocked_by_provider`. They are never retried and no other
-  model is tried.
+  model is tried. The task's error code is `blocked_by_provider` as well, with the provider's own code at the start
+  of the message (`CONTENT_FILTER: …`), so the ledger shows the unit as `provider-rejected`.
 - A plain-text reply is answered with a nudge; three in a row end the run. At 75% of the turns the model is reminded
   to submit soon. On the final turn a note asks for the submission, and other tool calls there are answered with an
   error instead of being run. A final turn without an accepted submission gets one grace request.
@@ -216,7 +233,7 @@ reply, and it gives the severity rubric and the output language. Each role has i
 
 | Role | Terminal tool | Turn cap | Output checks |
 | --- | --- | --- | --- |
-| Planner | `submit_review_plan` | `min(maxTurnsPerWorker, 48)` replies; Quick 10 | Units beyond the mode's limit, duplicates and units with no in-scope file are dropped. A unit none of whose target paths resolves is sent back once with path suggestions. Exclusions need a valid reason and an existing path. |
+| Planner | `submit_review_plan` | `min(maxTurnsPerWorker, 48)` replies; Quick 10 | Units beyond the mode's limit, duplicates and units with no in-scope file are dropped. A unit none of whose target paths resolves is sent back once with path suggestions. Exclusions need a claimed reason and a Host-visible marker on every file under the path (see Exclusions). |
 | Critic | `submit_coverage_review` | `min(maxTurnsPerWorker, 24)` | Same unit checks as the Planner, against the task slots still free. No valid unit ends the passes (`done` with units does not: the Host looks only at the units). |
 | Hunter | `submit_findings` | `maxTurnsPerWorker` | Findings with at least one verified code step are saved across resubmissions. The rest, verdicts whose evidence does not verify, and (once) missing verdicts for listed rule hits are sent back (up to 3 times) with the exact mismatches and the file's actual lines; after that the submission is accepted and the host drops findings without verified code. An empty submission before any tool call is sent back once. An optional `coverage` verdict (`complete`, `partial`, `needs-runtime`) with a note says how completely the hunter examined its unit; an unknown spelling is dropped, never sent back. |
 | Skeptic | `submit_verdict` | `min(maxTurnsPerWorker, 48)` | `refuted` without a verified counter-evidence quote of code (comment-only quotes do not count) is sent back (up to 2 times), then downgraded to `inconclusive`. `confirmed` without any verified step becomes `inconclusive`. |
@@ -322,14 +339,17 @@ phases after it (`phaseCeilings` in `scan/budget.ts`):
 
 - **Review reserve:** 6 requests per finding that is planned for a Skeptic review, at most 30% of the calls in Deep
   and 35% in Research (none in Quick). The reserve follows the findings as hunters report them. The Planner, the
-  Critic and the hunters stop at the hunt ceiling; lower-priority hunt tasks that do not start are skipped (reason
-  `budget`, notice `hunt-budget-reserved`).
+  Critic and the final hunt pool stop at the hunt ceiling; lower-priority hunt tasks that do not start are skipped
+  (reason `budget`, notice `hunt-budget-reserved`).
 - **Critic reserve** (Deep, Research): each coverage-critic pass still to run is expected to need 8 requests for the
   critic plus 12 for each unit it may add (8 / 16 units), at most 20% of the hunt ceiling's calls. Hunt waves stop
   at the **wave ceiling**, the hunt ceiling less this reserve, so the critic and its units still fit under the hunt
-  ceiling and the review reserve is unchanged. What a wave leaves pending runs afterwards under the full hunt
-  ceiling. With no critic pass left, the wave ceiling equals the hunt ceiling. Up to a fifth of `maxTasks` is kept
-  free for critic units in the same way.
+  ceiling and the review reserve is unchanged. The ceiling holds for the hunters, not only for task starts: wave
+  hunters work under the wave ceiling and, when the gate refuses them there, get the usual wrap-up request, so
+  parallel hunters cannot use up the reserve. A wave hunter refused before its first request (another worker took
+  the last call) goes back to `pending` for a later pool instead of being skipped. What a wave leaves pending runs
+  afterwards in the final pool, under the full hunt ceiling. With no critic pass left, the wave ceiling equals the
+  hunt ceiling. Up to a fifth of `maxTasks` is kept free for critic units in the same way.
 - **Chain reserve** (Research): 12 requests, at most 5%.
 - **Wrap-up reserve:** 2 requests per parallel worker, at most 5% of the calls and 3% of the time. A worker the gate
   refuses mid-run gets one wrap-up request from it to submit what it found; wrap-up requests may pass a phase
@@ -357,17 +377,19 @@ Each unit has a title, component, surface, focus, up to 8 paths, `origin` (`reco
 | `finding` | The task is `done` and at least one non-refuted finding rests on evidence from that task. |
 | `blocked` | The task is `done`, the hunter's `coverage` verdict is `partial` or `needs-runtime`, and no such finding exists. The note it gave is kept. |
 | `covered` | The task is `done` without either of the above. |
-| `not-run` | Any other state, with a reason code from the task's error: `budget`, `task-limit`, `failed`, `consent-revoked`, `provider-rejected`, `no-tools` or `stale-target`. |
+| `not-run` | Any other state, with a reason code from the task's error: `budget`, `task-limit`, `failed`, `consent-revoked`, `provider-rejected` (error code `blocked_by_provider`), `no-tools` or `stale-target`. A hunt task still `pending` or `running` without an error has not started when the ledger is made, which only the budget causes: reason `budget`. |
 
 On top of the task units, one `unassigned` unit (`not-run`, reason `task-limit`, `budget` or `consent-revoked`) lists
 the in-scope source files that no hunt task targets, whatever became of the task. The number is also
-`unassignedFiles`. Source files the plan excluded as vendored, generated, documentation or fixtures are not counted.
-Two gap diagnostics go with it: `unassigned-files` (count, reason) and `excluded-by-plan` (count). A scan with only
-built-in analyzers has no ledger, no `unassignedFiles` and neither gap.
+`unassignedFiles`. Source files under a plan exclusion the Host confirmed (vendored, generated, documentation or
+fixtures) are not counted. Two gap diagnostics go with it: `unassigned-files` (count, reason) and `excluded-by-plan`
+(count, `paths`: the exclusions that left out at least one such file, the first 10 and then `(+N more)`). A scan with
+only built-in analyzers has no ledger, no `unassignedFiles` and neither gap.
 
 The ledger appears on the results page (a plan summary, the unassigned-files row, and the parts grouped by status,
 unexamined ones first), in the Markdown report (a *Review units* table, unexamined first, at most 100 rows) and in
-the JSON report. SARIF does not carry it. The critic reads the same ledger without the `unassigned` unit.
+the JSON report. SARIF does not carry it. The critic reads the same ledger without the `unassigned` unit, and with
+the queued tasks listed apart from it.
 
 ## Pause, resume and crash recovery
 
@@ -382,9 +404,9 @@ the JSON report. SARIF does not carry it. The critic reads the same ledger witho
   snapshot digest changed. AI tasks are idempotent by **stable task keys**: tasks are inserted with
   `ensureTask(scan_id, key)` under a `UNIQUE (scan_id, key)` constraint, and keys come from content rather than from
   random ids (`unit:<hash of target files and focus>`, `endpoints:<file>#<chunk>`, `signals:<file>#<chunk>`,
-  `triage:<file>#<chunk>`, `sweep:<hash of files>`, `critic:<pass>`, `review:<finding id>`, `threat-model`,
-  `chain`). Re-planning after a resume therefore finds the same tasks. Tasks of scans from older versions
-  (`hypothesis:<hash>`, `file:<path>`) still resume. Reconnaissance is **never planned again**: the stored plan
+  `triage:<file>#<chunk>`, `sweep:<hash of its group's files>`, `critic:<pass>`, `review:<finding id>`, `threat-model`,
+  `chain`). Re-planning after a resume therefore finds the same tasks, sweeps included (see the `hunt-file` sweeps
+  under Gap filling). Tasks of scans from older versions (`hypothesis:<hash>`, `file:<path>`) still resume. Reconnaissance is **never planned again**: the stored plan
   (the scan's `threatModel`, with its units and exclusions) is reused, so a resumed scan reviews the same parts. A
   scan whose hunt tasks began before reconnaissance existed for its mode simply continues without a plan. Critic
   passes that already ran are not repeated, and a pass that failed or added nothing ends the passes. Tasks marked
