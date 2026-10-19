@@ -62,8 +62,10 @@ describe('B3 scan resilience', () => {
       settings: serial,
     })
     const scan = await h.controller.create({ workspaceId: workspace.id, mode: 'deep' })
-    await h.settle(scan.id)
     expect(resolve).toHaveBeenCalledTimes(1)
+    await h.settle(scan.id)
+    // The run resolves the shared route once more (context window, reasoning support), not once per worker.
+    expect(resolve).toHaveBeenCalledTimes(2)
   })
 
   it('does not trip the rejection breaker after partial output without usage', async () => {

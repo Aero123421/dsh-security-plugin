@@ -22,7 +22,7 @@ import type { AnalyzerStatus, Coverage, Diagnostic, WorkerView } from '../../sha
 import { type RoleName, SCAN_PHASES, type ScanPhase } from '../../shared/domain.ts'
 import type { ModelRef, SecuritySettings } from '../../shared/settings.ts'
 import { chainSubmitTool, chainSystem, chainTask } from '../agents/roles/chain.ts'
-import { clipLine } from '../agents/roles/common.ts'
+import { clipLine, turnAllowance } from '../agents/roles/common.ts'
 import {
   type HunterOutput,
   hunterSubmitTool,
@@ -42,7 +42,7 @@ import { findSymbol } from '../analysis/outline.ts'
 import type { Toolkit } from '../analysis/toolkit.ts'
 import type { Config } from '../config.ts'
 import type { AgentRunRecord, FindingRecord, ScanRecord, TaskRecord, ThreatModelRecord } from '../core/model.ts'
-import type { LlmPort, LoggerPort } from '../dsh/ports.ts'
+import type { LlmPort, LlmResolvedModelInfo, LoggerPort } from '../dsh/ports.ts'
 import { createPathMasker, type PathMasker } from '../paths.ts'
 import type { SecurityStore } from '../store/types.ts'
 import { type AnalysisContext, type AnalysisStep, analyzeWorkspace } from './analysis.ts'
@@ -104,6 +104,11 @@ const MAX_SHORT_ROLE_TURNS = 48
 const AI_PHASES = ['threat-model', 'hunt', 'review', 'chain'] as const satisfies readonly ScanPhase[]
 /** Longest delay `setTimeout` accepts; a later deadline is left to the budget checks. */
 const MAX_TIMER_MS = 2_147_483_647
+/** Sampling temperature for routes without reasoning controls. */
+const WORKER_TEMPERATURE = 0.2
+const MODEL_INFO_TIMEOUT_MS = 15_000
+/** Consecutive runs of a route without any tool call before its remaining tasks are skipped. */
+const NO_TOOL_RUNS_TO_BREAK = 2
 
 interface AgentOutcome<T> {
   readonly result: WorkerResult<T>
@@ -154,6 +159,14 @@ export class ScanJob {
   private blockedNotified = false
   /** Only unopened hunt/review tasks are skipped; running workers and other routes are untouched. */
   private readonly brokenRoutes = new Map<string, string>()
+  /** Routes in `brokenRoutes` because their model never called a tool. */
+  private readonly noToolRoutes = new Set<string>()
+  /** Consecutive runs per route that ended without a single tool call. */
+  private readonly toollessRuns = new Map<string, number>()
+  /** Routes that rejected a sampling temperature. */
+  private readonly noTemperature = new Set<string>()
+  /** Model metadata per route, resolved once per run. */
+  private readonly modelInfos = new Map<string, Promise<LlmResolvedModelInfo | undefined>>()
   private masker: { readonly key: string; readonly mask: PathMasker } | undefined
 
   constructor(
@@ -807,10 +820,15 @@ export class ScanJob {
             this.deps.store.updateTask(task.id, {
               status: 'skipped',
               finishedAt: this.iso(),
-              error: {
-                code: 'provider-route-rejected',
-                message: `Skipped: this model route rejected its first request (${broken}).`,
-              },
+              error: this.noToolRoutes.has(routeKey(route))
+                ? {
+                    code: 'provider-route-no-tools',
+                    message: `Skipped: this model answered ${NO_TOOL_RUNS_TO_BREAK} tasks in a row without calling a tool (it may not support tool calling).`,
+                  }
+                : {
+                    code: 'provider-route-rejected',
+                    message: `Skipped: this model route rejected its first request (${broken}).`,
+                  },
             })
           } else {
             await run(task)
@@ -865,6 +883,9 @@ export class ScanJob {
     const llm = this.deps.llm()
     if (!llm) throw new Error('The DSH model registry is not available.')
     this.checkConsent(true)
+    const info = await this.modelInfo(llm, route)
+    this.checkStopped()
+    this.checkConsent()
     const { store } = this.deps
     const started = this.iso()
     store.updateTask(task.id, { status: 'running', attempts: task.attempts + 1, startedAt: started })
@@ -913,6 +934,9 @@ export class ScanJob {
       ),
       spec.submit,
     ]
+    const key = routeKey(route)
+    const temperature = this.temperatureFor(route, info)
+    const contextWindow = info?.context?.contextWindow
     const outcome = await runWorker<T>({
       id: run.id,
       // Task ids are unique per scan and survive resume; each task is a separate conversation.
@@ -927,17 +951,25 @@ export class ScanJob {
       },
       system: spec.system,
       // Backstop over the whole message: no known secret value or absolute root, whatever the builder included.
-      task: this.analysis.privacy.scrub(spec.task),
+      task: this.analysis.privacy.scrub(`${spec.task}\n\n${turnAllowance(spec.maxTurns)}`),
       tools,
       maxTurns: spec.maxTurns,
       budget: spec.budget,
       signal: this.aiSignal,
       idleTimeoutMs: this.deps.config.llmIdleTimeoutMs,
+      firstChunkTimeoutMs: this.deps.config.llmFirstChunkTimeoutMs,
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(contextWindow !== undefined && contextWindow > 0 ? { contextWindow } : {}),
       onEvent: event => {
         if (event.type === 'request' && event.attempt === 1) turns = event.turn
         if (event.type === 'tool') toolCalls++
         if (event.type === 'retry') {
           this.event('debug', 'worker-retry', `${task.title}: retrying after ${event.code} in ${event.delayMs} ms`)
+        }
+        // This route rejects the parameter: later workers on it do not send it at all.
+        if (event.type === 'option-dropped') this.noTemperature.add(key)
+        if (event.type === 'wrap-up') {
+          this.event('debug', 'worker-wrap-up', `${task.title}: budget reached, asked to submit now (${event.reason})`)
         }
         this.deps.live.set(this.scan.id, { ...view, turns, toolCalls })
       },
@@ -981,6 +1013,22 @@ export class ScanJob {
       !this.brokenRoutes.has(routeKey(route))
     ) {
       this.brokenRoutes.set(routeKey(route), failure)
+    }
+    // A model that answers with plain text and never calls a tool cannot do this work: stop paying for it.
+    if (result.toolCalls > 0) {
+      this.toollessRuns.delete(key)
+    } else if (result.status === 'no_submission' && result.turns > 0) {
+      const runs = (this.toollessRuns.get(key) ?? 0) + 1
+      this.toollessRuns.set(key, runs)
+      if (runs >= NO_TOOL_RUNS_TO_BREAK && !this.brokenRoutes.has(key)) {
+        this.brokenRoutes.set(key, 'the model never called a tool')
+        this.noToolRoutes.add(key)
+        this.notice(
+          'warn',
+          'model-no-tools',
+          `${route.provider}/${route.model} answered ${runs} tasks in a row with plain text and never called a tool, so its remaining AI tasks were skipped. Choose a model that supports tool calling for this role.`,
+        )
+      }
     }
     this.event(
       result.status === 'submitted' ? 'info' : 'warn',
@@ -1122,6 +1170,29 @@ export class ScanJob {
     return this.scan.language ?? 'en'
   }
 
+  /**
+   * The route's model metadata (context window, reasoning support), resolved
+   * once per run; `undefined` when DSH cannot resolve it within 15 s.
+   */
+  private modelInfo(llm: LlmPort, route: ModelRef): Promise<LlmResolvedModelInfo | undefined> {
+    const key = routeKey(route)
+    let info = this.modelInfos.get(key)
+    if (!info) {
+      info = withTimeout(llm.resolveModelInfo(route.provider, route.model, this.aiSignal), MODEL_INFO_TIMEOUT_MS)
+      this.modelInfos.set(key, info)
+    }
+    return info
+  }
+
+  /**
+   * A low sampling temperature for routes without reasoning controls: steadier tool calls and JSON.
+   * Reasoning models often reject or ignore it, and a route that rejected it once never gets it again.
+   */
+  private temperatureFor(route: ModelRef, info: LlmResolvedModelInfo | undefined): number | undefined {
+    if (!info || info.reasoning !== undefined || route.reasoningEffort !== undefined) return undefined
+    return this.noTemperature.has(routeKey(route)) ? undefined : WORKER_TEMPERATURE
+  }
+
   /** Phase ceilings for the current usage and review demand (see `phaseCeilings`). */
   private ceilings() {
     return phaseCeilings({
@@ -1231,6 +1302,7 @@ export class ScanJob {
     if (!this.aiEnabled())
       gap('ai-disabled', 'AI review was not used; logic flaws such as broken authorization are not covered.')
     const rejected = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'provider-route-rejected')
+    const toolless = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'provider-route-no-tools').length
     const stale = tasks.filter(t => t.status === 'skipped' && t.error?.code === 'stale-target').length
     if (stale > 0)
       gap(
@@ -1238,10 +1310,17 @@ export class ScanJob {
         `${stale} obsolete review task(s) were skipped because their files/endpoints no longer exist.`,
         { count: stale },
       )
-    if (skipped > rejected.length + stale)
-      gap('skipped-tasks', `${skipped - rejected.length - stale} review task(s) did not run (budget or task limit).`, {
-        count: skipped - rejected.length - stale,
+    const other = skipped - rejected.length - toolless - stale
+    if (other > 0)
+      gap('skipped-tasks', `${other} review task(s) did not run (budget or task limit).`, {
+        count: other,
       })
+    if (toolless > 0)
+      gap(
+        'no-tool-tasks',
+        `${toolless} review task(s) did not run because their model answered without calling tools; choose a model that supports tool calling.`,
+        { count: toolless },
+      )
     if (rejected.length > 0)
       gap(
         'rejected-tasks',
@@ -1433,6 +1512,24 @@ function roleLabel(role: RoleName): string {
 
 function firstLine(text: string): string {
   return (text.split('\n')[0] ?? '').slice(0, 500)
+}
+
+/** `promise`'s value, or `undefined` when it rejects or takes longer than `ms`. */
+function withTimeout<V>(promise: Promise<V>, ms: number): Promise<V | undefined> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(undefined), ms)
+    timer.unref?.()
+    promise.then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(undefined)
+      },
+    )
+  })
 }
 
 function numberOf(value: string | number | boolean | undefined): number {

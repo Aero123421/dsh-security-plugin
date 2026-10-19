@@ -346,6 +346,11 @@ Output language
 - ${languageInstruction(language)}`
 }
 
+/** The closing line of every task message: how many replies the task allows. */
+export function turnAllowance(maxTurns: number): string {
+  return `You have up to ${maxTurns} replies for this task. Put independent tool calls in the same reply, and submit before the last one.`
+}
+
 /** Bullet list helper that tolerates empty input. */
 export function bullets(items: readonly string[], empty = '(none)'): string {
   return items.length === 0 ? empty : items.map(item => `- ${item}`).join('\n')
