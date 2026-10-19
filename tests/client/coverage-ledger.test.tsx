@@ -176,7 +176,7 @@ describe('coverage ledger', () => {
   it('localizes the plan, groups and reasons in Japanese without raw English', async () => {
     const section = await render(coverage({ units: ledger() }), 'ja')
     expect(rowOf(section, '調査計画')?.querySelector('dd')?.textContent).toBe(
-      '12 区画：確認済み 7、指摘あり 2、判断保留 1、未確認 2',
+      '調査対象 12 件：確認済み 7、指摘あり 2、判断保留 1、未確認 2',
     )
     expect([...section.querySelectorAll('.dshsec-unit-group > .dshsec-h4')].map(h => h.textContent)).toEqual([
       '未確認 · 2',
@@ -189,7 +189,7 @@ describe('coverage ledger', () => {
     expect(section.textContent).toContain('この版では理由を表示できません。')
     expect(section.textContent).toContain('ホストが追加')
     expect(section.textContent).toContain('抜け漏れの確認で追加')
-    expect(section.textContent).toContain('ほか 9 区画を表示')
+    expect(section.textContent).toContain('ほか 9 件を表示')
     expect(section.textContent).toContain('src/a.ts （ほか 2 件）')
     expect(section.textContent).not.toMatch(/Needs a running|Token budget|Raw English/)
   })
