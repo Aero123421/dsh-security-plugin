@@ -146,11 +146,11 @@ const QUOTES = new Set(["'", '"', '`', '‘', '’', '‚', '‛', '“', '”',
 /**
  * Check a cited quote against the snapshot.
  *
- * - `match`: the quote occurs exactly once within lines
- *   `[start - slack, end + slack]`. Several occurrences there are accepted
- *   only when the cited range is tight (at most the quote's lines +
- *   `2 × slack`), taking the one nearest the cited lines; otherwise the
- *   result is `quote ambiguous`.
+ * - `match`: exactly one occurrence lies on the cited lines, or the quote's
+ *   only occurrence in the file lies within `slack` lines of them. A quote
+ *   that occurs several times on the cited lines, or only near them while
+ *   it repeats in the file, is `quote ambiguous`: binding it to a nearby
+ *   identical line would be a guess.
  * - `relocated`: no occurrence within that window, but exactly one elsewhere
  *   in the file (also when the cited lines are out of range, or the cited
  *   range is wider than the quote's own lines + `maxExtraLines`: such a range
@@ -379,20 +379,28 @@ function verifyPrepared(
     const high = Math.min(prepared.lineCount, end + slack)
     const [from, to] = normalizedRange(prepared, hay, low, high)
     const hits = occurrencesWithin(haystack, needle, from, to)
-    const [only] = hits
-    if (hits.length === 1 && only !== undefined) {
-      return verified(found(prepared, path, 'match', only, needle.length, hay))
-    }
-    if (hits.length > 1) {
+    if (hits.length > 0) {
       const spans = hits.map(index => linesOfOccurrence(prepared, hay, index, needle.length))
-      const occupied = Math.max(quoteLines, Math.min(...spans.map(s => s.endLine - s.startLine + 1)))
-      if (span > occupied + 2 * slack) {
-        return miss(
-          'ambiguous',
-          `quote ambiguous: it occurs ${hits.length === MAX_WINDOW_HITS ? 'many' : hits.length} times in lines ${low}-${high}; candidate lines: ${formatOccurrenceLines(spans)}; cite the exact lines of one occurrence`,
-        )
+      const pick = closest(spans, start, end)
+      const hit = pick ? hits[pick.index] : undefined
+      if (pick && hit !== undefined) {
+        // On the cited lines, or the file's only copy: anything else would guess between identical lines.
+        if (pick.distance === 0 || (hits.length === 1 && uniqueAt(haystack, needle, hit))) {
+          return verified(found(prepared, path, 'match', hit, needle.length, hay))
+        }
+        if (hits.length === 1) {
+          const all = occurrencesWithin(haystack, needle, 0, haystack.length)
+          const lines = all.map(index => linesOfOccurrence(prepared, hay, index, needle.length))
+          return miss(
+            'ambiguous',
+            `quote ambiguous: it is not on lines ${start}-${end}, and it occurs ${all.length === MAX_WINDOW_HITS ? 'many' : all.length} times in the file; candidate lines: ${formatOccurrenceLines(lines)}; cite the exact lines of one occurrence`,
+          )
+        }
       }
-      return verified(found(prepared, path, 'match', hits[nearest(spans, start, end)] ?? 0, needle.length, hay))
+      return miss(
+        'ambiguous',
+        `quote ambiguous: it occurs ${hits.length === MAX_WINDOW_HITS ? 'many' : hits.length} times in lines ${low}-${high}; candidate lines: ${formatOccurrenceLines(spans)}; cite the exact lines of one occurrence`,
+      )
     }
   }
 
@@ -483,42 +491,51 @@ function verifyGap(
     .filter(({ lines }) => lines.endLine - lines.startLine + 1 <= quoteLines + MAX_GAP_LINES)
   const [only] = spans
   if (!only) return miss('not-found', 'quote not found')
-  if (spans.length > 1) {
-    const occupied = Math.max(quoteLines, Math.min(...spans.map(s => s.lines.endLine - s.lines.startLine + 1)))
-    if (span > occupied + 2 * slack) {
-      return miss(
-        'ambiguous',
-        `quote ambiguous: its parts occur ${spans.length} times in lines ${low}-${high}; candidate lines: ${formatOccurrenceLines(spans.map(s => s.lines))}; cite the exact lines of one occurrence`,
-      )
-    }
-  }
+  // One candidate in the window, or a single one on the cited lines; otherwise picking one would be a guess.
   const pick =
-    spans[
-      nearest(
-        spans.map(s => s.lines),
-        start,
-        end,
-      )
-    ] ?? only
-  return verified(found(prepared, path, 'match', pick.candidate.index, pick.candidate.length, hay))
+    spans.length === 1
+      ? { index: 0, distance: 0 }
+      : closest(
+          spans.map(s => s.lines),
+          start,
+          end,
+        )
+  const chosen = pick && pick.distance === 0 ? spans[pick.index] : undefined
+  if (!chosen) {
+    return miss(
+      'ambiguous',
+      `quote ambiguous: its parts occur ${spans.length} times in lines ${low}-${high}; candidate lines: ${formatOccurrenceLines(spans.map(s => s.lines))}; cite the exact lines of one occurrence`,
+    )
+  }
+  return verified(found(prepared, path, 'match', chosen.candidate.index, chosen.candidate.length, hay))
 }
 
-/** Index of the span nearest the cited lines (first on a tie). */
-function nearest(
+/**
+ * The span nearest the cited lines and its distance in lines (0 when it
+ * overlaps them); `undefined` when two spans are equally near.
+ */
+function closest(
   spans: readonly { readonly startLine: number; readonly endLine: number }[],
   start: number,
   end: number,
-): number {
-  let best = 0
-  let bestDistance = Number.POSITIVE_INFINITY
+): { readonly index: number; readonly distance: number } | undefined {
+  let best: { index: number; distance: number } | undefined
+  let tied = false
   spans.forEach((lines, index) => {
     const distance = Math.max(0, lines.startLine - end, start - lines.endLine)
-    if (distance < bestDistance) {
-      best = index
-      bestDistance = distance
+    if (!best || distance < best.distance) {
+      best = { index, distance }
+      tied = false
+    } else if (distance === best.distance) {
+      tied = true
     }
   })
-  return best
+  return tied ? undefined : best
+}
+
+/** Whether `needle` occurs in `haystack` only at `index`. */
+function uniqueAt(haystack: string, needle: string, index: number): boolean {
+  return haystack.indexOf(needle) === index && haystack.indexOf(needle, index + 1) < 0
 }
 
 function formatOccurrenceLines(spans: readonly { readonly startLine: number; readonly endLine: number }[]): string {

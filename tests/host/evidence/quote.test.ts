@@ -562,20 +562,40 @@ describe('verifyQuote: cited ranges are narrowed and bounded', () => {
     expect(verifyQuote(source, cited, { maxExtraLines: 5 }).check).toBe('match')
   })
 
-  it('accepts a repeated quote only when the cited range is tight, taking the nearest occurrence', () => {
+  it('binds a repeated quote only to the copy on the cited lines, never to a nearby identical line', () => {
     const lines = ['a()', 'check(user.id)', 'b()', 'check(user.id)', 'c()', 'd()', 'e()', 'f()', 'g()', 'h()']
     const near = sourceOf({ 'a.ts': lines.join('\n') })
     const at = (startLine: number, endLine: number, options = {}) =>
       verifyQuote(near, { path: 'a.ts', startLine, endLine, quote: 'check(user.id)' }, options)
     expect(at(4, 4)).toMatchObject({ check: 'match', location: { startLine: 4, endLine: 4 } })
     expect(at(2, 2)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
-    expect(at(5, 5)).toMatchObject({ check: 'match', location: { startLine: 4, endLine: 4 } })
-    expect(at(1, 7)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } }) // 7 <= 1 + 2 × 3
-    expect(at(1, 8).reason).toBe(
+    expect(at(2, 3)).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
+    // Off the cited line, or both copies on the cited lines: which one was meant is a guess.
+    expect(at(5, 5).reason).toBe(
+      'quote ambiguous: it occurs 2 times in lines 2-8; candidate lines: 2, 4; cite the exact lines of one occurrence',
+    )
+    expect(at(1, 7).reason).toBe(
       'quote ambiguous: it occurs 2 times in lines 1-10; candidate lines: 2, 4; cite the exact lines of one occurrence',
     )
     expect(at(2, 4, { slackLines: 0 }).reason).toMatch(/^quote ambiguous: it occurs 2 times in lines 2-4/)
     expect(at(2, 2, { slackLines: 0 })).toMatchObject({ check: 'match', location: { startLine: 2, endLine: 2 } })
+  })
+
+  it('accepts a few lines off only for a quote that occurs once in the file', () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `step${i + 1}()`)
+    lines[4] = 'res.json(rows)'
+    lines[19] = 'res.json(rows)'
+    lines[9] = 'db.all(sql, params)'
+    const s = sourceOf({ 'h.ts': lines.join('\n') })
+    const at = (line: number, quote: string) => verifyQuote(s, { path: 'h.ts', startLine: line, endLine: line, quote })
+    expect(at(12, 'db.all(sql, params)')).toMatchObject({ check: 'match', location: { startLine: 10, endLine: 10 } })
+    // Cited at 17 while meaning line 5: the copy at line 20 is near, but the quote repeats in the file.
+    expect(at(17, 'res.json(rows)')).toMatchObject({
+      check: 'mismatch',
+      reason:
+        'quote ambiguous: it is not on lines 17-17, and it occurs 2 times in the file; candidate lines: 5, 20; cite the exact lines of one occurrence',
+    })
+    expect(at(20, 'res.json(rows)')).toMatchObject({ check: 'match', location: { startLine: 20, endLine: 20 } })
   })
 
   it('narrows a short quote accepted from a short cited range to its own line', () => {
