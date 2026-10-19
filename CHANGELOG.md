@@ -10,6 +10,10 @@ changes; they are called out explicitly.
 
 ## [0.4.2] - 2026-10-19
 
+### Changed
+
+- The packed tarball is about 400 KB larger than 0.4.1 because the tree-sitter-python prebuilds ship in the package.
+
 ### Fixed
 
 - The new-scan estimate names each reason a file is left out (binary, symlink, unreadable, gitignore, your exclude rules, and the size limits) instead of describing every exclusion as an exclude rule. Counts include exclusions past the 5,000-path list.
