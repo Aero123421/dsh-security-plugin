@@ -69,6 +69,8 @@ const ENDPOINTS_PER_TASK = 8
 const SIGNALS_PER_TASK = 12
 const MAX_SENSITIVE_FILE_TASKS = 6
 const SWEEP_FILES_PER_TASK = 4
+/** Untrusted input reaching an interpreter, the network, the file system or HTML: worth checking in any file. */
+const INPUT_FOCUS: readonly FindingCategory[] = ['injection', 'command-execution', 'ssrf', 'path-traversal', 'xss']
 const SENSITIVE_NAME =
   /(?:^|[/_.-])(auth|authn|authz|login|logout|session|sessions|permission|permissions|policy|policies|guard|guards|acl|rbac|role|roles|middleware|tenant|tenants|account|accounts|admin|token|tokens|jwt|oauth|password|billing|payment|payments|invite|invites|upload|uploads|config|configuration|settings|cookie|cookies|security|constants|env)(?:[/_.-]|$)/i
 const SOURCE_LANGUAGES = new Set([
@@ -244,12 +246,15 @@ function planEndpoints(endpoints: readonly Endpoint[], signals: readonly Signal[
             ...(index === 0 && fileSignals.length > 0
               ? { signalFingerprints: sortSignals(fileSignals).slice(0, SIGNALS_PER_TASK).map(signalFingerprint) }
               : {}),
+            // Rule hits in the route file count too, not only those in the handler file.
             focus: unique<FindingCategory>([
               'authz',
               'authn',
-              'injection',
+              ...INPUT_FOCUS,
               'business-logic',
-              ...categoriesOf(fileSignals),
+              ...categoriesOf(
+                signals.filter(s => s.location.path === path || declarationPaths.includes(s.location.path)),
+              ),
             ]),
           },
         }
@@ -420,7 +425,7 @@ function planSensitiveFiles(
       role: 'hunter' as const,
       title: `Review security-sensitive logic in ${f.path}`,
       priority: 45,
-      input: { targetPaths: [f.path], focus: ['authn', 'authz', 'business-logic', 'crypto'] as FindingCategory[] },
+      input: { targetPaths: [f.path], focus: ['authn', 'authz', 'business-logic', 'crypto', ...INPUT_FOCUS] },
     }))
 }
 
@@ -445,7 +450,7 @@ function planSweep(
       priority: 10 - index / (groups.length + 1),
       input: {
         targetPaths: part.map(f => f.path),
-        focus: ['authn', 'authz', 'business-logic', 'crypto', 'misconfiguration', 'data-exposure'],
+        focus: ['authn', 'authz', ...INPUT_FOCUS, 'business-logic', 'crypto', 'misconfiguration', 'data-exposure'],
       },
     })),
     overflow: Math.max(0, groups.length - remaining),

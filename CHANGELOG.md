@@ -110,6 +110,10 @@ changes; they are called out explicitly.
   Layered Express apps had almost no handler located, so endpoint review tasks pointed only at `*.routes.ts`
   files without logic; they now target the handler file and the route file. Task keys of such endpoint groups
   change from the route file to the handler file.
+- Tell every endpoint, sensitive-file and sweep review to look for injection, OS command execution, SSRF, path
+  traversal and XSS. Sweeps and sensitive-file reviews were asked only about authentication, authorization,
+  business logic, crypto and configuration, and endpoint reviews added other categories only from rule hits in
+  the handler file; rule hits in the route file now count too.
 
 ## [0.4.0] - 2026-10-18
 

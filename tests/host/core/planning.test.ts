@@ -133,8 +133,18 @@ describe('planHuntTasks — deep and research modes', () => {
       role: 'hunter',
       title: 'Review 8 endpoints in src/routes/orders.ts',
     })
-    expect(first?.input.focus).toEqual(['authz', 'authn', 'injection', 'business-logic', 'xss'])
-    expect(second?.input.focus).toEqual(['authz', 'authn', 'injection', 'business-logic', 'xss'])
+    const focus = [
+      'authz',
+      'authn',
+      'injection',
+      'command-execution',
+      'ssrf',
+      'path-traversal',
+      'xss',
+      'business-logic',
+    ]
+    expect(first?.input.focus).toEqual(focus)
+    expect(second?.input.focus).toEqual(focus)
     // The file's signals are covered by the endpoint task, not a separate signal task.
     expect(tasks.some(t => t.kind === 'hunt-signals')).toBe(false)
   })
@@ -324,7 +334,20 @@ describe('planHuntTasks — deep and research modes', () => {
       role: 'hunter',
       priority: 45,
       title: 'Review security-sensitive logic in src/auth/jwt.ts',
-      input: { targetPaths: ['src/auth/jwt.ts'], focus: ['authn', 'authz', 'business-logic', 'crypto'] },
+      input: {
+        targetPaths: ['src/auth/jwt.ts'],
+        focus: [
+          'authn',
+          'authz',
+          'business-logic',
+          'crypto',
+          'injection',
+          'command-execution',
+          'ssrf',
+          'path-traversal',
+          'xss',
+        ],
+      },
     })
     // Already targeted (src/auth/session.ts), generated, test, and non-source files are left out.
     const keys = files.map(t => t.key)
