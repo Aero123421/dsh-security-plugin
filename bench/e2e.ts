@@ -340,11 +340,7 @@ interface Observed {
   queuedBehindOther: Set<string>
 }
 
-async function waitForScans(
-  api: Api,
-  scanIds: ReadonlyMap<string, string>,
-  options: Options,
-): Promise<Observed> {
+async function waitForScans(api: Api, scanIds: ReadonlyMap<string, string>, options: Options): Promise<Observed> {
   const observed: Observed = { maxRunning: 0, sawQueued: false, queuedBehindOther: new Set() }
   const deadline = Date.now() + options.timeoutMs
   const wanted = new Set(scanIds.values())
