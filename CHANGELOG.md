@@ -126,6 +126,12 @@ changes; they are called out explicitly.
   unavailable, for files over 512 KiB and for files with parse errors) recorded `name = 'x'` in
   `const { name = 'x' } = req.query` as a constant assignment and missed the injection. It also now records
   destructuring assignments such as `({ sort = 'id' } = req.query)`, as the AST mode does.
+- Stop reporting common validation idioms as injections. The condition of `req.query.x ? 'a' : 'b'` no longer
+  taints its result, a branch restricted by an allow-list (`LIST.includes(x) ? x : 'en'`) is clean, numbers and
+  booleans derived from input (`items.length`, comparisons, `.map(Number)`, Python comprehensions over `int()`)
+  are not text, and an anchored allow-list pattern with an early exit before `exec`/`subprocess` or a file call
+  turns the hit into a review hint. Some of these were reported as critical command injection. A preference
+  cookie such as `theme` set with `httpOnly: false` is no longer reported.
 
 ## [0.4.0] - 2026-10-18
 

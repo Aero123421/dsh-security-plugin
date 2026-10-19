@@ -16,7 +16,16 @@ import {
   secretContext,
 } from './helpers.ts'
 import type { ArgFact, CallFact, FileModel, Span } from './model.ts'
-import { type Classification, cweUrl, type FileContext, REF, type RuleMeta } from './rule.ts'
+import {
+  type Classification,
+  cweUrl,
+  type FileContext,
+  DOT_SEGMENT_NOTE,
+  GUARDED_NOTE,
+  REF,
+  type RuleMeta,
+  sanitizedBy,
+} from './rule.ts'
 import { callAt, type Taint } from './taint.ts'
 
 // ---------------------------------------------------------------------------
@@ -781,6 +790,15 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
     taint = chk.ex.taintResolved(span)
     if (taint) break
   }
+  if (taint && sanitizedBy(PATH, taint.guard)) {
+    if (!protectedBy) chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: GUARDED_NOTE })
+    return
+  }
+  if (taint?.guard?.segmentSafe) {
+    // An allow-list that keeps out separators still lets `..` through: a review hint, not a finding.
+    chk.report(PATH, call, { kind: 'sink', confidence: 'low', taint }, { note: DOT_SEGMENT_NOTE })
+    return
+  }
   if (!taint) {
     // Origin unknown: steer review to content reads, writes, deletes and downloads of dynamic paths that are
     // not confined by `root` or `path.basename()` (metadata calls such as `stat` or `mkdir` are left out).
@@ -1274,6 +1292,8 @@ function propertyRules(chk: Checker): void {
       case 'secure':
       case 'httpOnly':
         if (chk.ex.isWord(prop.value, 'false') && isCookieOptions(chk, prop.objectStart)) {
+          // Page scripts are meant to read a preference cookie (`res.cookie('theme', …, { httpOnly: false })`).
+          if (prop.key === 'httpOnly' && namesPlainCookie(chk, prop.objectStart)) break
           chk.certain(prop.key === 'secure' ? COOKIE_SECURE : COOKIE_HTTPONLY, prop.span, 'medium')
         }
         break
@@ -1349,6 +1369,21 @@ function isCookieOptions(chk: Checker, objectStart: number): boolean {
     )
   }
   return false
+}
+
+/** Cookie names that may carry a session, a credential or a CSRF token. */
+const AUTH_COOKIE_NAME = /sess|sid|auth|token|jwt|remember|login|user|account|csrf|xsrf|secret|key|(?:^|[._-])id$/i
+
+/**
+ * The cookie options at `objectStart` belong to `res.cookie('<name>', …)` (or `setCookie`/`serialize`) with a
+ * literal name that does not suggest a session or credential (`theme`, `locale`, `consent`).
+ */
+function namesPlainCookie(chk: Checker, objectStart: number): boolean {
+  const call = chk.model.calls.find(c => c.args.some(arg => arg.start === objectStart))
+  if (!call || !/^(?:cookie|setCookie|serialize)$/.test(call.name)) return false
+  const first = chk.positional(call, 0)
+  const name = first ? chk.ex.literal(first) : undefined
+  return name !== undefined && name !== '' && !AUTH_COOKIE_NAME.test(name)
 }
 
 function memberAssignRules(chk: Checker): void {

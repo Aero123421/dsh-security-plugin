@@ -13,6 +13,19 @@ sink in the same function or expression. Confidence is high when the source is w
 medium when it arrives through a local alias or a route parameter. Otherwise the match is a lower-severity `sink`,
 or nothing.
 
+Request data stops counting as attacker-chosen text when the code visibly constrains it:
+
+- only the branches of a conditional reach its value (`req.query.debug ? 'on' : 'off'` is constant), and a branch
+  the condition restricts to an allow-list is clean (`LIST.includes(x) ? x : 'en'`, `SET.has(x)`, `x in OBJ`,
+  `x === 'a' || x === 'b'`, Python `x if x in ("en", "ja") else "en"`);
+- numbers and booleans derived from it are not text: `.length`, `.includes(…)`, comparisons, arithmetic,
+  `.map(Number)`/`.map(x => parseInt(x, 10))`, and Python comprehensions whose elements go through `int()`;
+- an anchored allow-list pattern checked before the sink with an early exit (`if (!/^[\w.-]+$/.test(x)) return …`,
+  `if not re.fullmatch(r"[\w.-]+", x): abort(400)`, `if not x.isdigit(): return …`), or wrapping the sink in the
+  positive form, turns command-injection and path-traversal hits into review `sink`s when its characters keep out
+  shell syntax (command) or `..` and separators (path). A pattern that admits `.` but no separator leaves a path
+  hit as a `sink`. Other rules keep the taint: an allow-listed host name is still an SSRF target.
+
 Files that look generated (`@generated`, `DO NOT EDIT`, minified) are skipped. Test, fixture and example files
 are scanned with severity capped at **Low**. SAST confidence becomes **low**; secret confidence drops one level
 (high → medium, medium → low). Findings remain visible.
@@ -109,6 +122,9 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string construction and Sequelize
 `literal(...)` (including named imports). Static placeholder predicates with separate parameter objects and
 object filters are not SQL text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
+
+`js.cookie-without-httponly` leaves out `res.cookie('<name>', …)` (and `setCookie`/`serialize`) when the literal
+name does not suggest a session, credential or CSRF token (`theme`, `locale`): page scripts are meant to read those.
 
 `js.path-traversal`, `js.ssrf` and `js.open-redirect` also emit a low `sink` when the value is dynamic but its
 origin is not visible (a parameter, a stored record, another module): file reads, writes, deletes and downloads

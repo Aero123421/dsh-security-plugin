@@ -5,7 +5,16 @@
 
 import { Checker, isCredentialComparison, isSanitizerCall, secretContext } from './helpers.ts'
 import type { CallFact, FileModel, Span } from './model.ts'
-import { type Classification, cweUrl, type FileContext, REF, type RuleMeta } from './rule.ts'
+import {
+  type Classification,
+  cweUrl,
+  type FileContext,
+  DOT_SEGMENT_NOTE,
+  GUARDED_NOTE,
+  REF,
+  type RuleMeta,
+  sanitizedBy,
+} from './rule.ts'
 import { callAt, type Taint } from './taint.ts'
 
 // ---------------------------------------------------------------------------
@@ -590,6 +599,15 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
   )
     return
   const taint = chk.ex.taintResolved(target)
+  if (taint && sanitizedBy(PATH, taint.guard)) {
+    chk.report(PATH, call, { kind: 'sink', confidence: 'low' }, { note: GUARDED_NOTE })
+    return
+  }
+  if (taint?.guard?.segmentSafe) {
+    // An allow-list that keeps out separators still lets `..` through: a review hint, not a finding.
+    chk.report(PATH, call, { kind: 'sink', confidence: 'low', taint }, { note: DOT_SEGMENT_NOTE })
+    return
+  }
   if (!taint) {
     // Origin unknown: steer review to content reads, writes, deletes and downloads of dynamic, unsanitized paths.
     if (
