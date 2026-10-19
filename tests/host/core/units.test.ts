@@ -207,7 +207,11 @@ describe('coverageLedger', () => {
       task('limit', { status: 'skipped', error: { code: 'task-limit', message: 'm' } }),
       task('failed', { status: 'failed', error: { code: 'INTERNAL', message: 'm' } }),
       task('rejected', { status: 'skipped', error: { code: 'provider-route-rejected', message: 'm' } }),
-      task('blocked', { status: 'failed', error: { code: 'blocked_by_provider', message: 'm' } }),
+      // As failTask records a provider refusal (the provider's own code goes in the message).
+      task('blocked', {
+        status: 'failed',
+        error: { code: 'blocked_by_provider', message: 'CONTENT_FILTER: The response was filtered.' },
+      }),
       task('toolless', { status: 'skipped', error: { code: 'provider-route-no-tools', message: 'm' } }),
       task('consent', { status: 'skipped', error: { code: 'consent-revoked', message: 'm' } }),
       task('stale', { status: 'skipped', error: { code: 'stale-target', message: 'm' } }),

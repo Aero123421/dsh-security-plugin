@@ -1421,13 +1421,15 @@ export class ScanJob {
   private failTask(task: TaskRecord, result: WorkerResult<unknown>): void {
     this.checkStopped()
     const budgetStop = result.status === 'budget_exhausted'
+    const message = result.error?.message ?? (result.stopReason ? `stopped: ${result.stopReason}` : result.status)
     this.deps.store.updateTask(task.id, {
       status: budgetStop ? 'skipped' : 'failed',
       finishedAt: this.iso(),
-      error: {
-        code: result.error?.code ?? result.status,
-        message: result.error?.message ?? (result.stopReason ? `stopped: ${result.stopReason}` : result.status),
-      },
+      // A provider refusal keeps its own code (the ledger reports it as provider-rejected); the provider's code goes in the message.
+      error:
+        result.status === 'blocked_by_provider'
+          ? { code: 'blocked_by_provider', message: result.error ? `${result.error.code}: ${message}` : message }
+          : { code: result.error?.code ?? result.status, message },
     })
   }
 

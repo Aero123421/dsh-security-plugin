@@ -792,13 +792,26 @@ describe('budgets and provider failures', () => {
     expect(hunters.every(r => r.status === 'blocked_by_provider' && r.llmCalls === 1)).toBe(true)
     expect(hunterCalls).toHaveLength(hunters.length)
     const huntTasks = h.store.listTasks(id).filter(t => t.role === 'hunter')
-    expect(huntTasks.every(t => t.status === 'failed' && t.error?.code === 'INVALID_REQUEST')).toBe(true)
+    // The task keeps a dedicated code (the provider's code stays in the message), so the ledger can say why.
+    expect(
+      huntTasks.every(
+        t =>
+          t.status === 'failed' &&
+          t.error?.code === 'blocked_by_provider' &&
+          t.error.message.startsWith('INVALID_REQUEST: '),
+      ),
+    ).toBe(true)
+    const notRun = (h.store.getScan(id)?.coverage?.units ?? []).filter(
+      u => u.status === 'not-run' && u.id !== 'unassigned',
+    )
+    expect(notRun.length).toBeGreaterThan(0)
+    expect(notRun.every(u => u.reason?.code === 'provider-rejected')).toBe(true)
     expect(h.store.listFindings(id).some(f => f.source === 'ai')).toBe(false)
     // Other roles keep their own model and still work.
     expect(h.store.getScan(id)?.threatModel).toBeDefined()
     expect(h.store.listAgentRuns(id).some(r => r.role === 'skeptic' && r.status === 'submitted')).toBe(true)
     expect(h.store.getScan(id)?.coverage?.gaps).toContain(
-      `${huntTasks.length} review task(s) failed (first: INVALID_REQUEST: The request was rejected by the content policy.); see the activity log.`,
+      `${huntTasks.length} review task(s) failed (first: blocked_by_provider: INVALID_REQUEST: The request was rejected by the content policy.); see the activity log.`,
     )
   })
 })
