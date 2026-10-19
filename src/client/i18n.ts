@@ -46,6 +46,8 @@ const en = {
   'diagnostic.gap.rejected-tasks':
     '{count} tasks were not run because the model provider rejected the requests; see Usage and activity.',
   'diagnostic.gap.failed-tasks': '{count} tasks failed; see Usage and activity for the provider or execution error.',
+  'diagnostic.gap.no-tool-tasks':
+    '{count} tasks did not run because their model answered without calling tools. Choose a model that supports tool calling.',
   'diagnostic.gap.consent-revoked': 'AI work stopped because code sharing was turned off.',
   'diagnostic.gap.snapshot-truncated': 'Some files were not analyzed because the project exceeded size limits.',
   'diagnostic.gap.endpoints-unreviewed': '{count} of {total} detected endpoints were not reviewed by AI.',
@@ -72,6 +74,9 @@ const en = {
   'activity.event.worker-start': 'AI task started.',
   'activity.event.worker-end': 'AI task ended.',
   'activity.event.worker-retry': 'Retrying an AI request.',
+  'activity.event.worker-wrap-up': 'Budget reached; an AI task was asked to submit now.',
+  'activity.event.hunter-dismissals-applied':
+    'Rule hits an AI reviewer dismissed stay Undecided because their independent review did not run.',
   'activity.event.phase': 'Scan phase: {phase}',
   'activity.event.deterministic-done': 'Built-in analysis finished.',
   'activity.event.analysis-warning': 'Analysis reported a limitation.',
@@ -581,11 +586,16 @@ const en = {
   'notice.resumed': 'The scan was resumed.',
   'notice.interrupted': 'DSH stopped while the scan was running.',
   'notice.queued': 'Waiting for another scan to finish.',
-  'notice.review-skipped': 'Some findings didn’t get an independent review.',
+  'notice.review-skipped': 'Some findings didn’t get an independent review because the budget ran out.',
   'notice.osv-disabled': 'Online vulnerability lookup is turned off, so only local checks ran.',
   'notice.run-interrupted': 'DSH stopped while this scan was running. Resume it to continue.',
   'notice.blocked-by-provider': 'The model provider refused some review requests. They were recorded as not reviewed.',
-  'notice.task-limit': 'Some lower-priority areas were not reviewed because of the task limit for this depth.',
+  'notice.task-limit':
+    'Some lower-priority areas were not reviewed because of the task or budget limit for this depth.',
+  'notice.hunt-budget-reserved':
+    'Some lower-priority review tasks were skipped to keep budget for the independent review of findings.',
+  'notice.model-no-tools':
+    'A model answered tasks without calling any tool, so its remaining AI tasks were skipped. Choose a model that supports tool calling for this role.',
   'notice.workspace-changed':
     'The project changed while this scan was running. Evidence recorded earlier may refer to older code.',
   'notice.ai-disabled': 'AI review was not used for this scan; only the built-in checks ran.',
@@ -634,6 +644,8 @@ const ja = {
     'モデルへの要求が拒否されたため、{count}件の作業を実施できませんでした。詳しくは「使用量と処理の記録」を確認してください。',
   'diagnostic.gap.failed-tasks':
     '{count}件の作業が失敗しました。プロバイダーや実行のエラーは「使用量と処理の記録」で確認できます。',
+  'diagnostic.gap.no-tool-tasks':
+    'モデルがツールを呼び出さずに回答したため、{count}件の作業を実施できませんでした。ツール呼び出しに対応したモデルを選んでください。',
   'diagnostic.gap.consent-revoked': 'コード送信がオフになったため、AI作業を中止しました。',
   'diagnostic.gap.snapshot-truncated': 'プロジェクトがサイズ上限を超えたため、一部のファイルは未解析です。',
   'diagnostic.gap.endpoints-unreviewed': '検出した入口{total}件中、{count}件はAIが調査していません。',
@@ -660,6 +672,9 @@ const ja = {
   'activity.event.worker-start': 'AI の作業を開始しました。',
   'activity.event.worker-end': 'AI の作業が終了しました。',
   'activity.event.worker-retry': 'AI への要求を再試行します。',
+  'activity.event.worker-wrap-up': '予算に達したため、AI の作業に結果の提出を求めました。',
+  'activity.event.hunter-dismissals-applied':
+    '独立した検証が行われなかったため、AI が誤検知とした一部のルール検出を「判断保留」のままにしました。',
   'activity.event.phase': 'スキャン段階：{phase}',
   'activity.event.deterministic-done': '組み込み解析が終了しました。',
   'activity.event.analysis-warning': '解析で制約が報告されました。',
@@ -1180,12 +1195,15 @@ const ja = {
   'notice.resumed': 'スキャンを再開しました。',
   'notice.interrupted': 'スキャンの実行中に DSH が停止しました。',
   'notice.queued': 'ほかのスキャンが終わるのを待っています。',
-  'notice.review-skipped': '一部の検出結果は、独立した検証を受けていません。',
+  'notice.review-skipped': '予算が尽きたため、一部の検出結果は独立した検証を受けていません。',
   'notice.osv-disabled': 'オンラインの脆弱性照会がオフのため、ローカルのチェックだけを実行しました。',
   'notice.run-interrupted': 'スキャンの実行中に DSH が停止しました。再開すると続きから実行します。',
   'notice.blocked-by-provider':
     'モデルのプロバイダーが一部のレビュー依頼を拒否しました。それらは「未レビュー」として記録しています。',
-  'notice.task-limit': 'この深さの作業数の上限に達したため、優先度の低い一部の箇所はレビューしていません。',
+  'notice.task-limit': 'この深さの作業数または予算の上限により、優先度の低い一部の箇所はレビューしていません。',
+  'notice.hunt-budget-reserved': '検出結果の独立した検証に予算を残すため、優先度の低い一部のレビュー作業を省きました。',
+  'notice.model-no-tools':
+    'ツールを呼び出さずに回答したモデルがあったため、そのモデルの残りの AI 作業を省きました。この役割にはツール呼び出しに対応したモデルを選んでください。',
   'notice.workspace-changed':
     'スキャン中にプロジェクトが変更されました。先に記録された根拠は、古いコードを指している可能性があります。',
   'notice.ai-disabled': 'このスキャンでは AI レビューを行わず、自動チェックだけを実行しました。',
@@ -1228,6 +1246,7 @@ const zh = {
   'diagnostic.gap.skipped-tasks': '受预算或任务上限影响，{count} 个任务未完成。',
   'diagnostic.gap.rejected-tasks': '模型请求被拒绝，未执行 {count} 个任务。详情见“用量与活动”。',
   'diagnostic.gap.failed-tasks': '{count} 个任务失败，服务商或执行错误见“用量与活动”。',
+  'diagnostic.gap.no-tool-tasks': '由于模型未调用工具就作答，{count} 个任务未执行。请选择支持工具调用的模型。',
   'diagnostic.gap.consent-revoked': '代码共享已关闭，AI 工作已停止。',
   'diagnostic.gap.snapshot-truncated': '项目超出大小限制，部分文件未分析。',
   'diagnostic.gap.endpoints-unreviewed': '检测到的 {total} 个入口中有 {count} 个未经 AI 审查。',
@@ -1253,6 +1272,8 @@ const zh = {
   'activity.event.worker-start': 'AI 任务已开始。',
   'activity.event.worker-end': 'AI 任务已结束。',
   'activity.event.worker-retry': '正在重试 AI 请求。',
+  'activity.event.worker-wrap-up': '已达到预算，要求 AI 任务立即提交结果。',
+  'activity.event.hunter-dismissals-applied': '由于未进行独立复核，被 AI 判为误报的部分规则命中保持为“无法判定”。',
   'activity.event.phase': '扫描阶段：{phase}',
   'activity.event.deterministic-done': '内置分析已完成。',
   'activity.event.analysis-warning': '分析报告了一项限制。',
@@ -1745,11 +1766,14 @@ const zh = {
   'notice.resumed': '扫描已继续。',
   'notice.interrupted': '扫描运行期间 DSH 停止了。',
   'notice.queued': '正在等待另一个扫描结束。',
-  'notice.review-skipped': '部分问题没有经过独立复核。',
+  'notice.review-skipped': '预算已用完，部分问题没有经过独立复核。',
   'notice.osv-disabled': '在线漏洞查询已关闭，因此只运行了本地检查。',
   'notice.run-interrupted': '扫描运行期间 DSH 已停止。恢复后可以继续。',
   'notice.blocked-by-provider': '模型服务商拒绝了部分审查请求，这些内容已记录为未审查。',
-  'notice.task-limit': '由于该深度的任务数上限，部分优先级较低的区域未被审查。',
+  'notice.task-limit': '由于该深度的任务数或预算上限，部分优先级较低的区域未被审查。',
+  'notice.hunt-budget-reserved': '为给问题的独立复核保留预算，跳过了部分优先级较低的审查任务。',
+  'notice.model-no-tools':
+    '某个模型未调用任何工具就作答，因此跳过了它剩余的 AI 任务。请为该角色选择支持工具调用的模型。',
   'notice.workspace-changed': '扫描期间项目发生了变化。之前记录的证据可能指向旧代码。',
   'notice.ai-disabled': '本次扫描未使用 AI 审查，只运行了内置检查。',
   'notice.consent-revoked': '扫描期间已关闭向模型发送代码，因此跳过了剩余的 AI 审查。内置检查的结果仍然保留。',

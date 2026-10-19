@@ -237,6 +237,28 @@ describe('review completion is separate from process completion', () => {
     expect(api.callsOf('extendScanBudget')).toEqual([{ scanId: 'scan-1', addTokens: 3_000_000 }])
   })
 
+  it.each(['hunt-budget-reserved', 'review-skipped'])(
+    'offers a top-up after %s and grows tokens and AI requests when no limit was reached',
+    async key => {
+      const detail = makeDetail(
+        {},
+        {
+          models,
+          coverage: coverage(4, 9, 0, 5),
+          usage: { llmCalls: 100, inputTokens: 900_000, outputTokens: 20_000, toolCalls: 50, elapsedMs: 60_000 },
+          notices: [{ key, level: 'info', text: 'Host text', at: '2026-10-01T10:00:00Z' }],
+        },
+      )
+      const { api, container } = await render(detail)
+      expect(container.querySelector('.dshsec-budget-stop')?.textContent).toContain('Add budget')
+      api.handlers.extendScanBudget = () => ok({ ...detail.summary, status: 'queued' as const })
+      await click(byText(container, 'button', '+50%'))
+      await flush()
+      // Work was skipped to keep a phase reserve: either tokens or AI requests can bound the next phase.
+      expect(api.callsOf('extendScanBudget')).toEqual([{ scanId: 'scan-1', addTokens: 1_500_000, addLlmCalls: 150 }])
+    },
+  )
+
   it('does not offer a budget top-up when the scheduled review completed', async () => {
     const { container } = await render(makeDetail({}, { models, coverage: coverage(4, 4) }))
     expect(container.textContent).not.toContain('Add budget')

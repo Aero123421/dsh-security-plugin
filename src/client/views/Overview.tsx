@@ -471,6 +471,8 @@ const DETAILED_EVENTS: ReadonlySet<string> = new Set([
   'worker-start',
   'worker-end',
   'worker-retry',
+  'worker-wrap-up',
+  'hunter-dismissals-applied',
   'analysis-warning',
   'analyzer-unavailable',
   'run-failed',
@@ -634,12 +636,18 @@ function isBuiltinOnly(detail: ScanDetail | undefined): boolean {
 }
 
 const AI_PHASES: ReadonlySet<string> = new Set(['threat-model', 'hunt', 'review', 'chain'])
-/** Notices that mean a budget limit stopped scheduled AI work; only these offer more budget. */
+/**
+ * Notices that mean a budget limit stopped scheduled AI work; only these offer
+ * more budget. The Host continues exactly that work (tasks skipped with a
+ * budget code) when the scan's budget grows.
+ */
 const BUDGET_NOTICES: ReadonlySet<string> = new Set([
   'budget-tokens',
   'budget-calls',
   'budget-time',
   'budget-exhausted',
+  'hunt-budget-reserved',
+  'review-skipped',
 ])
 
 function formatHourMinute(value: string, locale: string): string {
@@ -667,7 +675,7 @@ function ExtendBudgetAction(props: {
 
   const extend = async (pct: number) => {
     // Grow only the dimensions that actually bound this scan (tokens in
-    // practice); fall back to tokens so the request always adds something.
+    // practice), so the request never raises a limit that was not reached.
     const extra: { addTokens?: number; addLlmCalls?: number; addMinutes?: number } = {}
     if (isFiniteNumber(budget?.maxTokens) && budget.maxTokens > 0 && tokensUsed >= budget.maxTokens * 0.9) {
       extra.addTokens = Math.max(1, Math.ceil(budget.maxTokens * pct))
@@ -686,8 +694,11 @@ function ExtendBudgetAction(props: {
     ) {
       extra.addMinutes = Math.max(1, Math.ceil(budget.maxMinutes * pct))
     }
-    if (!extra.addTokens && !extra.addLlmCalls && !extra.addMinutes && isFiniteNumber(budget?.maxTokens)) {
-      extra.addTokens = Math.max(1, Math.ceil(budget.maxTokens * pct))
+    // No dimension ran out (work was skipped to keep a phase reserve): grow
+    // tokens and AI requests together, since either can bound the next phase.
+    if (!extra.addTokens && !extra.addLlmCalls && !extra.addMinutes) {
+      if (isFiniteNumber(budget?.maxTokens)) extra.addTokens = Math.max(1, Math.ceil(budget.maxTokens * pct))
+      if (isFiniteNumber(budget?.maxLlmCalls)) extra.addLlmCalls = Math.max(1, Math.ceil(budget.maxLlmCalls * pct))
     }
     setBusyPct(pct)
     setError(undefined)
