@@ -24,7 +24,8 @@ import type {
   ToolkitEntry,
   WorkspaceSummary,
 } from '../shared/contracts.ts'
-import { CONTRACT_VERSION } from '../shared/contracts.ts'
+import { CONTRACT_VERSION, EXCLUDE_REASONS } from '../shared/contracts.ts'
+import { displaySecretCopy } from '../shared/secret-copy.ts'
 import { reviewOutcome } from '../shared/review.ts'
 import { closureOf, formatCodeRef, isActiveScanStatus, type TriageState } from '../shared/domain.ts'
 import type { AstGrepHandle } from './analysis/astgrep.ts'
@@ -411,7 +412,11 @@ export function createHandlers(deps: ServiceDeps): RpcHandlers {
         ).length,
         files: snapshot.files.size,
         bytes: snapshot.totalBytes,
-        excluded: snapshot.excluded.length,
+        excluded: snapshot.excludedCount ?? snapshot.excluded.length,
+        excludedByReason: EXCLUDE_REASONS.flatMap(reason => {
+          const count = snapshot.excludedByReason?.[reason] ?? 0
+          return count > 0 ? [{ reason, count }] : []
+        }),
         languages: inventory.languages.slice(0, 10).map(l => ({ language: l.language, files: l.files })),
         frameworks: inventory.frameworks,
         endpoints: inScope.length,
@@ -599,6 +604,7 @@ function triageFor(finding: FindingRecord, records: ReadonlyMap<string, TriageRe
 }
 
 function toSummary(finding: FindingRecord, triage: TriageState): FindingSummary {
+  const copy = displaySecretCopy(finding)
   return {
     id: finding.id,
     scanId: finding.scanId,
@@ -616,6 +622,7 @@ function toSummary(finding: FindingRecord, triage: TriageState): FindingSummary 
     summary: finding.summary,
     triage,
     isNew: finding.isNew,
+    ...(copy ? { copy } : {}),
   }
 }
 

@@ -16,7 +16,13 @@ import { ControllerProvider, useController, useSecurity, useT } from '../context
 import type { SecurityController } from '../controller.ts'
 import { copyText } from '../download.ts'
 import { formatNumber, text } from '../format.ts'
-import { analyzerReasonText, errorText, LANGUAGE_NAMES, type Translator } from '../i18n.ts'
+import {
+  analyzerHasVisibleLimitation,
+  analyzerReasonText,
+  errorText,
+  LANGUAGE_NAMES,
+  type Translator,
+} from '../i18n.ts'
 import { IconExternal } from '../icons.tsx'
 import { modelName } from '../models.ts'
 import {
@@ -644,23 +650,26 @@ function ToolkitSection() {
         <div className="dshsec-stack-sm">
           <h3 className="dshsec-h4">{tr.t('settings.builtin')}</h3>
           <ul className="dshsec-analyzers">
-            {builtins.map(a => (
-              <li key={a.id}>
-                <span className={`dshsec-dot ${a.available ? 'is-on' : 'is-off'}`} aria-hidden="true" />
-                <span className="dshsec-analyzer-name">{tr.lookup(`analyzer.${a.id}`) ?? text(a.id)}</span>
-                <div className="dshsec-muted">
-                  {a.available ? tr.t('analyzer.available') : tr.t('analyzer.unavailable')}
-                  {a.version ? ` · ${a.version}` : ''}
-                  {!a.available ? ` — ${analyzerReasonText(tr, a)}` : ''}
-                  {!a.available && a.reason ? (
-                    <details>
-                      <summary>{tr.t('diagnostic.details')}</summary>
-                      <p>{a.reason}</p>
-                    </details>
-                  ) : null}
-                </div>
-              </li>
-            ))}
+            {builtins.map(a => {
+              const showLimitation = analyzerHasVisibleLimitation(a)
+              return (
+                <li key={a.id}>
+                  <span className={`dshsec-dot ${a.available ? 'is-on' : 'is-off'}`} aria-hidden="true" />
+                  <span className="dshsec-analyzer-name">{tr.lookup(`analyzer.${a.id}`) ?? text(a.id)}</span>
+                  <div className="dshsec-muted">
+                    {a.available ? tr.t('analyzer.available') : tr.t('analyzer.unavailable')}
+                    {a.version ? ` · ${a.version}` : ''}
+                    {showLimitation ? ` — ${analyzerReasonText(tr, a)}` : ''}
+                    {showLimitation && a.reason ? (
+                      <details>
+                        <summary>{tr.t('diagnostic.details')}</summary>
+                        <p>{a.reason}</p>
+                      </details>
+                    ) : null}
+                  </div>
+                </li>
+              )
+            })}
           </ul>
         </div>
       ) : null}

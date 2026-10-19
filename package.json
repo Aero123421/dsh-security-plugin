@@ -1,6 +1,6 @@
 {
   "name": "dsh-security-plugin",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Evidence-driven AI security review for DeepSeek Harness: a Security sidebar, deterministic analyzers, read-only multi-agent review with host-verified evidence, and Markdown/JSON/SARIF reports.",
   "keywords": [
     "dsh",
@@ -42,7 +42,15 @@
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "SECURITY.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "vendor/tree-sitter-python/LICENSE",
+    "vendor/tree-sitter-python/NOTICE.md",
+    "vendor/tree-sitter-python/tree-sitter-python.LICENSE",
+    "vendor/tree-sitter-python/prebuilds/prebuild-Linux-ARM64/parser.so",
+    "vendor/tree-sitter-python/prebuilds/prebuild-Linux-X64/parser.so",
+    "vendor/tree-sitter-python/prebuilds/prebuild-macOS-ARM64/parser.so",
+    "vendor/tree-sitter-python/prebuilds/prebuild-macOS-X64/parser.so",
+    "vendor/tree-sitter-python/prebuilds/prebuild-Windows-X64/parser.so"
   ],
   "dsh": {
     "bundle": {
@@ -87,7 +95,6 @@
     }
   },
   "optionalDependencies": {
-    "@ast-grep/lang-python": "0.0.6",
     "@ast-grep/napi": "0.51.0"
   },
   "devDependencies": {

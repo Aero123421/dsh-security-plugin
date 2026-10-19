@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto'
 import ignore from 'ignore'
 import { type Severity, severityRank } from '../../shared/domain.ts'
+import { SECRET_RECOMMENDATION, secretMessage, secretTitle } from '../../shared/secret-copy.ts'
 import { isTestPath } from './snapshot.ts'
 import { type Language, type Signal, type Snapshot, yieldToEventLoop } from './types.ts'
 
@@ -325,6 +326,11 @@ const RULES: readonly SecretRule[] = [
   },
 ]
 
+/** Id and English description of every built-in secret rule, in match order. */
+export function builtinSecretRules(): readonly { readonly id: string; readonly description: string }[] {
+  return RULES.map(rule => ({ id: rule.id, description: rule.description }))
+}
+
 const PLACEHOLDER_PASSWORDS: ReadonlySet<string> = new Set([
   '',
   'password',
@@ -490,26 +496,24 @@ export function secretSignals(matches: readonly SecretMatch[], snapshot: Snapsho
       analyzer: 'secrets',
       ruleId: match.ruleId,
       kind: 'secret',
-      title: `Hard-coded secret: ${match.description}`,
+      title: secretTitle(match.description),
       category: 'secrets',
       severity: match.severity,
       confidence: match.confidence,
       cwe: 'CWE-798',
       location: { path: match.path, startLine: match.line, endLine: match.endLine },
       snippet,
-      message:
-        `A value matching the "${match.description}" pattern (${match.preview}) is written directly into the source. ` +
-        'Anyone who can read the repository, a fork, a backup, a build artifact, or its git history can copy it ' +
-        'and use it to access the connected service as you.' +
-        (inTest
-          ? ' The file looks like a test or example, so it may be a dummy value; confirm before dismissing.'
-          : ''),
-      recommendation:
-        'Treat the credential as compromised: revoke or rotate it with the provider now. Load it at runtime from an ' +
-        'environment variable or a secret manager instead of source code, and purge it from git history ' +
-        '(e.g. git filter-repo) because deleting the line does not remove earlier commits.',
+      message: secretMessage({ description: match.description, preview: match.preview, inTest }),
+      recommendation: SECRET_RECOMMENDATION,
       fingerprintParts: [match.ruleId, match.path, match.fingerprint],
-      metadata: { preview: match.preview, column: match.column, secretStart: match.start, secretEnd: match.end },
+      metadata: {
+        preview: match.preview,
+        column: match.column,
+        secretStart: match.start,
+        secretEnd: match.end,
+        description: match.description,
+        inTest,
+      },
     })
   }
   return signals

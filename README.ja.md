@@ -29,13 +29,13 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 1. **インストール**: DSH の Web UI で「プラグイン → プラグインを追加」を開き、次を入力します。
 
    ```text
-   github:Aero123421/dsh-security-plugin#v0.4.1
+   github:Aero123421/dsh-security-plugin#v0.4.2
    ```
 
    ターミナルから入れる場合（ここでは `web` プロファイル）:
 
    ```sh
-   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.4.1
+   dsh plugin --profile web add -w github:Aero123421/dsh-security-plugin#v0.4.2
    ```
 
    `#` の後ろには、入れたい[リリース](https://github.com/Aero123421/dsh-security-plugin/releases)のタグを指定します。タグを省くと、未リリースの `main` ブランチが入ります。各リリースにはビルド済みの `dsh-security-plugin-X.Y.Z.tgz` と `SHA256SUMS` も添付しており、その URL を同じ場所に入れても導入できます。npm には公開していません。有効化し、再起動を求められたら DSH を再起動してください。更新するときは、新しいタグで同じように追加します。動いている版は「設定」タブで確認できます。読み込まれたかどうかは、`dsh --profile web --dump-config` の出力に `# == dsh-security-plugin` というレイヤーがあるかで確認できます。
@@ -109,7 +109,7 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 - **DSH** `>=0.2.1-alpha.2 <0.3.0-0`、Web UI（`dsh.client.platform: web`）。DSH は任意の peer dependency で、このパッケージが DSH をインストールすることはありません。
 - **Node.js** `^22.19.0 || >=24.0.0`（保存に組み込みの `node:sqlite` を使います）。
 - DSH にモデルのプロバイダーが 1 つ以上接続されていて、そのモデルがツール呼び出しに対応していること。
-- Linux・macOS・Windows。`@ast-grep/napi` は主なプラットフォーム向けのビルド済みバイナリを持つ任意の依存です。入っていなくても組み込みのトークナイザーで動きますが、精度は少し下がります。Python の構文木には `@ast-grep/lang-python` も必要で、これは自動ではインストールされません。
+- Linux・macOS・Windows。`@ast-grep/napi` は主なプラットフォーム向けのビルド済みバイナリを持つ任意の依存です。入っていなくても組み込みのトークナイザーで動きますが、精度は少し下がります。Python の構文木は、このパッケージに同梱した文法を使います（Linux と macOS の x64/arm64、Windows の x64）。musl では `parser.so` を読まずに `python-fallback` を使います（安全側の変更）。musl で落ちる問題は実機では再現していません。まだ確かめていないのは、古い glibc の実機、arm64 の実機、macOS、Windows、`lib` をソースから作り直したときに一致するか、の5つです。既知の P3 として、360px 以下でページ見出しが省略されます。
 - 任意の外部ツール: Gitleaks 8.19 以降（それより古い版では従来の `detect` コマンドで動かします）、OSV-Scanner v2（v1 も可）、ローカルのルールファイルを用意した Semgrep。
 
 ## 困ったときは
@@ -122,6 +122,7 @@ DSH Security は、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-ha
 | 「ほかのスキャンが実行中です」（`security/busy`） | 1 つのプロジェクトで待機中・実行中にできるスキャンは 1 つだけなので、新しいスキャンは作られていません。今のスキャンが終わるのを待つか、「概要」で一時停止・中止してから、もう一度開始してください。 |
 | スキャンが「順番待ち」のまま | 全プロジェクト合計で同時に動くのは `maxConcurrentScans`（標準 1）件までで、残りは順番待ちになります。 |
 | 「調べた範囲」→「実行できなかったチェック」に ast-grep が「native module unavailable on this platform」と出る | この OS・CPU・libc 向けの `@ast-grep/napi` のバイナリがないか、インストール時に任意の依存が省かれました。スキャンは組み込みのパーサーで続行します。任意の依存も含めて入れ直すと復活します。`disableAstGrep: true` にしている場合は想定どおりです。 |
+| 設定または「調べた範囲」に、Python の AST を使えず組み込みパーサーを使うと出る | musl では `parser.so` を読まずに `python-fallback` を使います（安全側の変更）。musl で落ちる問題は実機では再現していません。`@ast-grep/napi` が入っていれば JavaScript と TypeScript は ast-grep のままです。 |
 | DSH のログに `ExperimentalWarning: SQLite is an experimental feature` | Node 22 が `node:sqlite` について出す警告で、害はありません。消したい場合は `NODE_OPTIONS=--disable-warning=ExperimentalWarning` を付けて DSH を起動してください。 |
 | ホストのログに「this DSH build has no exact-route support; the Security page is unavailable」 | DSH が古すぎます。対応範囲のバージョンを使ってください。 |
 | 「引用したコードがプロジェクト内で見つからなかったため、問題の候補 N 件を取り下げました」が多い | モデルが実在しないコードを引用しています。ハンターにより強いモデルを使ってください。 |

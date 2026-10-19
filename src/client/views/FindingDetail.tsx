@@ -9,6 +9,7 @@ import { useController, useSecurity, useT } from '../context.tsx'
 import { findingKey, type Loadable } from '../controller.ts'
 import { asArray, text } from '../format.ts'
 import { errorText } from '../i18n.ts'
+import { attackStepText, findingImpact, findingRecommendation, findingSummary, findingTitle } from '../localized.ts'
 import { IconChat, IconCopy, IconRefresh } from '../icons.tsx'
 import { LoadError, Loading } from './shared.tsx'
 
@@ -61,17 +62,17 @@ function DetailBody(props: {
           {detail.isNew ? <Badge tone="brand">{tr.t('findings.new')}</Badge> : null}
         </div>
         <h2 className="dshsec-detail-title" id={`dshsec-detail-${detail.id}`} ref={props.headingRef} tabIndex={-1}>
-          {text(detail.title)}
+          {findingTitle(tr, detail)}
         </h2>
         <p className="dshsec-detail-loc">{formatLocation(detail.location)}</p>
       </header>
 
       <DetailSection id="problem" title={tr.t('detail.problem')}>
-        <Paragraphs text={detail.summary} />
+        <Paragraphs text={findingSummary(tr, detail)} />
         {detail.impact ? (
           <div className="dshsec-stack-sm">
             <h4 className="dshsec-h4">{tr.t('detail.impact')}</h4>
-            <Paragraphs text={detail.impact} />
+            <Paragraphs text={findingImpact(tr, detail)} />
           </div>
         ) : null}
         {preconditions.length ? (
@@ -153,8 +154,13 @@ function EvidenceSection(props: { readonly detail: FindingDetail }) {
           <h4 className="dshsec-h4">{tr.t('detail.attackPath')}</h4>
           <ol className="dshsec-path">
             {steps.map((step, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: steps are positional; order may repeat
-              <AttackStep key={`${step.order}-${i}`} step={step} index={i} />
+              <AttackStep
+                // biome-ignore lint/suspicious/noArrayIndexKey: steps are positional; order may repeat
+                key={`${step.order}-${i}`}
+                step={step}
+                index={i}
+                description={attackStepText(tr, props.detail, step.description)}
+              />
             ))}
           </ol>
         </div>
@@ -175,7 +181,7 @@ function EvidenceSection(props: { readonly detail: FindingDetail }) {
   )
 }
 
-function AttackStep(props: { readonly step: AttackStepView; readonly index: number }) {
+function AttackStep(props: { readonly step: AttackStepView; readonly index: number; readonly description: string }) {
   const tr = useT()
   const { step } = props
   return (
@@ -184,7 +190,7 @@ function AttackStep(props: { readonly step: AttackStepView; readonly index: numb
         <span className="dshsec-path-n">{tr.t('detail.step', { n: props.index + 1 })}</span>
         <QuoteBadge check={step.quoteCheck} />
       </div>
-      <Paragraphs text={step.description} />
+      <Paragraphs text={props.description} />
       {typeof step.snippet === 'string' && step.snippet ? (
         <CodeBlock snippet={step.snippet} location={step.location} />
       ) : step.location ? (
@@ -258,8 +264,8 @@ function FixSection(props: { readonly detail: FindingDetail; readonly scan: Scan
 
   return (
     <DetailSection id="fix" title={tr.t('detail.fix')}>
-      {typeof detail.recommendation === 'string' && detail.recommendation.trim() ? (
-        <Paragraphs text={detail.recommendation} />
+      {findingRecommendation(tr, detail).trim() ? (
+        <Paragraphs text={findingRecommendation(tr, detail)} />
       ) : (
         <p className="dshsec-muted">{tr.t('detail.noRecommendation')}</p>
       )}

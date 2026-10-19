@@ -410,6 +410,7 @@ const modal = /* css */ `
 .dshsec-estimate > div { padding: 10px 14px; background: var(--dshsec-surface); min-width: 0; }
 .dshsec-estimate dt { font-size: 12px; color: var(--dshsec-text3); }
 .dshsec-estimate dd { margin: 0; font-size: 17px; line-height: 26px; font-variant-numeric: tabular-nums; }
+.dshsec-nowrap { white-space: nowrap; }
 
 /* Radio cards (scan depth, AI review choice). Native radios keep arrow-key behavior. */
 .dshsec-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }

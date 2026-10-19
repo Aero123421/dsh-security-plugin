@@ -13,6 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isBuiltin } from 'node:module'
@@ -35,7 +36,32 @@ const REQUIRED = [
   'THIRD_PARTY_NOTICES.md',
   'SECURITY.md',
   'CHANGELOG.md',
+  'vendor/tree-sitter-python/LICENSE',
+  'vendor/tree-sitter-python/NOTICE.md',
+  'vendor/tree-sitter-python/tree-sitter-python.LICENSE',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Linux-ARM64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Linux-X64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-macOS-ARM64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-macOS-X64/parser.so',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Windows-X64/parser.so',
 ]
+/**
+ * SHA-256 of `parser.so` inside `@ast-grep/lang-python@0.0.6`
+ * (https://registry.npmjs.org/@ast-grep/lang-python/-/lang-python-0.0.6.tgz,
+ * integrity sha512-eF/bEBspmrxdVuPNihvZDyyJx5qtIpGEMz9l1nNQmrji7NZcUiRNC8WwzYyQCBdy1mj8HZ0Tn4I2q3gp/6Bkiw==).
+ */
+const PYTHON_PREBUILD_SHA256 = {
+  'vendor/tree-sitter-python/prebuilds/prebuild-Linux-ARM64/parser.so':
+    '649202886ae35b74c0bd592d3e7894863ada06887112f0b57a295032a553ce4d',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Linux-X64/parser.so':
+    '44fb5deaf239c37fe4fd281b848aff98bcd28051e8c7f332e5336c73861b86f0',
+  'vendor/tree-sitter-python/prebuilds/prebuild-macOS-ARM64/parser.so':
+    '8dfebc0b31573358675b369fc31ac9a5b157bd1638b4ba5ae12dcb615c4e5d44',
+  'vendor/tree-sitter-python/prebuilds/prebuild-macOS-X64/parser.so':
+    'b392204ec25979026fef4b5720f983da1a097e9ee904b582d9eaf843c16e66d2',
+  'vendor/tree-sitter-python/prebuilds/prebuild-Windows-X64/parser.so':
+    '3d9ea3003fec3ba346ab60c4aaee7f5654cb597ff943df82ce07c9685a08cd59',
+}
 /** License files esbuild writes for `legalComments: 'linked'` when a bundled package has legal comments. */
 const OPTIONAL = [/^lib\/[^/]+\.LEGAL\.txt$/]
 /** Paths that must never ship; reported with a clearer message than "unexpected". */
@@ -51,7 +77,8 @@ const LEAKS = [
 ]
 
 const CLIENT_PREFIX = 'window.__ModuleLoader__.load('
-const CLIENT_MAX_BYTES = 300 * 1024
+/** en/ja/zh UI copy is inlined in this bundle. */
+const CLIENT_MAX_BYTES = 320 * 1024
 
 const problems = []
 const warnings = []
@@ -85,6 +112,15 @@ for (const file of packed.keys()) {
       ? `${file} leaked into the tarball; development files must not ship`
       : `unexpected file in the tarball: ${file}`,
   )
+}
+for (const [file, expected] of Object.entries(PYTHON_PREBUILD_SHA256)) {
+  if (!packed.has(file)) continue
+  const digest = createHash('sha256')
+    .update(readFileSync(join(root, file)))
+    .digest('hex')
+  if (digest !== expected) {
+    fail(`${file} sha256 ${digest} does not match @ast-grep/lang-python@0.0.6 (${expected})`)
+  }
 }
 for (const name of readdirSync(join(root, 'lib'))) {
   const file = `lib/${name}`

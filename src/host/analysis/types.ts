@@ -3,8 +3,10 @@
  * crosses the wire; the RPC layer maps these to `shared/contracts.ts` shapes.
  */
 
-import type { AnalyzerId, AnalyzerStatus } from '../../shared/contracts.ts'
+import type { AnalyzerId, AnalyzerStatus, ExcludeReason } from '../../shared/contracts.ts'
 import type { CodeRef, FindingCategory, Severity } from '../../shared/domain.ts'
+
+export type { ExcludeReason }
 
 export type Language =
   | 'javascript'
@@ -31,20 +33,6 @@ export type Language =
   | 'markdown'
   | 'env'
   | 'other'
-
-/** Why a path is not part of the analyzed snapshot. */
-export type ExcludeReason =
-  | 'default-ignore'
-  | 'gitignore'
-  | 'user-exclude'
-  | 'binary'
-  | 'too-large'
-  | 'symlink'
-  | 'outside-root'
-  | 'limit-files'
-  | 'limit-bytes'
-  | 'limit-entries'
-  | 'unreadable'
 
 export interface SnapshotFile {
   /** Workspace-relative POSIX path; never absolute, never contains `..`. */
@@ -80,6 +68,8 @@ export interface Snapshot {
   readonly totalBytes: number
   /** All visited excluded paths, even when the displayed exclusion list is capped. */
   readonly excludedCount?: number
+  /** Counts behind `excludedCount`, not limited by the excluded-path cap. */
+  readonly excludedByReason?: Readonly<Partial<Record<ExcludeReason, number>>>
   /** Known unvisited entries (lower bound; unopened directory descendants are unknown). */
   readonly unvisitedEntries?: number
   /** Queued directories not opened due to the walk budget (not a count of their files). */

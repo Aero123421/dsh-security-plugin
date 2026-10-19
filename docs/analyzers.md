@@ -273,9 +273,12 @@ Builtin and external results for the same location and category are de-duplicate
 
 ## The ast-grep engine
 
-`@ast-grep/napi` (optional dependency) gives tree-sitter ASTs for JavaScript, TypeScript and TSX. Python ASTs also
-need `@ast-grep/lang-python` (also a pinned optional dependency). Its bundled platform prebuild is loaded without
-requiring tree-sitter-cli; unsupported platforms fall back to the tokenizer. Files over 512 KiB, and files whose
-parse has large error regions, also use the tokenizer. The `ast-grep` analyzer status in bootstrap and Coverage
-states whether Python ASTs are available separately from the JavaScript/TypeScript engine. Set
+`@ast-grep/napi` (optional dependency) gives tree-sitter ASTs for JavaScript, TypeScript and TSX. Python ASTs use
+the tree-sitter-python 0.25.0 prebuilds in `vendor/tree-sitter-python` (Linux x64/arm64, macOS x64/arm64, Windows
+x64). Those files are loaded by path; the plugin does not depend on `@ast-grep/lang-python` and does not run a
+grammar build during install. On musl, the plugin does not read `parser.so` and uses `python-fallback`.
+This is a fail-safe change. A crash on musl was not reproduced on hardware. Not yet checked: an old-glibc
+machine, an arm64 machine, macOS, Windows, and whether `lib/` rebuilt from source matches the committed output.
+Known P3: at 360px or narrower, the page heading is truncated. Settings and Coverage name `python-fallback`
+when the Python grammar is not used, even though the JavaScript engine is still available. Files over 512 KiB, and files whose parse has large error regions, also use the tokenizer. Set
 `disableAstGrep: true` to force the tokenizer everywhere.

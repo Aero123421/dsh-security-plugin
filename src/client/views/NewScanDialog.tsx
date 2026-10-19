@@ -1,5 +1,12 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { ModelOption, ProviderOption, RpcFailure, ScanEstimate, WorkspaceSummary } from '../../shared/contracts.ts'
+import {
+  EXCLUDE_REASONS,
+  type ModelOption,
+  type ProviderOption,
+  type RpcFailure,
+  type ScanEstimate,
+  type WorkspaceSummary,
+} from '../../shared/contracts.ts'
 import { type RoleName, SCAN_MODES, type ScanMode } from '../../shared/domain.ts'
 import { DEFAULT_SETTINGS, type ModelRef } from '../../shared/settings.ts'
 import { Button } from '../components/Button.tsx'
@@ -11,7 +18,7 @@ import { ProjectSelect } from '../components/ProjectSelect.tsx'
 import { useController, useSecurity, useT } from '../context.tsx'
 import type { NewScanRequest } from '../controller.ts'
 import { DASH, formatCompact, formatNumber } from '../format.ts'
-import { errorText } from '../i18n.ts'
+import { DICTIONARIES, errorText, type Translator } from '../i18n.ts'
 import {
   describeRoute,
   hunterModel,
@@ -22,6 +29,42 @@ import {
 } from '../models.ts'
 
 import { AddProjectFolder } from './AddProjectFolder.tsx'
+
+/** Keep each compact token count, including its unit, on one line. */
+export function TokenRange(props: { readonly template: string; readonly min: string; readonly max: string }) {
+  const parts = props.template.split(/\{(min|max)\}/)
+  return parts.map(part => {
+    if (part === 'min' || part === 'max') {
+      return (
+        <span key={part} className="dshsec-nowrap">
+          {part === 'min' ? props.min : props.max}
+        </span>
+      )
+    }
+    if (part === '') return null
+    return <span key={`text:${part}`}>{part}</span>
+  })
+}
+
+function excludedReasonLine(tr: Translator, estimate: ScanEstimate): string | undefined {
+  const listed = estimate.excludedByReason
+  if (Array.isArray(listed) && listed.length > 0) {
+    const byReason = new Map(listed.map(item => [item.reason, item.count]))
+    const parts = EXCLUDE_REASONS.flatMap(reason => {
+      const count = byReason.get(reason) ?? 0
+      if (!(count > 0)) return []
+      const label = tr.lookup(`newScan.excludedReason.${reason}`, { count: formatNumber(count, tr.intlLocale) })
+      return label ? [label] : []
+    })
+    if (parts.length > 0) {
+      return tr.t('newScan.excludedList', { reasons: parts.join(tr.lang === 'en' ? ', ' : '、') })
+    }
+  }
+  if (typeof estimate.excluded === 'number' && estimate.excluded > 0) {
+    return tr.t('newScan.excludedUnknown', { count: formatNumber(estimate.excluded, tr.intlLocale) })
+  }
+  return undefined
+}
 
 const EMPTY_WORKSPACES: readonly WorkspaceSummary[] = []
 const EMPTY_PROVIDERS: readonly ProviderOption[] = []
@@ -548,6 +591,7 @@ function EstimatePanel(props: {
   const tr = useT()
   const locale = tr.intlLocale
   const { estimate, ai } = props
+  const excludedLine = estimate.status === 'ready' ? excludedReasonLine(tr, estimate.value) : undefined
   return (
     <section className="dshsec-subsection" aria-busy={estimate.status === 'loading'}>
       <h3 className="dshsec-h3">{tr.t('newScan.estimateTitle')}</h3>
@@ -573,10 +617,11 @@ function EstimatePanel(props: {
                 <div>
                   <dt>{tr.t('newScan.tokens')}</dt>
                   <dd>
-                    {tr.t('newScan.tokensRange', {
-                      min: formatCompact(estimate.value.tokens?.min, locale),
-                      max: formatCompact(estimate.value.tokens?.max, locale),
-                    })}
+                    <TokenRange
+                      template={DICTIONARIES[tr.lang]['newScan.tokensRange']}
+                      min={formatCompact(estimate.value.tokens?.min, locale)}
+                      max={formatCompact(estimate.value.tokens?.max, locale)}
+                    />
                   </dd>
                 </div>
               </>
@@ -600,11 +645,7 @@ function EstimatePanel(props: {
               </dd>
             </div>
           </dl>
-          {estimate.value.excluded > 0 ? (
-            <p className="dshsec-hint">
-              {tr.t('newScan.excluded', { count: formatNumber(estimate.value.excluded, locale) })}
-            </p>
-          ) : null}
+          {excludedLine ? <p className="dshsec-hint">{excludedLine}</p> : null}
           {estimate.value.truncated ? <Callout tone="warn">{tr.t('newScan.truncated')}</Callout> : null}
           {ai ? (
             <p className="dshsec-hint">

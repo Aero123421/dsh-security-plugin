@@ -389,9 +389,12 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
   let excludedCount = 0
   let unvisitedEntries = 0
   let unvisitedDirectories = 0
+  const excludedByReason: Partial<Record<ExcludeReason, number>> = {}
 
   const exclude = (path: string, reason: ExcludeReason, reserved = false): void => {
     excludedCount++
+    excludedByReason[reason] = (excludedByReason[reason] ?? 0) + 1
+    // The path list is capped. Counts above are not, so estimates can name every reason.
     if (excluded.length < EXCLUDED_CAP + (reserved ? EXCLUDED_DEPENDENCY_RESERVE : 0)) excluded.push({ path, reason })
   }
 
@@ -563,6 +566,7 @@ export async function takeSnapshot(rootInput: string, options: SnapshotOptions):
     excluded,
     totalBytes,
     excludedCount,
+    excludedByReason,
     ...(unvisitedEntries ? { unvisitedEntries } : {}),
     ...(unvisitedDirectories ? { unvisitedDirectories } : {}),
     truncated,
