@@ -15,7 +15,7 @@ import {
   rootName,
   secretContext,
 } from './helpers.ts'
-import type { ArgFact, CallFact, FileModel, Span } from './model.ts'
+import type { ArgFact, CallFact, FileModel, MemberAssignFact, Span } from './model.ts'
 import {
   type Classification,
   cweUrl,
@@ -160,7 +160,7 @@ const XSS_SERVER: RuleMeta = {
   cwe: 'CWE-79',
   severity: 'high',
   message:
-    'Request data is written into an HTTP response as raw text/HTML (`res.send`/`res.write`). An attacker can make a victim open a link whose input contains `<script>`, which then runs in the victim’s browser with their session on your site.',
+    'Request data is written into an HTTP response as raw text/HTML (`res.send`/`res.write`, Koa `ctx.body`). An attacker can make a victim open a link whose input contains `<script>`, which then runs in the victim’s browser with their session on your site.',
   recommendation:
     'Return JSON with `res.json()`, or render HTML with a template engine that escapes by default. If you must build HTML by hand, escape every dynamic value (for example with `escape-html`) and set a Content Security Policy.',
   references: [REF.injection, cweUrl('CWE-79')],
@@ -444,6 +444,23 @@ const BACKDOOR: RuleMeta = {
   references: [REF.authn, cweUrl('CWE-798'), cweUrl('CWE-287')],
 }
 
+const XXE: RuleMeta = {
+  id: 'js.xxe',
+  title: 'XML external entity (XXE) processing',
+  sinkTitle: 'XML parsed with entity substitution enabled (check where it comes from)',
+  category: 'injection',
+  cwe: 'CWE-611',
+  severity: 'high',
+  sinkSeverity: 'low',
+  message:
+    'Request data is parsed by libxmljs with `noent: true`, which substitutes entities. A document that declares an external entity (`<!ENTITY x SYSTEM "file:///etc/passwd">`) makes the server read local files or fetch URLs and put the content into the parsed result.',
+  sinkMessage:
+    'libxmljs parses a value that is not fixed with `noent: true`. If it can come from users, external entities can read local files or reach internal URLs.',
+  recommendation:
+    'Leave `noent` off (the default) and do not enable `dtdload`/`dtdvalid` for untrusted XML, or use a parser that never resolves external entities (`fast-xml-parser`, `@xmldom/xmldom`).',
+  references: [REF.misconfig, cweUrl('CWE-611')],
+}
+
 /** Every rule of this rule set (several matchers may share one id). */
 export const JS_RULES: readonly RuleMeta[] = [
   SQLI,
@@ -472,6 +489,7 @@ export const JS_RULES: readonly RuleMeta[] = [
   PROTO,
   REDOS,
   BACKDOOR,
+  XXE,
 ]
 
 // ---------------------------------------------------------------------------
@@ -481,6 +499,8 @@ export const JS_RULES: readonly RuleMeta[] = [
 const SQL_METHODS: ReadonlySet<string> = new Set([
   'query',
   'execute',
+  // postgres.js runs `sql.unsafe(text)` as raw SQL (its tagged template is parameterized).
+  'unsafe',
   'raw',
   '$queryRawUnsafe',
   '$executeRawUnsafe',
@@ -605,6 +625,7 @@ export function jsRules(model: FileModel, ctx: FileContext): void {
     prototypePollution(chk, call, q)
     regexInjection(chk, call)
     sessionSecret(chk, call, q)
+    xxe(chk, call, q)
   }
   propertyRules(chk)
   memberAssignRules(chk)
@@ -839,7 +860,7 @@ function pathTraversal(chk: Checker, call: CallFact, q: string): void {
 function ssrf(chk: Checker, call: CallFact, q: string): void {
   const head = rootName(call.callee)
   const imported = chk.model.imports.some(imp => imp.bindings.some(b => b.local === head))
-  if (!(HTTP_GLOBALS.test(q) || (imported && HTTP_IMPORTED.test(q)))) return
+  if (!(HTTP_GLOBALS.test(q) || (imported && HTTP_IMPORTED.test(q)) || isNestHttpCall(chk, call))) return
   if (call.isNew) return
   let target = chk.positional(call, 0)
   if (!target) return
@@ -853,6 +874,17 @@ function ssrf(chk: Checker, call: CallFact, q: string): void {
     if (!target) return
   }
   reportUrlTaint(chk, SSRF, call, target)
+}
+
+/**
+ * NestJS `HttpService` (`@nestjs/axios`) injected as a class property: `this.http.get(url)`,
+ * `this.httpService.axiosRef.post(url)`.
+ */
+function isNestHttpCall(chk: Checker, call: CallFact): boolean {
+  if (!/^(?:get|post|put|patch|delete|head|request)$/.test(call.name)) return false
+  const m = /^this\.([A-Za-z_$][\w$]*)(?:\.axiosRef)?$/.exec(call.receiver)
+  if (!m || !chk.imports(/^@nestjs\/(?:axios|common)$/)) return false
+  return new RegExp(`(?<![\\w$])${m[1]!.replace(/\$/g, '\\$')}\\s*:\\s*HttpService\\b`).test(chk.model.source)
 }
 
 function openRedirect(chk: Checker, call: CallFact, q: string): void {
@@ -922,6 +954,17 @@ function serverXss(chk: Checker, call: CallFact): void {
   if (taint?.origin !== 'request') return
   if (PLAIN_CONTENT_TYPE.test(chk.scopeText(call.start))) return
   chk.report(XSS_SERVER, call, { kind: 'vulnerability', confidence: taint.direct ? 'high' : 'medium', taint })
+}
+
+/** libxmljs `parseXml`/`parseXmlString` with `noent: true` substitutes (external) entities. */
+function xxe(chk: Checker, call: CallFact, q: string): void {
+  if (!/^libxmljs2?\.(?:parseXml|parseXmlString|parseXmlAsync)$/.test(q)) return
+  const options = chk.positional(call, 1)
+  if (!options || !chk.ex.isObjectLiteral(options)) return
+  const noent = chk.ex.prop(options, 'noent')
+  if (!noent || !chk.ex.isWord(noent, 'true')) return
+  const xml = chk.positional(call, 0)
+  if (xml) chk.check(XXE, call, chk.ex.taintResolved(xml), chk.dynamic(xml))
 }
 
 function domXssCall(chk: Checker, call: CallFact): void {
@@ -1458,8 +1501,29 @@ function namesPlainCookie(chk: Checker, objectStart: number): boolean {
   return name !== undefined && name !== '' && !AUTH_COOKIE_NAME.test(name)
 }
 
+/** Koa answers a string body as HTML when it starts with `<`, or when `ctx.type` says so. */
+const KOA_HTML_TYPE = /\bctx\.(?:response\.)?type\s*=\s*['"`](?:html|text\/html)/
+const KOA_OTHER_TYPE = /\bctx\.(?:response\.)?type\s*=\s*['"`](?!html|text\/html)/
+
+/** `ctx.body = '<p>' + ctx.query.name` in a Koa handler. */
+function koaBody(chk: Checker, assign: MemberAssignFact): void {
+  const value = assign.value
+  if (chk.ex.isObjectLiteral(value) || chk.ex.isArrayLiteral(value) || chk.ex.wholeBody(value)) return
+  const taint = chk.ex.taintResolved(value)
+  if (taint?.origin !== 'request') return
+  const scope = chk.scopeText(assign.start)
+  if (KOA_OTHER_TYPE.test(scope) || PLAIN_CONTENT_TYPE.test(scope)) return
+  const markup = chk.values(value).some(v => /^\s*(?:`|'|")\s*</.test(chk.text(v)))
+  if (!markup && !KOA_HTML_TYPE.test(scope)) return
+  chk.report(XSS_SERVER, assign, { kind: 'vulnerability', confidence: taint.direct ? 'high' : 'medium', taint })
+}
+
 function memberAssignRules(chk: Checker): void {
   for (const assign of chk.model.memberAssigns) {
+    if (assign.op === '=' && /^ctx\.(?:response\.)?body$/.test(assign.target)) {
+      koaBody(chk, assign)
+      continue
+    }
     if (assign.prop === 'innerHTML' || assign.prop === 'outerHTML') {
       if (assign.op === '=' || assign.op === '+=') htmlSink(chk, assign, assign.value)
       continue

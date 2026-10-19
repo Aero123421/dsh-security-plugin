@@ -15,7 +15,7 @@
  */
 
 import { allOf, anyOf, type Charset, findGuards, type Guard, guardAt, subjectText } from './guards.ts'
-import { JS_KEYWORDS, PY_KEYWORDS, stringContent, type Token, tokenRange } from './lexer.ts'
+import { JS_KEYWORDS, PY_KEYWORDS, stringContent, type Token, tokenAt, tokenRange } from './lexer.ts'
 import {
   type AssignFact,
   type CallFact,
@@ -1243,12 +1243,13 @@ export class Expr {
     if (this.model.lang === 'js') {
       for (const param of fn.params) {
         const dec = param.decorators.find(d =>
-          /^(?:Body|Query|Param|Params|Headers|Req|Request|UploadedFiles?|Cookies)$/.test(d.replace(/^.*\./, '')),
+          /^(?:Body|Query|Param|Params|Headers|Req|Request|UploadedFiles?|Cookies|Args?)$/.test(d.replace(/^.*\./, '')),
         )
         if (!dec) continue
         if (/Parse(?:Int|Float|Bool|UUID|Enum|Array)Pipe/.test(this.text(param))) continue
         for (const name of param.names) out.set(name, { source: `@${dec}() ${name}`, direct: false, origin: 'request' })
       }
+      for (const [name, source] of this.#apiArguments(fn)) out.set(name, { source, direct: false, origin: 'request' })
     } else {
       const route = fn.decorators.some(d => PY_ROUTE_DECORATOR.test(d.name))
       const converters = this.#flaskSafeParams(fn)
@@ -1277,6 +1278,52 @@ export class Expr {
     }
     this.#paramTaint.set(fn, out)
     return out
+  }
+
+  /**
+   * Client-chosen arguments of API frameworks that are not request objects: a tRPC procedure's `input`
+   * (`.input(z.object({ q: z.string() })).query(({ input }) => …)`, when the schema admits text) and the
+   * arguments of a GraphQL resolver in a `Query`/`Mutation`/`Subscription` map (`user: (_, args) => …`).
+   */
+  #apiArguments(fn: FnFact): [string, string][] {
+    if (fn.params[0]?.names.includes('input')) {
+      // The innermost call taking `fn` as an argument (not `router({ … })` around it).
+      const call = this.model.calls.findLast(c => c.args.some(a => a.start <= fn.start && fn.end <= a.end))
+      if (call && /^(?:query|mutation|subscription)$/.test(call.name) && /[pP]rocedure\b/.test(call.receiver)) {
+        const schema = /\.input\((.*)\)$/s.exec(call.receiver)?.[1]
+        const text = schema !== undefined && /\bz\.(?:string|any|unknown|record)\(|\bstring\(\)/.test(schema)
+        return text ? [['input', 'tRPC input']] : []
+      }
+    }
+    const args = fn.params[1]
+    if (!args || args.names.length === 0 || !this.#inResolverMap(fn)) return []
+    return args.names.map(name => [name, `GraphQL argument '${name}'`])
+  }
+
+  /** `fn` is a property of an object literal under a `Query:`/`Mutation:`/`Subscription:` key. */
+  #inResolverMap(fn: FnFact): boolean {
+    const { tokens, match } = this.model
+    for (let k = tokenAt(tokens, fn.start) - 1, steps = 0; k > 1 && steps < 2000; k--, steps++) {
+      const t = tokens[k]!
+      if (t.type !== 'punct') continue
+      if (t.value === ')' || t.value === ']' || t.value === '}') {
+        const open = match[k]!
+        if (open < 0) return false
+        k = open
+        continue
+      }
+      if (t.value === '(' || t.value === '[') return false
+      if (t.value === '{') {
+        const key = tokens[k - 2]!
+        return (
+          tokens[k - 1]!.type === 'punct' &&
+          tokens[k - 1]!.value === ':' &&
+          key.type === 'ident' &&
+          /^(?:Query|Mutation|Subscription)$/.test(key.value)
+        )
+      }
+    }
+    return false
   }
 
   /** Flask `<int:id>`-style converters make a parameter numeric. */

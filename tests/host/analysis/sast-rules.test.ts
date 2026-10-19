@@ -186,6 +186,13 @@ const EXAMPLES: Readonly<Record<string, Example>> = {
     kind: 'vulnerability',
     negative: "app.post('/a', async (req, res) => { if (await bcrypt.compare(req.body.password, hash)) ok() })",
   },
+  'js.xxe': {
+    path: JS,
+    positive:
+      "const libxmljs = require('libxmljs')\napp.post('/x', (req, res) => libxmljs.parseXml(req.body, { noent: true }))",
+    kind: 'vulnerability',
+    negative: "const libxmljs = require('libxmljs')\napp.post('/x', (req, res) => libxmljs.parseXml(req.body))",
+  },
   'py.sql-injection': {
     path: PY,
     positive: `${FLASK}    cursor.execute("SELECT * FROM users WHERE name = '%s'" % request.args['n'])\n`,
@@ -305,6 +312,26 @@ const EXAMPLES: Readonly<Record<string, Example>> = {
     positive: `${FLASK}    if request.form['password'] == 'Adm1n!pass':\n        return 'ok'\n`,
     kind: 'vulnerability',
     negative: `${FLASK}    if check_password_hash(user.pw_hash, request.form['password']):\n        return 'ok'\n`,
+  },
+  'py.reflected-xss': {
+    path: PY,
+    positive: `${FLASK}    return f"<p>Results for {request.args['q']}</p>"\n`,
+    kind: 'vulnerability',
+    negative: `from markupsafe import escape\n${FLASK}    return f"<p>Results for {escape(request.args['q'])}</p>"\n`,
+  },
+  'py.cors-misconfiguration': {
+    path: 'app/main.py',
+    positive:
+      'from fastapi.middleware.cors import CORSMiddleware\napp.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True)\n',
+    kind: 'vulnerability',
+    negative:
+      'from fastapi.middleware.cors import CORSMiddleware\napp.add_middleware(CORSMiddleware, allow_origins=["https://app.example.com"], allow_credentials=True)\n',
+  },
+  'py.xxe': {
+    path: PY,
+    positive: `from lxml import etree\n${FLASK}    etree.fromstring(request.data, etree.XMLParser(resolve_entities=True))\n`,
+    kind: 'vulnerability',
+    negative: `from lxml import etree\n${FLASK}    etree.fromstring(request.data, etree.XMLParser(resolve_entities=False))\n`,
   },
   'docker.add-remote-url': {
     path: 'Dockerfile',

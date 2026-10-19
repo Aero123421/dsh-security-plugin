@@ -20,6 +20,24 @@ changes; they are called out explicitly.
 - Operator setting `llmFirstChunkTimeoutMs` (default 10 minutes): how long a model request may wait for its first
   stream chunk. `llmIdleTimeoutMs` (default 2 minutes) now applies only once the stream has started, so queued
   requests at busy providers are no longer abandoned after 2 minutes.
+- New SAST rules `js.xxe` (libxmljs with `noent: true`), `py.xxe` (lxml parser with `resolve_entities=True`),
+  `py.reflected-xss` (request data in an HTML string returned by a Flask view or sent with `make_response`,
+  Django `HttpResponse` or `HTMLResponse`) and `py.cors-misconfiguration` (`CORSMiddleware` with `"*"` or a
+  catch-all regex plus credentials, Flask-CORS with credentials and no origin list, django-cors-headers allowing
+  all origins with credentials).
+- More sinks and sources: postgres.js `sql.unsafe()`, asyncpg and `databases` fetch methods with SQL text,
+  werkzeug `FileStorage.save()` under the upload's own name, `tarfile` extraction of an uploaded archive without
+  `filter=` (tar slip), Jinja2 `Environment().from_string()`, NestJS `HttpService`, Koa `ctx.body` HTML strings,
+  and GraphQL resolver arguments, NestJS/type-graphql `@Args()` and tRPC procedure `input` as request data.
+- Give the AI review a hint for SSRF, path traversal and open redirect sinks whose value has no visible source,
+  such as a webhook URL loaded from the database or a file name passed in by a caller. These rules used to stay
+  silent unless request data was visible; they now emit a low-severity `sink` (never a finding) for dynamic
+  values, except for fixed hosts, same-site paths, sanitized file names, framework-built URLs, metadata-only file
+  calls and requests made from browser code. Findings are unchanged.
+- Scan unquoted upper-case environment settings in YAML for secrets (`- JWT_SECRET=…` and `POSTGRES_PASSWORD: …`
+  in docker-compose, CI `env:` blocks, Kubernetes Secret data), reported as `env-secret`. These values are now
+  also redacted when a compose file or manifest is shown to the AI review. Values that only point at a secret
+  (`${VAR}`, YAML anchors and tags, SOPS `ENC[…]`, ARNs and secret-manager paths) are ignored.
 
 ### Changed
 
@@ -74,6 +92,19 @@ changes; they are called out explicitly.
   rejects it is retried without one.
 - When a planned independent review did not complete (budget, failure, review cap), a hunter's verified-code
   dismissal of a rule hit now makes it `inconclusive`, as it already did without a reviewer.
+- Endpoint review tasks of layered apps target the handler file and the route file instead of only the
+  `*.routes.ts` file. Task keys of such endpoint groups change from the route file to the handler file.
+- Tell every endpoint, sensitive-file and sweep review to look for injection, OS command execution, SSRF, path
+  traversal and XSS. Sweeps and sensitive-file reviews were asked only about authentication, authorization,
+  business logic, crypto and configuration, and endpoint reviews added other categories only from rule hits in
+  the handler file; rule hits in the route file now count too.
+- Quick scans also verify medium sinks of high and critical rules (dynamic SQL, shell commands, code evaluation,
+  unsafe deserialization), which in layered code are often the only trace of an injection; before, Quick
+  triaged only vulnerability hits.
+- Choose the up to six sensitive files that Deep and Research review on their own by what their names say they
+  enforce (`requireRole.ts`, `tenantScope.ts`, `tokens.ts`, `crypto.ts`, `upload.ts`, configuration
+  directories) before size, so large CRUD repositories and utility middleware no longer take those slots.
+  Camel-case names (`requireAuth`) now count.
 
 ### Fixed
 
@@ -107,18 +138,7 @@ changes; they are called out explicitly.
   under that prefix instead of to every route; other reads of the request path give none.
 - Locate route handlers imported from controller modules (`import * as controller` then `controller.getUser`,
   named and default imports, exported objects, classes and instances, CommonJS exports, `export *` barrels).
-  Layered Express apps had almost no handler located, so endpoint review tasks pointed only at `*.routes.ts`
-  files without logic; they now target the handler file and the route file. Task keys of such endpoint groups
-  change from the route file to the handler file.
-- Tell every endpoint, sensitive-file and sweep review to look for injection, OS command execution, SSRF, path
-  traversal and XSS. Sweeps and sensitive-file reviews were asked only about authentication, authorization,
-  business logic, crypto and configuration, and endpoint reviews added other categories only from rule hits in
-  the handler file; rule hits in the route file now count too.
-- Give the AI review a hint for SSRF, path traversal and open redirect sinks whose value has no visible source,
-  such as a webhook URL loaded from the database or a file name passed in by a caller. These rules used to stay
-  silent unless request data was visible; they now emit a low-severity `sink` (never a finding) for dynamic
-  values, except for fixed hosts, same-site paths, sanitized file names, framework-built URLs, metadata-only file
-  calls and requests made from browser code. Findings are unchanged.
+  Layered Express apps had almost no handler located.
 - Follow request data through helpers imported by name, such as `import { join } from 'node:path'` then
   `readFile(join(dir, req.params.name))`, `import * as p from 'path'`, and Python `from os.path import join`.
   Taint only passed through these helpers when they were called as `path.join(...)`.
@@ -138,13 +158,6 @@ changes; they are called out explicitly.
   the rule hits that Quick mode triages.
 - Stop reporting SQL injection for a Django view parameter that every URLconf route fills through `<int:…>` or
   `<uuid:…>` (or a digits-only `re_path` group); the URLconf in another file is now read before the views.
-- Quick scans also verify medium sinks of high and critical rules (dynamic SQL, shell commands, code evaluation,
-  unsafe deserialization), which in layered code are often the only trace of an injection; before, Quick
-  triaged only vulnerability hits.
-- Choose the up to six sensitive files that Deep and Research review on their own by what their names say they
-  enforce (`requireRole.ts`, `tenantScope.ts`, `tokens.ts`, `crypto.ts`, `upload.ts`, configuration
-  directories) before size, so large CRUD repositories and utility middleware no longer take those slots.
-  Camel-case names (`requireAuth`) now count.
 - Find MD5/SHA-1 password hashing split over statements or named by its function (`const h =
   createHash('md5')` then `h.update(pw)`, `def hash_password(raw): return md5(...)`, a digest compared with
   `user.password_hash`), and random tokens built in callbacks (`newApiKey() { return [...].map(() =>
@@ -155,12 +168,9 @@ changes; they are called out explicitly.
   Next.js `cookies()`, or from a same-file helper that reads the `Authorization` header or a cookie
   (`jwt.decode(getBearer(req))`). Only functions that read the `Authorization` header themselves were checked,
   so admin checks on a decoded cookie token were missed.
-- Find more hard-coded secrets without new false positives on look-alikes: database URLs with a driver scheme
-  (`postgresql+asyncpg://`), Mailgun `key-…` keys and hand-written secrets such as `app-jwt-secret-2024` (both
-  were dropped as identifiers), and unquoted upper-case environment settings in YAML (`- JWT_SECRET=…` and
-  `POSTGRES_PASSWORD: …` in docker-compose, Kubernetes Secret data). These values are now also redacted when a
-  compose file or manifest is shown to the AI review. Values that only point at a secret (`${VAR}`, YAML anchors
-  and tags, SOPS `ENC[…]`, ARNs and secret-manager paths, Helm `existingSecret`) are ignored.
+- Find hard-coded secrets that were dropped: database URLs with a driver scheme (`postgresql+asyncpg://`), and
+  Mailgun `key-…` keys and hand-written secrets such as `app-jwt-secret-2024`, which the identifier filter took
+  for names. Helm `existingSecret` references are ignored.
 - Correct the analyzer reference: `js.prototype-pollution`, `js.template-unescaped-output`, `js.unsafe-yaml-load`
   and the Jinja/Django `|safe` and `autoescape off` template checks only produce review hints, never findings.
 

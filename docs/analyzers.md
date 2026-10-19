@@ -83,7 +83,7 @@ fingerprint is retained for matching across scans. Different credentials, even o
 
 ## Pattern rules (SAST, `src/host/analysis/sast/`)
 
-52 rules. JS/TS and Python files are modeled with the native tree-sitter engine (`@ast-grep/napi`) when it is
+56 rules. JS/TS and Python files are modeled with the native tree-sitter engine (`@ast-grep/napi`) when it is
 available, and with a built-in tokenizer otherwise. Both modes run the same rules and are tested side by side.
 Template and config rules match text. "Sink severity" is the severity of the `sink` variant; rules without one only
 report when request data reaches them. Rules marked "review hint only" never produce a finding: their matches are
@@ -123,10 +123,18 @@ rules cover `.ejs`, `.hbs/.handlebars/.mustache`, `.pug/.jade`, Vue `v-html` and
 | `js.prototype-pollution` | Deep merge of user input | CWE-1321 | – (review hint only) | medium |
 | `js.regex-injection` | Regular expression built from user input (ReDoS) | CWE-1333 | medium | – |
 | `js.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
+| `js.xxe` | XML external entity (XXE) processing: libxmljs `parseXml`/`parseXmlString` with `noent: true` | CWE-611 | high | low |
 
-SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string construction and Sequelize
-`literal(...)` (including named imports). Static placeholder predicates with separate parameter objects and
-object filters are not SQL text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
+SQL injection checks include TypeORM-style `where`/`andWhere`/`orWhere` string construction, Sequelize
+`literal(...)` (including named imports) and postgres.js `sql.unsafe(...)` (its tagged template is parameterized
+and not a sink). Static placeholder predicates with separate parameter objects and object filters are not SQL
+text sinks. Existing Mongo object-filter checks still apply to Mongo-shaped calls.
+
+Besides Express-style request objects, Next.js `params`/`searchParams` and NestJS parameter decorators, request data
+includes GraphQL resolver arguments (functions in a `Query`/`Mutation`/`Subscription` map, NestJS and type-graphql
+`@Args()`/`@Arg()`) and a tRPC procedure's `input` when its `.input()` schema admits strings. `js.ssrf` also covers
+NestJS `HttpService` (`this.http.get(url)`, `this.http.axiosRef.post(url)`), and `js.xss` covers a Koa `ctx.body`
+string that starts with markup or is sent with `ctx.type = 'html'`.
 
 `js.mass-assignment` needs a receiver that writes records: a model class (`User.create`, `db.User.update`), a Prisma
 delegate (`prisma.user`), a model or repository instance (`this.userRepository`, `userModel`, `em`), a Knex builder
@@ -163,7 +171,10 @@ imports) unless the scheme and host are fixed; redirects unless the target is a 
 
 Files: `.py .pyi .pyw`. Template rules cover `.html .jinja .jinja2 .j2 .djhtml .tmpl .tpl` (`|safe`,
 `{% autoescape off %}`); those template matches are review `sink`s only. `py.xss` reports a vulnerability only when
-request data reaches `Markup`/`mark_safe` (or another listed HTML sink) in Python code.
+request data reaches `Markup`/`mark_safe` (or another listed HTML sink) in Python code. `py.reflected-xss` reports
+request data in an HTML string (a literal with markup) that a Flask view returns (in files that import Flask and not
+FastAPI) or that `make_response`, Django `HttpResponse` or `HTMLResponse` sends; a plain-text or JSON content type
+and values built by `Markup(…)`, `format_html()` or `escape()` are left out.
 
 Django view parameters count as request data, except those that every URLconf route in the snapshot fills through
 an `<int:…>` or `<uuid:…>` converter (or a digits-only `re_path` group): those are numbers or UUIDs.
@@ -190,10 +201,21 @@ an `<int:…>` or `<uuid:…>` converter (or a digits-only `re_path` group): tho
 | `py.insecure-random` | Predictable random value used as a secret | CWE-330 | medium | low |
 | `py.mass-assignment` | Mass assignment from request data | CWE-915 | medium | – |
 | `py.hardcoded-credential-check` | Hard-coded credential or backdoor check | CWE-798 | medium | – |
+| `py.reflected-xss` | Reflected cross-site scripting (XSS) | CWE-79 | high | – |
+| `py.cors-misconfiguration` | Permissive CORS with credentials (`CORSMiddleware` with `"*"` or a catch-all regex, Flask-CORS without an origin list, django-cors-headers allow-all) | CWE-942 | medium | – |
+| `py.xxe` | XML external entity (XXE) processing: lxml parser with `resolve_entities=True` | CWE-611 | high | low |
 
 SQLAlchemy `text(...)` is also checked inside `filter(...)`, `where(...)` and `having(...)`. Request data
 interpolated or concatenated into a predicate is a SQL injection sink; constant text with bound parameters is not.
-Standalone text construction, without a recognized execution/query-builder context, is not reported.
+Standalone text construction, without a recognized execution/query-builder context, is not reported. asyncpg and
+`databases` fetch methods (`fetch`, `fetchrow`, `fetchval`, `fetch_all`, `fetch_one`, `fetch_val`, `iterate`) are
+sinks when their text contains SQL.
+
+`py.path-traversal` also covers werkzeug `FileStorage.save()` of an upload whose destination is built from request
+data such as the upload's own `filename`, and `tarfile` `extractall()`/`extract()` of an archive opened from request
+data without `filter=` (tar slip; with `members=` it is a review hint). `zipfile` extraction strips `..` and is not
+reported. `py.template-injection` also covers Jinja2 `Environment().from_string()` and Flask
+`app.jinja_env.from_string()`; a `SandboxedEnvironment` is not reported.
 
 `py.path-traversal`, `py.ssrf` and `py.open-redirect` also emit a low `sink` for a dynamic value whose origin is
 not visible: file operations other than listing and `stat`/`mkdir`/`chmod`-style calls unless every dynamic part
