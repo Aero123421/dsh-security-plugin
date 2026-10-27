@@ -32,7 +32,7 @@ This is a volunteer project without a bug bounty.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x (latest release) | yes |
+| 0.4.x (latest release) | yes |
 | older | no; please upgrade |
 
 While the project is below 1.0, only the latest minor release line gets security fixes.

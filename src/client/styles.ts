@@ -131,7 +131,9 @@ const frame = /* css */ `
 .dshsec-tab[aria-selected='true'] { color: var(--dshsec-text); background: var(--dshsec-fill-strong); }
 .dshsec-tab:focus-visible { outline-offset: 0; }
 @container dshsec-page (max-width: 420px) {
-  .dshsec-tabs { gap: 2px; }
+  .dshsec-head { grid-template-columns: minmax(0, 1fr); justify-items: start; }
+  .dshsec-title { white-space: normal; overflow: visible; text-overflow: clip; }
+  .dshsec-tabs { flex-wrap: wrap; overflow: visible; gap: 2px; }
   .dshsec-tab { padding: 0 8px; }
 }
 .dshsec-tabpanel { min-width: 0; }

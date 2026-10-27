@@ -34,13 +34,14 @@ export function ConfirmDialog(props: {
     <Modal
       title={props.title}
       onClose={props.onClose}
+      dismissible={!busy}
       size="sm"
       role="alertdialog"
       describedBy={bodyId}
       initialFocusRef={cancelRef}
       footer={
         <>
-          <Button ref={cancelRef} onClick={props.onClose}>
+          <Button ref={cancelRef} disabled={busy} onClick={props.onClose}>
             {props.cancelLabel ?? tr.t('common.cancel')}
           </Button>
           <Button variant="danger" busy={busy} onClick={() => void confirm()}>
