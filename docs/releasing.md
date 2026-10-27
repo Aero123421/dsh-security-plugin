@@ -44,7 +44,7 @@ tries to build it on the user's machine.
    ```
 
    `scripts/verify-package.mjs` runs `npm pack --dry-run` and fails if the tarball has a missing or unexpected
-   file, if `lib/client.js` is not in DSH's module-loader format or is 300 KB or larger, or if a `package.json`
+   file, if `lib/client.js` is not in DSH's module-loader format or is 320 KiB or larger, or if a `package.json`
    field DSH needs is wrong.
 6. **Verify in DSH by hand.** Follow [e2e-testing.md](e2e-testing.md) with the lowest supported DSH
    (`@deepseek-ai/dsh@0.2.1-alpha.2`) and, if one exists, the newest 0.2.x:

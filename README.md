@@ -179,7 +179,7 @@ in [docs/configuration.md](docs/configuration.md).
   grammar shipped in this package (Linux and macOS x64/arm64, Windows x64). On musl, the plugin does not read
   `parser.so` and uses `python-fallback`. This is a fail-safe change. A crash on musl was not reproduced on
   hardware. Not yet checked: an old-glibc machine, an arm64 machine, macOS, Windows, and whether `lib/` rebuilt
-  from source matches the committed output. Known P3: at 360px or narrower, the page heading is truncated.
+  from source matches the committed output.
 - Optional external tools: Gitleaks 8.19 or later (older versions use the legacy `detect` command), OSV-Scanner v2
   (v1 also works), Semgrep with a local rules file.
 

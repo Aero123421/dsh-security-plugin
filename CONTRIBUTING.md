@@ -138,5 +138,5 @@ A noisy scanner trains people to ignore it. For deterministic rules we prefer mi
 - Keep each pull request focused. Describe what changed and why, and how you tested it. Fill in the template.
 - `pnpm check` must pass. CI runs it on Linux (Node 22 and 24), macOS and Windows.
 - Add a line under *Unreleased* in [CHANGELOG.md](CHANGELOG.md) for user-visible changes.
-- Do not commit `lib/`, `coverage/` or `bench/results/`.
+- Commit `lib/` when `pnpm build` changes it (`pnpm check:lib` fails if the committed output differs). Do not commit `coverage/` or `bench/results/`.
 - By contributing, you agree that your contribution is licensed under the [MIT License](LICENSE).
