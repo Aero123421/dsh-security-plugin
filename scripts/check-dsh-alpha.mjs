@@ -13,7 +13,8 @@
  *
  * The command needs network, npm, and pnpm. It resolves the `alpha` dist-tag of
  * `@deepseek-ai/dsh`, checks that tag and the 0.2.x prerelease policy, typechecks
- * `tsconfig.test.json` against that release's SDK, and boots a scratch web profile
+ * `tsconfig.test.json` against that release's SDK, runs keyless runtime contract
+ * tests, and boots a scratch web profile
  * far enough to call `getBootstrap`. DevDependency pins stay on the minimum
  * supported release; the typecheck step restores `package.json` and `pnpm-lock.yaml`.
  */
@@ -163,6 +164,8 @@ function typecheckAgainstAlpha(semver, alpha) {
     })
     run('pnpm', ['exec', 'tsc', '-p', 'tsconfig.test.json', '--noEmit'], { cwd: root, timeout: installMs })
     console.log('tsconfig.test.json typechecks against the alpha SDK')
+    run('pnpm', ['exec', 'vitest', 'run', 'tests/host/dsh-runtime.test.ts'], { cwd: root, timeout: installMs })
+    console.log('keyless worker contracts pass against the installed DSH SDK')
   } catch (error) {
     typecheckError = error
   } finally {
