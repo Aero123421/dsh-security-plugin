@@ -8,6 +8,8 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-01
+
 ### Changed
 
 - Update the bundled gitignore matcher from ignore 7.0.12 to 7.0.14. Some unusual wildcard and escaping patterns now match differently; review custom exclusion patterns after updating.
@@ -353,7 +355,8 @@ First public release.
 - Text written by the Host (activity log, analyzer messages, built-in rule descriptions) is in English; the UI and
   report labels are localized.
 
-[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Aero123421/dsh-security-plugin/compare/v0.3.0...v0.4.0
