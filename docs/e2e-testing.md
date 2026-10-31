@@ -140,7 +140,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'content-type: application/json' \
 
 The plugin does not ship a browser test yet. A minimal smoke test would:
 
-1. In `globalSetup`: build, create the scratch `DSH_HOME`, run `dsh plugin --profile web add <checkout>`, start
+1. In `globalSetup`: build, create the scratch `DSH_HOME`, run `dsh plugin --profile web add -w <checkout>`, start
    `dsh --profile web --patch overlay.yml --no-open --port 0`, parse the printed URL, and copy a fixture app
    without its answer key.
 2. Register the project through DSH's own UI (or API), then select the `scripted/oracle` model with the

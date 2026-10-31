@@ -279,6 +279,6 @@ x64). Those files are loaded by path; the plugin does not depend on `@ast-grep/l
 grammar build during install. On musl, the plugin does not read `parser.so` and uses `python-fallback`.
 This is a fail-safe change. A crash on musl was not reproduced on hardware. Not yet checked: an old-glibc
 machine, an arm64 machine, macOS, Windows, and whether `lib/` rebuilt from source matches the committed output.
-Known P3: at 360px or narrower, the page heading is truncated. Settings and Coverage name `python-fallback`
+Settings and Coverage name `python-fallback`
 when the Python grammar is not used, even though the JavaScript engine is still available. Files over 512 KiB, and files whose parse has large error regions, also use the tokenizer. Set
 `disableAstGrep: true` to force the tokenizer everywhere.

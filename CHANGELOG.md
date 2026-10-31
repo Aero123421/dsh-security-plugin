@@ -8,6 +8,12 @@ changes; they are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- At a page width of 420px or less, the heading stays fully visible and the tabs wrap onto another line. Previously the heading was cut off at 360px or narrower, and the last tab could be clipped with no scrollbar.
+- Delete and cancel confirmations stay open while the request is in flight. Esc, the backdrop, and Cancel no longer dismiss the dialog before the result is known, so a failure remains on screen.
+- The Japanese README now matches the scan time limit: expiry during analysis leaves the scan interrupted with an incomplete-coverage gap, and turning off transcript retention stops further saves at the next worker completion.
+
 ## [0.4.2] - 2026-10-19
 
 ### Changed
@@ -26,10 +32,6 @@ changes; they are called out explicitly.
 ### Not yet checked
 
 - An old-glibc machine, an arm64 machine, macOS, Windows, and whether `lib/` rebuilt from source matches the committed output.
-
-### Known
-
-- P3: at 360px or narrower, the page heading is truncated.
 
 ## [0.4.1] - 2026-10-20
 

@@ -1417,7 +1417,7 @@ it('memoizes unchanged finding rows while the keyboard selection moves', async (
   }
 })
 
-it('traps Shift+Tab from the parked dialog container while a confirm request is busy', async () => {
+it('keeps a confirm dialog open while the request is in flight and shows the failure', async () => {
   let resolve!: (value: ReturnType<typeof fail>) => void
   const request = new Promise<ReturnType<typeof fail>>(done => {
     resolve = done
@@ -1446,15 +1446,19 @@ it('traps Shift+Tab from the parked dialog container while a confirm request is 
   })
   await flush()
   expect(document.activeElement).toBe(dialog)
+  const cancel = byText<HTMLButtonElement>(dialog, 'button', 'Cancel')
+  expect(cancel.disabled).toBe(true)
   await act(async () =>
     dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true })),
   )
-  expect(dialog.contains(document.activeElement)).toBe(true)
-  expect(document.activeElement).not.toBe(dialog)
+  expect(document.activeElement).toBe(dialog)
+  await act(async () => dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  expect(close).not.toHaveBeenCalled()
   await act(async () => resolve(fail('security/transport')))
   await flush()
-  // Do not steal focus back from the safe choice the keyboard user selected.
-  expect(document.activeElement).toBe(byText(dialog, 'button', 'Cancel'))
+  expect(dialog.textContent).toContain('Couldn’t reach DSH')
+  expect(cancel.disabled).toBe(false)
+  cancel.focus()
   await act(async () =>
     document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
   )
