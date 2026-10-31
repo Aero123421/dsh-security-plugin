@@ -18,6 +18,8 @@
     "indentWidth": 2,
     "lineWidth": 120
   },
+  "markdown": { "formatter": { "enabled": false } },
+  "yaml": { "formatter": { "enabled": false } },
   "javascript": {
     "formatter": {
       "quoteStyle": "single",
